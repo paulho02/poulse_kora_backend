@@ -1,0 +1,6 @@
+services:
+  backend:
+    image: "poulse_kora_backend-backend:latest"
+
+  frontend:
+    image: "poulse_kora_backend-frontend:latest"

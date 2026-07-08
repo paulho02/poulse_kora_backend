@@ -1,0 +1,45 @@
+exclude: "(frontend/src/generated/|backend/alembic/versions/)"
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.0
+    hooks:
+      - id: ruff
+      - id: ruff-format
+
+  - repo: https://github.com/pycqa/isort
+    rev: 6.0.1
+    hooks:
+      - id: isort
+        name: isort (python)
+        files: backend/
+        types: [file, python]
+        args: [-o, alembic, --src, "backend"]
+      - id: isort
+        files: backend/
+        name: isort (cython)
+        types: [cython]
+      - id: isort
+        files: backend/
+        name: isort (pyi)
+        types: [pyi]
+
+  # Frontend hooks
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: "v2.4.0"
+    hooks:
+      - id: prettier
+        files: frontend/
+        types_or: [javascript, jsx, ts, tsx]
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: "v7.20.0"
+    hooks:
+      - id: eslint
+        files: frontend/
+        types_or: [javascript, jsx, ts, tsx]
