@@ -27,16 +27,17 @@ jobs:
         context: backend
         load: true
 
-    - name: Build frontend
-      id: docker_build_frontend
-      uses: docker/build-push-action@v2
-      with:
-        push: false
-        tags: "poulse_kora_backend-frontend:latest"
-        cache-from: type=gha,scope=ci-test
-        cache-to: type=gha,mode=max,scope=ci-test
-        context: frontend
-        load: true
+    # Frontend disabled for now (unused React Admin app), see docker-compose.yml
+    # - name: Build frontend
+    #   id: docker_build_frontend
+    #   uses: docker/build-push-action@v2
+    #   with:
+    #     push: false
+    #     tags: "poulse_kora_backend-frontend:latest"
+    #     cache-from: type=gha,scope=ci-test
+    #     cache-to: type=gha,mode=max,scope=ci-test
+    #     context: frontend
+    #     load: true
 
     - name: Start containers and run tests
       run: |
@@ -53,17 +54,17 @@ jobs:
       run: |
         docker-compose exec -T backend pytest -v --cov --cov-report term-missing
 
-    - name: Cypress run
-      uses: cypress-io/github-action@v5
-      env:
-        # Add Cypress key to Github project settings if you want to
-        CYPRESS_RECORD_KEY: ${{ secrets.CYPRESS_RECORD_KEY }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        # Set to true to record
-        record: false
-        working-directory: frontend
-
+    # Frontend disabled for now (unused React Admin app), see docker-compose.yml
+    # - name: Cypress run
+    #   uses: cypress-io/github-action@v5
+    #   env:
+    #     # Add Cypress key to Github project settings if you want to
+    #     CYPRESS_RECORD_KEY: ${{ secrets.CYPRESS_RECORD_KEY }}
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     # Set to true to record
+    #     record: false
+    #     working-directory: frontend
 
     - name: Log docker status
       if: ${{ always() }}
