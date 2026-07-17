@@ -4,12 +4,16 @@ from fastapi_users import schemas
 
 
 class UserRead(schemas.BaseUser[uuid.UUID]):
-    pass
+    username: str | None
+    bio: str | None
+    dark_mode: bool
 
 
 class UserCreate(schemas.BaseUserCreate):
-    pass
+    username: str
 
 
 class UserUpdate(schemas.BaseUserUpdate):
-    pass
+    username: str | None = None
+    bio: str | None = None
+    dark_mode: bool | None = None

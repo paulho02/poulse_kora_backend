@@ -46,6 +46,11 @@ docker compose up -d --build
 
 # IPython shell with DB session (app.db) preloaded
 docker compose exec backend python shell.py
+
+# Seed dev data: bot users + a few posts per channel, so a real dev/mobile-app
+# account has something to see and review (forward/drop) after subscribing to
+# a channel. Idempotent, safe to re-run.
+docker compose exec backend python seed_dev_data.py
 ```
 
 Backend OpenAPI docs: `http://localhost:8000/docs/`.

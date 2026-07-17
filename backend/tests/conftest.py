@@ -10,7 +10,9 @@ from app.core.config import settings
 from app.db import Base
 from app.deps.users import get_user_manager
 from app.factory import create_app
+from app.models.channel import Channel
 from app.models.item import Item
+from app.models.post import Post
 from app.models.user import User
 from tests.utils import generate_random_string
 
@@ -90,6 +92,48 @@ def create_item(db: AsyncSession, create_user: Callable):
         db.add(item)
         await db.commit()
         return item
+
+    return inner
+
+
+@pytest.fixture(scope="session")
+def create_channel(db: AsyncSession):
+    async def inner(name=None, color="#000000", description="desc"):
+        channel = Channel(
+            name=name or generate_random_string(20),
+            color=color,
+            description=description,
+        )
+        db.add(channel)
+        await db.commit()
+        return channel
+
+    return inner
+
+
+@pytest.fixture(scope="session")
+def create_post(db: AsyncSession, create_user: Callable, create_channel: Callable):
+    async def inner(
+        channel=None,
+        author=None,
+        text="text",
+        is_anonymous=False,
+        has_image=False,
+    ):
+        if not channel:
+            channel = await create_channel()
+        if not author:
+            author = await create_user()
+        post = Post(
+            channel_id=channel.id,
+            author_id=author.id,
+            text=text,
+            is_anonymous=is_anonymous,
+            has_image=has_image,
+        )
+        db.add(post)
+        await db.commit()
+        return post
 
     return inner
 

@@ -16,6 +16,9 @@ class Settings(BaseSettings):
 
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 7 * 24 * 60  # 7 days
 
+    # Number of posts a user must review (forward or drop) before they can create one.
+    RELAY_REVIEW_GATE: int = 5
+
     BACKEND_CORS_ORIGINS: list[AnyHttpUrl] = []
 
     TEST_DATABASE_URL: PostgresDsn | None = None
