@@ -71,18 +71,24 @@ class TestPostsFeed:
 
 
 class TestCreatePost:
-    async def test_create_fails_not_subscribed(
-        self, client: AsyncClient, create_user, create_channel
+    async def test_create_succeeds_without_subscription(
+        self, client: AsyncClient, db: AsyncSession, create_user, create_channel
     ):
+        # Posting no longer requires a subscription; only the review gate does.
+        # Use a superuser to isolate the subscription behaviour from the gate.
         user: User = await create_user()
-        channel: Channel = await create_channel()
+        user.is_superuser = True
+        db.add(user)
+        await db.commit()
+
+        channel: Channel = await create_channel()  # not subscribed
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
             json={"channel_id": channel.id, "text": "hi"},
         )
-        assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"]["error"] == "not_subscribed"
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["channel_id"] == channel.id
 
     async def test_create_fails_review_gate_locked(
         self, client: AsyncClient, db: AsyncSession, create_user, create_channel

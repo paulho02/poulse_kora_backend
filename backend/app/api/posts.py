@@ -118,11 +118,9 @@ async def create_post(
     if not channel:
         raise HTTPException(404)
 
-    if not await _is_subscribed(session, user.id, channel.id):
-        raise HTTPException(
-            403, {"error": "not_subscribed", "channel_id": channel.id}
-        )
-
+    # Posting to a channel no longer requires a subscription — subscriptions
+    # only control what shows up in a user's feed. The review gate is the sole
+    # gate on creating posts.
     if not is_review_gate_unlocked(user):
         raise HTTPException(
             403,

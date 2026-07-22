@@ -15,9 +15,17 @@ from app.deps.db import CurrentAsyncSession
 from app.deps.users import CurrentUser
 from app.models.post import Post
 from app.models.post_review import PostReview
-from app.schemas.stats import UserStatsRead, WeeklyActivityBucket
+from app.schemas.stats import (
+    ForwardingDistributionBucket,
+    GlobalStatsRead,
+    UserStatsRead,
+    WeeklyActivityBucket,
+)
 
 router = APIRouter(prefix="/stats")
+
+# Forwards are bucketed 0,1,2,3,4 and then everything >= this cap into "5+".
+_FORWARD_BUCKET_CAP = 5
 
 
 @router.get("/me", response_model=UserStatsRead)
@@ -65,4 +73,42 @@ async def get_my_stats(
         badges=compute_badges(user, trust_score),
         review_gate=settings.RELAY_REVIEW_GATE,
         unlocked=is_review_gate_unlocked(user),
+    )
+
+
+@router.get("/global", response_model=GlobalStatsRead)
+async def get_global_stats(
+    session: CurrentAsyncSession,
+    user: CurrentUser,
+):
+    """App-wide stats shown to every user.
+
+    For now: the distribution of how many times posts have been forwarded,
+    bucketed 0..4 with a final "5+" bucket.
+    """
+    rows = (
+        await session.execute(
+            select(
+                Post.forwarded_count.label("forwards"),
+                func.count(Post.id).label("cnt"),
+            ).group_by(Post.forwarded_count)
+        )
+    ).all()
+
+    # Seed every bucket so gaps render as zero-height bars, not missing ones.
+    counts = [0] * (_FORWARD_BUCKET_CAP + 1)
+    for row in rows:
+        counts[min(row.forwards, _FORWARD_BUCKET_CAP)] += row.cnt
+
+    distribution = [
+        ForwardingDistributionBucket(
+            label=f"{i}+" if i == _FORWARD_BUCKET_CAP else str(i),
+            post_count=count,
+        )
+        for i, count in enumerate(counts)
+    ]
+
+    return GlobalStatsRead(
+        total_posts=sum(counts),
+        forwarding_distribution=distribution,
     )

@@ -25,3 +25,14 @@ class UserStatsRead(BaseModel):
     badges: list[BadgeRead]
     review_gate: int
     unlocked: bool
+
+
+class ForwardingDistributionBucket(BaseModel):
+    # Bucket label for a number of forwards, e.g. "0", "1", ... "5+".
+    label: str
+    post_count: int
+
+
+class GlobalStatsRead(BaseModel):
+    total_posts: int
+    forwarding_distribution: list[ForwardingDistributionBucket]

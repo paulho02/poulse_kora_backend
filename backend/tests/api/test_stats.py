@@ -52,3 +52,48 @@ class TestGetMyStats:
         }
         assert "early_adopter" in badge_codes_earned
         assert "streak_5" in badge_codes_earned
+
+
+class TestGetGlobalStats:
+    async def test_global_stats_shape(self, client: AsyncClient, create_user):
+        user: User = await create_user()
+        resp = await client.get(
+            settings.API_PATH + "/stats/global", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        labels = [b["label"] for b in data["forwarding_distribution"]]
+        assert labels == ["0", "1", "2", "3", "4", "5+"]
+        assert data["total_posts"] == sum(
+            b["post_count"] for b in data["forwarding_distribution"]
+        )
+
+    async def test_forwarding_distribution_counts_a_forwarded_post(
+        self, client: AsyncClient, db: AsyncSession, create_user, create_channel, create_post
+    ):
+        def bucket(data, label):
+            return next(
+                b["post_count"]
+                for b in data["forwarding_distribution"]
+                if b["label"] == label
+            )
+
+        reviewer: User = await create_user()
+        before = (
+            await client.get(
+                settings.API_PATH + "/stats/global", headers=get_jwt_header(reviewer)
+            )
+        ).json()
+
+        channel: Channel = await create_channel()
+        post = await create_post(channel=channel)
+        await review(db, reviewer, post, "forward")  # forwarded_count -> 1
+
+        after = (
+            await client.get(
+                settings.API_PATH + "/stats/global", headers=get_jwt_header(reviewer)
+            )
+        ).json()
+
+        assert after["total_posts"] == before["total_posts"] + 1
+        assert bucket(after, "1") == bucket(before, "1") + 1
