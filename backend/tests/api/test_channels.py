@@ -1,8 +1,11 @@
 from httpx import AsyncClient
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.feed import service
 from app.models.channel import Channel
+from app.models.post import Post
 from app.models.user import User
 from tests.utils import generate_random_string, get_jwt_header, subscribe
 
@@ -68,6 +71,22 @@ class TestSubscribeChannel:
             headers=get_jwt_header(user),
         )
         assert resp.status_code == 404
+
+    async def test_subscribe_backfills_queue_with_recent_posts(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)
+
+        resp = await client.post(
+            settings.API_PATH + f"/channels/{channel.id}/subscribe",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        # Cold-start backfill puts the channel's recent posts into the user's queue.
+        ids = await service.render_queue_ids(redis, str(user.id), 10)
+        assert post.id in ids
 
 
 class TestUnsubscribeChannel:

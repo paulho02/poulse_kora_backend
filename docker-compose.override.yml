@@ -8,6 +8,12 @@ services:
     volumes:
       - app-db-data:/var/lib/postgresql/data:cached
 
+  redis:
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data:cached
+
   backend:
     command: uvicorn --port 8000 --host 0.0.0.0 --reload main:app
     volumes:
@@ -15,4 +21,6 @@ services:
       - root-home:/root:delegated
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy

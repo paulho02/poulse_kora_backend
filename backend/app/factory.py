@@ -1,3 +1,7 @@
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
@@ -9,7 +13,30 @@ from starlette.responses import FileResponse
 from app.api import api_router
 from app.core.config import settings
 from app.deps.users import fastapi_users, jwt_authentication
+from app.feed.worker import run_consumer
+from app.redis import redis_client
 from app.schemas.user import UserCreate, UserRead, UserUpdate
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run the feed operation-queue consumer as an in-process background task.
+
+    Single process today ⇒ a single consumer. If this ever runs with more than one
+    web process, move the consumer to a dedicated worker (see app/feed/worker.py).
+    """
+    task = asyncio.create_task(run_consumer(redis_client))
+    app.state.feed_consumer_task = task
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def create_app():
@@ -20,6 +47,7 @@ def create_app():
         docs_url="/docs/",
         description=description,
         redoc_url=None,
+        lifespan=lifespan,
     )
     setup_routers(app, fastapi_users)
     setup_cors_middleware(app)

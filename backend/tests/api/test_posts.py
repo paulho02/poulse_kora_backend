@@ -1,15 +1,17 @@
 from httpx import AsyncClient
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.feed import service
 from app.models.channel import Channel
 from app.models.post import Post
 from app.models.user import User
-from tests.utils import get_jwt_header, review, subscribe
+from tests.utils import get_jwt_header, subscribe
 
 
 class TestPostsFeed:
-    async def test_feed_empty_with_no_subscriptions(
+    async def test_feed_empty_with_empty_queue(
         self, client: AsyncClient, create_user
     ):
         user: User = await create_user()
@@ -19,47 +21,42 @@ class TestPostsFeed:
         assert resp.status_code == 200, resp.text
         assert resp.json() == []
 
-    async def test_feed_excludes_unsubscribed_reviewed_and_own_posts(
+    async def test_feed_returns_queued_posts(
         self,
         client: AsyncClient,
-        db: AsyncSession,
+        redis: Redis,
         create_user,
         create_channel,
         create_post,
     ):
         user: User = await create_user()
-        subscribed_channel: Channel = await create_channel()
-        other_channel: Channel = await create_channel()
-        await subscribe(db, user, subscribed_channel)
-
-        visible: Post = await create_post(channel=subscribed_channel)
-        already_reviewed: Post = await create_post(channel=subscribed_channel)
-        await review(db, user, already_reviewed, "forward")
-        await create_post(channel=other_channel)  # not subscribed
-        own_post: Post = await create_post(channel=subscribed_channel, author=user)
+        channel: Channel = await create_channel()
+        post_a: Post = await create_post(channel=channel)
+        post_b: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), post_a.id)
+        await service.place_post(redis, str(user.id), post_b.id)
 
         resp = await client.get(
             settings.API_PATH + "/posts/feed", headers=get_jwt_header(user)
         )
         assert resp.status_code == 200, resp.text
         ids = [p["id"] for p in resp.json()]
-        assert visible.id in ids
-        assert already_reviewed.id not in ids
-        assert own_post.id not in ids
+        # LPUSH ⇒ most recently placed is at the head.
+        assert ids == [post_b.id, post_a.id]
 
     async def test_feed_anonymous_post_hides_author_for_other_users(
         self,
         client: AsyncClient,
-        db: AsyncSession,
+        redis: Redis,
         create_user,
         create_channel,
         create_post,
     ):
         viewer: User = await create_user()
         channel: Channel = await create_channel()
-        await subscribe(db, viewer, channel)
         author: User = await create_user()
         post: Post = await create_post(channel=channel, author=author, is_anonymous=True)
+        await service.place_post(redis, str(viewer.id), post.id)
 
         resp = await client.get(
             settings.API_PATH + "/posts/feed", headers=get_jwt_header(viewer)
@@ -71,52 +68,29 @@ class TestPostsFeed:
 
 
 class TestCreatePost:
-    async def test_create_succeeds_without_subscription(
-        self, client: AsyncClient, db: AsyncSession, create_user, create_channel
+    async def test_create_fails_insufficient_tokens(
+        self, client: AsyncClient, create_user, create_channel
     ):
-        # Posting no longer requires a subscription; only the review gate does.
-        # Use a superuser to isolate the subscription behaviour from the gate.
-        user: User = await create_user()
-        user.is_superuser = True
-        db.add(user)
-        await db.commit()
-
-        channel: Channel = await create_channel()  # not subscribed
-        resp = await client.post(
-            settings.API_PATH + "/posts",
-            headers=get_jwt_header(user),
-            json={"channel_id": channel.id, "text": "hi"},
-        )
-        assert resp.status_code == 201, resp.text
-        assert resp.json()["channel_id"] == channel.id
-
-    async def test_create_fails_review_gate_locked(
-        self, client: AsyncClient, db: AsyncSession, create_user, create_channel
-    ):
-        user: User = await create_user()
+        user: User = await create_user()  # starts with 0 tokens
         channel: Channel = await create_channel()
-        await subscribe(db, user, channel)
 
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
             json={"channel_id": channel.id, "text": "hi"},
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 402, resp.text
         body = resp.json()["detail"]
-        assert body["error"] == "review_gate_locked"
-        assert body["reviewed_count"] == 0
-        assert body["review_gate"] == settings.RELAY_REVIEW_GATE
+        assert body["error"] == "insufficient_tokens"
+        assert body["balance"] == 0
+        assert body["price"] >= settings.FEED_PRICE_MIN
 
-    async def test_create_succeeds_when_gate_met(
-        self, client: AsyncClient, db: AsyncSession, create_user, create_channel, create_post
+    async def test_create_succeeds_with_tokens_and_enqueues_op(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         user: User = await create_user()
         channel: Channel = await create_channel()
-        await subscribe(db, user, channel)
-        for _ in range(settings.RELAY_REVIEW_GATE):
-            post = await create_post(channel=channel)
-            await review(db, user, post, "forward")
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
 
         resp = await client.post(
             settings.API_PATH + "/posts",
@@ -124,9 +98,14 @@ class TestCreatePost:
             json={"channel_id": channel.id, "text": "unlocked post"},
         )
         assert resp.status_code == 201, resp.text
-        assert resp.json()["text"] == "unlocked post"
+        data = resp.json()
+        assert data["post"]["text"] == "unlocked post"
+        assert data["price"] >= settings.FEED_PRICE_MIN
+        assert data["token_balance"] == settings.FEED_PRICE_MAX - data["price"]
+        # The new post is queued as an operation for the worker to distribute.
+        assert await service.operation_queue_len(redis) == 1
 
-    async def test_superuser_bypasses_review_gate(
+    async def test_superuser_posts_for_free(
         self, client: AsyncClient, db: AsyncSession, create_user, create_channel
     ):
         user: User = await create_user()
@@ -135,14 +114,41 @@ class TestCreatePost:
         await db.commit()
 
         channel: Channel = await create_channel()
-        await subscribe(db, user, channel)
-
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
             json={"channel_id": channel.id, "text": "superuser post"},
         )
         assert resp.status_code == 201, resp.text
+        assert resp.json()["token_balance"] == 0  # nothing spent, nothing earned
+
+    async def test_create_channel_404(
+        self, client: AsyncClient, redis: Redis, create_user
+    ):
+        user: User = await create_user()
+        await service.earn_token(redis, str(user.id), 10)
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            json={"channel_id": 10**6, "text": "hi"},
+        )
+        assert resp.status_code == 404
+
+
+class TestPostEconomy:
+    async def test_economy_returns_balance_and_price(
+        self, client: AsyncClient, redis: Redis, create_user
+    ):
+        user: User = await create_user()
+        await service.earn_token(redis, str(user.id), 3)
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/economy", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["token_balance"] == 3
+        assert data["post_price"] >= settings.FEED_PRICE_MIN
 
 
 class TestGetPost:
@@ -172,13 +178,14 @@ class TestGetPost:
 
 
 class TestReviewPost:
-    async def test_review_updates_counters_and_returns_result(
-        self, client: AsyncClient, db: AsyncSession, create_user, create_channel, create_post
+    async def test_forward_earns_token_reinjects_and_pops(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
     ):
         user: User = await create_user()
         channel: Channel = await create_channel()
-        await subscribe(db, user, channel)
         post: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), post.id)
 
         resp = await client.post(
             settings.API_PATH + f"/posts/{post.id}/review",
@@ -188,38 +195,74 @@ class TestReviewPost:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["reviewed_count"] == 1
-        assert data["review_gate"] == settings.RELAY_REVIEW_GATE
-        assert data["unlocked"] is (1 >= settings.RELAY_REVIEW_GATE)
+        assert data["token_balance"] == 1  # earned one for reviewing
 
         await db.refresh(post)
         await db.refresh(user)
         assert post.forwarded_count == 1
-        assert user.reviewed_count == 1
         assert user.forwarded_count == 1
+        # Popped from the queue, and re-injected as an operation (propagation).
+        assert await service.render_queue_ids(redis, str(user.id), 10) == []
+        assert await service.operation_queue_len(redis) == 1
 
-    async def test_review_twice_is_conflict(
-        self, client: AsyncClient, db: AsyncSession, create_user, create_channel, create_post
+    async def test_drop_earns_token_without_reinject(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
     ):
         user: User = await create_user()
         channel: Channel = await create_channel()
-        await subscribe(db, user, channel)
         post: Post = await create_post(channel=channel)
-        jwt_header = get_jwt_header(user)
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "drop"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["token_balance"] == 1
+        await db.refresh(post)
+        assert post.dropped_count == 1
+        assert await service.operation_queue_len(redis) == 0  # no re-injection
+
+    async def test_review_not_in_queue_is_conflict(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)  # never placed in queue
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "forward"},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "not_in_queue"
+
+    async def test_review_twice_second_is_conflict(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), post.id)
+        header = get_jwt_header(user)
 
         first = await client.post(
             settings.API_PATH + f"/posts/{post.id}/review",
-            headers=jwt_header,
+            headers=header,
             json={"kind": "forward"},
         )
         assert first.status_code == 200, first.text
 
         second = await client.post(
             settings.API_PATH + f"/posts/{post.id}/review",
-            headers=jwt_header,
+            headers=header,
             json={"kind": "drop"},
         )
         assert second.status_code == 409, second.text
-        assert second.json()["detail"]["error"] == "already_reviewed"
+        assert second.json()["detail"]["error"] == "not_in_queue"
 
     async def test_review_nonexistent_post(self, client: AsyncClient, create_user):
         user: User = await create_user()

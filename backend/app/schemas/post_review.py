@@ -15,3 +15,5 @@ class PostReviewResult(BaseModel):
     reviewed_count: int
     review_gate: int
     unlocked: bool
+    # Spendable token balance after earning one token for this review.
+    token_balance: int

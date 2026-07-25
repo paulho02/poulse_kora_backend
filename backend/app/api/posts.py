@@ -1,17 +1,27 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.relay_rules import is_review_gate_unlocked
 from app.deps.db import CurrentAsyncSession
+from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentUser
+from app.feed import service
+from app.feed.pricing import compute_price
 from app.models.channel import Channel
 from app.models.channel_subscription import ChannelSubscription
 from app.models.post import Post
 from app.models.post_review import PostReview
 from app.models.user import User
-from app.schemas.post import PostAuthor, PostCreate, PostRead
+from app.schemas.post import (
+    PostAuthor,
+    PostCreate,
+    PostCreateResult,
+    PostEconomy,
+    PostRead,
+)
 from app.schemas.post_review import PostReviewCreate, PostReviewResult
 
 router = APIRouter(prefix="/posts")
@@ -65,71 +75,67 @@ async def _get_post_with_relations(session: CurrentAsyncSession, post_id: int) -
 async def get_posts_feed(
     session: CurrentAsyncSession,
     user: CurrentUser,
+    redis: CurrentRedis,
     channel_id: int | None = None,
     skip: int = 0,
     limit: int = 20,
 ):
-    subscribed_ids = (
+    """Return the user's review queue, oldest first, rendered from Postgres by ID.
+
+    The queue is maintained in Redis by the distribution worker; here we just read
+    the post_ids and hydrate them. A post can legitimately appear more than once
+    (duplicate delivery is allowed).
+    """
+    post_ids = await service.render_queue_ids(redis, str(user.id), limit, skip)
+    if not post_ids:
+        return []
+
+    posts = (
         (
             await session.execute(
-                select(ChannelSubscription.channel_id).filter(
-                    ChannelSubscription.user_id == user.id
-                )
+                select(Post)
+                .options(selectinload(Post.channel), selectinload(Post.author))
+                .filter(Post.id.in_(post_ids))
             )
         )
         .scalars()
         .all()
     )
-    if not subscribed_ids:
-        return []
-
+    by_id = {p.id: p for p in posts}
+    ordered = [by_id[pid] for pid in post_ids if pid in by_id]
     if channel_id is not None:
-        if channel_id not in subscribed_ids:
-            raise HTTPException(400, "Not subscribed to this channel")
-        channel_ids = [channel_id]
-    else:
-        channel_ids = subscribed_ids
-
-    already_reviewed = select(PostReview.post_id).filter(PostReview.user_id == user.id)
-
-    query = (
-        select(Post)
-        .options(selectinload(Post.channel), selectinload(Post.author))
-        .filter(
-            Post.channel_id.in_(channel_ids),
-            Post.author_id != user.id,
-            Post.id.notin_(already_reviewed),
-        )
-        .order_by(Post.created.desc())
-        .offset(skip)
-        .limit(limit)
-    )
-    posts = (await session.execute(query)).scalars().all()
-    return [_serialize_post(p, user) for p in posts]
+        ordered = [p for p in ordered if p.channel_id == channel_id]
+    return [_serialize_post(p, user) for p in ordered]
 
 
-@router.post("", response_model=PostRead, status_code=201)
+@router.post("", response_model=PostCreateResult, status_code=201)
 async def create_post(
     post_in: PostCreate,
     session: CurrentAsyncSession,
     user: CurrentUser,
+    redis: CurrentRedis,
 ):
+    """Publish an original post. Costs a dynamic number of tokens (admission price)
+    that rises with operation-queue congestion; superusers post for free. The post
+    is enqueued as an operation for the worker to distribute."""
     channel = await session.get(Channel, post_in.channel_id)
     if not channel:
         raise HTTPException(404)
 
-    # Posting to a channel no longer requires a subscription — subscriptions
-    # only control what shows up in a user's feed. The review gate is the sole
-    # gate on creating posts.
-    if not is_review_gate_unlocked(user):
-        raise HTTPException(
-            403,
-            {
-                "error": "review_gate_locked",
-                "reviewed_count": user.reviewed_count,
-                "review_gate": settings.RELAY_REVIEW_GATE,
-            },
-        )
+    price = compute_price(await service.operation_queue_len(redis), settings)
+    if user.is_superuser:
+        token_balance = await service.token_balance(redis, str(user.id))
+    else:
+        token_balance = await service.spend_tokens(redis, str(user.id), price)
+        if token_balance is None:
+            raise HTTPException(
+                402,
+                {
+                    "error": "insufficient_tokens",
+                    "balance": await service.token_balance(redis, str(user.id)),
+                    "price": price,
+                },
+            )
 
     post = Post(
         channel_id=post_in.channel_id,
@@ -141,8 +147,25 @@ async def create_post(
     session.add(post)
     await session.commit()
 
+    await service.enqueue_operation(redis, post.id, post.channel_id)
+
     post = await _get_post_with_relations(session, post.id)
-    return _serialize_post(post, user)
+    return PostCreateResult(
+        post=_serialize_post(post, user),
+        price=price,
+        token_balance=token_balance,
+    )
+
+
+@router.get("/economy", response_model=PostEconomy)
+async def get_post_economy(user: CurrentUser, redis: CurrentRedis):
+    """Current spendable token balance and the live price to publish a post.
+
+    Declared before `/{post_id}` so the literal path wins the route match.
+    """
+    price = compute_price(await service.operation_queue_len(redis), settings)
+    balance = await service.token_balance(redis, str(user.id))
+    return PostEconomy(token_balance=balance, post_price=price)
 
 
 @router.get("/{post_id}", response_model=PostRead)
@@ -163,18 +186,21 @@ async def review_post(
     review_in: PostReviewCreate,
     session: CurrentAsyncSession,
     user: CurrentUser,
+    redis: CurrentRedis,
 ):
+    """Forward or drop a post from the user's queue.
+
+    Removing the post from the Redis queue is the concurrency guard (a post can only
+    be reviewed while it sits in the queue). Reviewing earns one token; forwarding
+    re-injects the post as a new operation so it propagates to more users.
+    """
     post = await session.get(Post, post_id)
-    if not post or not await _is_subscribed(session, user.id, post.channel_id):
+    if not post:
         raise HTTPException(404)
 
-    existing = await session.scalar(
-        select(PostReview).filter(
-            PostReview.user_id == user.id, PostReview.post_id == post_id
-        )
-    )
-    if existing:
-        raise HTTPException(409, {"error": "already_reviewed"})
+    removed = await service.claim_from_queue(redis, str(user.id), post_id)
+    if removed == 0:
+        raise HTTPException(409, {"error": "not_in_queue"})
 
     session.add(PostReview(user_id=user.id, post_id=post_id, kind=review_in.kind))
     user.reviewed_count += 1
@@ -184,7 +210,18 @@ async def review_post(
     else:
         post.dropped_count += 1
         user.dropped_count += 1
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Duplicate delivery: the post was in the queue twice and is already reviewed.
+        # It has been removed from the queue above; nothing more to record.
+        await session.rollback()
+        raise HTTPException(409, {"error": "already_reviewed"}) from None
+
+    token_balance = await service.earn_token(redis, str(user.id))
+
+    if review_in.kind == "forward":
+        await service.enqueue_operation(redis, post_id, post.channel_id)
 
     return PostReviewResult(
         post_id=post_id,
@@ -192,4 +229,5 @@ async def review_post(
         reviewed_count=user.reviewed_count,
         review_gate=settings.RELAY_REVIEW_GATE,
         unlocked=is_review_gate_unlocked(user),
+        token_balance=token_balance,
     )

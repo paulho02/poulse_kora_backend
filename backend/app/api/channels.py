@@ -2,7 +2,9 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from app.deps.db import CurrentAsyncSession
+from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentUser
+from app.feed import service
 from app.models.channel import Channel
 from app.models.channel_subscription import ChannelSubscription
 from app.schemas.channel import ChannelRead
@@ -50,6 +52,7 @@ async def subscribe_channel(
     channel_id: int,
     session: CurrentAsyncSession,
     user: CurrentUser,
+    redis: CurrentRedis,
 ):
     channel = await session.get(Channel, channel_id)
     if not channel:
@@ -65,6 +68,13 @@ async def subscribe_channel(
         session.add(ChannelSubscription(user_id=user.id, channel_id=channel_id))
         await session.commit()
 
+    # Mirror into Redis: add to the channel's subscriber set and make the user
+    # reachable by fan-out (in free_queue if their queue has room).
+    await service.sync_subscribe(redis, str(user.id), channel_id)
+    # Cold-start: seed the queue with recent un-reviewed posts so a new subscriber
+    # has something to review immediately (live posts arrive via the worker).
+    await service.backfill_queue(redis, session, user.id, channel_id)
+
     subscribed_ids = await _subscribed_channel_ids(session, user.id)
     return _to_read(channel, subscribed_ids)
 
@@ -74,6 +84,7 @@ async def unsubscribe_channel(
     channel_id: int,
     session: CurrentAsyncSession,
     user: CurrentUser,
+    redis: CurrentRedis,
 ):
     channel = await session.get(Channel, channel_id)
     if not channel:
@@ -88,6 +99,10 @@ async def unsubscribe_channel(
     if existing:
         await session.delete(existing)
         await session.commit()
+
+    # Mirror into Redis: remove the user from the channel's subscriber set so they
+    # no longer receive fan-out from it. Already-queued posts are left in place.
+    await service.sync_unsubscribe(redis, str(user.id), channel_id)
 
     subscribed_ids = await _subscribed_channel_ids(session, user.id)
     return _to_read(channel, subscribed_ids)

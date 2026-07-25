@@ -23,9 +23,11 @@ from sqlalchemy import func, select
 
 from app.db import async_session_maker
 from app.deps.users import get_user_manager
+from app.feed.service import rebuild_from_pg
 from app.models.channel import Channel
 from app.models.post import Post
 from app.models.user import User
+from app.redis import redis_client
 
 TARGET_POSTS_PER_CHANNEL = 6
 BOT_PASSWORD = "devpassword123"  # dev-only seed accounts, not meant to be logged into
@@ -163,7 +165,18 @@ async def main():
             print(f"{channel.name}: +{created} posts")
 
         await session.commit()
-        print(f"Done. {len(bots)} bot users, {total_created} new posts.")
+
+        # Reconcile Redis distribution state (channel sets, free_queue, token
+        # balances) with the freshly-seeded Postgres data. Subscribing to a channel
+        # (via the app) then backfills the queue with these posts to review.
+        redis_stats = await rebuild_from_pg(redis_client, session)
+
+        print(
+            f"Done. {len(bots)} bot users, {total_created} new posts. "
+            f"Redis: {redis_stats['subscriptions']} subscriptions, "
+            f"{redis_stats['users']} users seeded, "
+            f"{redis_stats['backfilled']} posts backfilled into queues."
+        )
 
 
 if __name__ == "__main__":

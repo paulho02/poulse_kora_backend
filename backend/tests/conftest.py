@@ -14,6 +14,7 @@ from app.models.channel import Channel
 from app.models.item import Item
 from app.models.post import Post
 from app.models.user import User
+from app.redis import redis_client
 from tests.utils import generate_random_string
 
 engine = create_async_engine(
@@ -61,6 +62,22 @@ async def client(app):
 @pytest.fixture(scope="function", autouse=True)
 async def auto_rollback(db: AsyncSession):
     await db.rollback()
+
+
+@pytest.fixture(scope="function", autouse=True)
+async def flush_redis():
+    """Isolate feed state per test. Runs against the test Redis DB (DB 1), which the
+    config swaps in under pytest — never the dev DB."""
+    await redis_client.flushdb()
+    yield
+    await redis_client.flushdb()
+
+
+@pytest.fixture(scope="session")
+def redis():
+    """The shared async Redis client (test DB 1), for tests that drive feed state
+    directly rather than through the API."""
+    return redis_client
 
 
 @pytest.fixture(scope="session")
