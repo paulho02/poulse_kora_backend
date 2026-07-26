@@ -6,11 +6,13 @@ storing post_ids rather than content.
 """
 
 import json
+import logging
 import time
 import uuid
 from uuid import uuid4
 
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,59 +24,124 @@ from app.models.post import Post
 from app.models.post_review import PostReview
 from app.models.user import User
 
+logger = logging.getLogger(__name__)
 
-# --- operation queue -------------------------------------------------------
 
-async def enqueue_operation(redis: Redis, post_id: int, channel_id: int) -> None:
-    """Push a fan-out operation for `post_id` onto the tail of the `ops` queue."""
-    await redis.rpush(
-        keys.OPS, json.dumps({"post_id": post_id, "channel_id": channel_id})
-    )
+# --- operation stream ------------------------------------------------------
+
+async def ensure_group(redis: Redis) -> None:
+    """Idempotently create the consumer group (and the stream) if missing.
+
+    Created at id ``0`` (not ``$``) so any entries added before the group existed are
+    still delivered — the group must never skip work. Safe to call repeatedly; a
+    second call raises BUSYGROUP, which we swallow. Callers that hit NOGROUP (the
+    group/stream was flushed) can call this and retry.
+    """
+    try:
+        await redis.xgroup_create(keys.STREAM, keys.STREAM_GROUP, id="0", mkstream=True)
+    except ResponseError as exc:
+        if "BUSYGROUP" not in str(exc):
+            raise
+
+
+async def enqueue_operation(
+    redis: Redis, post_id: int, channel_id: int, expires_at: float | None = None
+) -> None:
+    """Append a fan-out operation for `post_id` to the operation stream.
+
+    `expires_at` is carried only by ops coming back from `ops:retry`; it preserves the
+    original retry deadline across the stream round-trip so re-parking cannot reset it
+    (see `schedule_retry`). Freshly published/forwarded posts pass None and get a
+    deadline on their first park.
+    """
+    fields = {"post_id": str(post_id), "channel_id": str(channel_id)}
+    if expires_at is not None:
+        fields["expires_at"] = str(expires_at)
+    await redis.xadd(keys.STREAM, fields)
 
 
 async def operation_queue_len(redis: Redis) -> int:
-    """Current length of the operation queue (drives admission pricing)."""
-    return await redis.llen(keys.OPS)
+    """Outstanding operations in the stream (drives admission pricing).
+
+    Because completed ops are XACK'd *and* XDEL'd (see worker), the stream retains only
+    undelivered backlog plus in-flight (delivered-but-unacked) entries — a good
+    proxy for congestion. Ops parked in `ops:retry` are not counted (they are not
+    active work until re-added).
+    """
+    return await redis.xlen(keys.STREAM)
 
 
 async def schedule_retry(
-    redis: Redis, post_id: int, channel_id: int, delay: float | None = None
+    redis: Redis,
+    post_id: int,
+    channel_id: int,
+    delay: float | None = None,
+    expires_at: float | None = None,
 ) -> None:
     """Park an undeliverable operation in `ops:retry`, due after `delay` seconds
     (defaults to `FEED_RETRY_INTERVAL_SECONDS`).
 
-    Held in a sorted set rather than requeued immediately, so a channel with no
+    Held in a sorted set rather than re-added immediately, so a channel with no
     free recipients doesn't spin the consumer in a tight retry loop. The member
     is prefixed with a random id so two retries for the same post/channel pair
     (e.g. a create and a later forward, both stalled) never collide as a single
     sorted-set entry.
+
+    `expires_at` is the absolute deadline past which the op is abandoned rather than
+    retried again. It is set once, on the first park (`now + FEED_RETRY_MAX_AGE_SECONDS`),
+    and thereafter passed back in by the caller so repeated parking cannot extend it.
     """
     if delay is None:
         delay = settings.FEED_RETRY_INTERVAL_SECONDS
-    payload = json.dumps({"post_id": post_id, "channel_id": channel_id})
+    now = time.time()
+    if expires_at is None:
+        expires_at = now + settings.FEED_RETRY_MAX_AGE_SECONDS
+    payload = json.dumps(
+        {"post_id": post_id, "channel_id": channel_id, "expires_at": expires_at}
+    )
     member = f"{uuid4().hex}:{payload}"
-    await redis.zadd(keys.OPS_RETRY, {member: time.time() + delay})
+    await redis.zadd(keys.OPS_RETRY, {member: now + delay})
 
 
 async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
-    """Move due operations from `ops:retry` back onto the front of `ops`.
+    """Re-add due operations from `ops:retry` to the operation stream.
 
-    Uses LPUSH (not RPUSH): a retried operation is necessarily older than
-    anything created since it stalled, so re-inserting at the head lets it cut
-    back in front of newer operations instead of losing its place in line on
-    every retry cycle. Returns the number of operations rescheduled.
+    Streams are append-only, so a re-added retry goes to the tail (a new id) rather
+    than jumping ahead of newer work as it did with the old list — a cosmetic ordering
+    change, not a correctness one.
+
+    An op past its `expires_at` deadline is dropped instead of re-added: a channel that
+    never gains a free subscriber would otherwise cycle its posts through the stream
+    indefinitely. Returns the number rescheduled (expired ops are not counted).
     """
     if now is None:
         now = time.time()
     due = await redis.zrangebyscore(keys.OPS_RETRY, "-inf", now)
+    rescheduled = 0
     for member in due:
         _, _, payload = member.partition(":")
-        # LPUSH before ZREM: if the process dies in between, the op is merely
-        # duplicated (already-tolerated, see claim_from_queue/review_post's
-        # IntegrityError handling) rather than silently lost.
-        await redis.lpush(keys.OPS, payload)
+        op = json.loads(payload)
+        expires_at = op.get("expires_at")
+        if expires_at is None:
+            # Parked before deadlines existed. Stamp one from now: the upgrade neither
+            # discards a live backlog nor leaves ops that can never expire.
+            expires_at = now + settings.FEED_RETRY_MAX_AGE_SECONDS
+        elif expires_at <= now:
+            await redis.zrem(keys.OPS_RETRY, member)
+            logger.info(
+                "feed op abandoned after %ss of retries: post_id=%s channel_id=%s",
+                settings.FEED_RETRY_MAX_AGE_SECONDS,
+                op["post_id"],
+                op["channel_id"],
+            )
+            continue
+        # XADD before ZREM: if the process dies in between, the op is merely duplicated
+        # (already-tolerated, see claim_from_queue/review_post's IntegrityError
+        # handling) rather than silently lost.
+        await enqueue_operation(redis, op["post_id"], op["channel_id"], expires_at)
         await redis.zrem(keys.OPS_RETRY, member)
-    return len(due)
+        rescheduled += 1
+    return rescheduled
 
 
 # --- tokens ----------------------------------------------------------------
@@ -106,7 +173,9 @@ async def spend_tokens(redis: Redis, user_id: str, price: int) -> int | None:
 async def place_post(redis: Redis, user_id: str, post_id: int) -> int:
     """Push a post into a recipient's queue, dropping them from free_queue if full.
 
-    Returns the queue length after the push.
+    Idempotent: a post already in the queue is not pushed again, so the worker's
+    fan-out and `backfill_queue` can both target the same (user, post) without
+    duplicating it. Returns the queue length after the push.
     """
     return await get_scripts(redis).place(
         keys=[keys.queue(user_id), keys.FREE_QUEUE],
@@ -139,15 +208,27 @@ async def render_queue_ids(
 async def select_recipients(redis: Redis, channel_id: int, k: int) -> list[str]:
     """Pick up to `k` distinct random user_ids subscribed to the channel *and* free.
 
-    Server-side: SINTERSTORE the channel's subscribers with free_queue into a temp
-    key, then SRANDMEMBER `k` distinct members.
+    Sample-then-filter, not intersect: `SRANDMEMBER` a bounded random sample of the
+    channel's subscribers (`k * FEED_FANOUT_SAMPLE_MULTIPLIER`), then keep those in
+    `free_queue` via a single `SMISMEMBER`. Both calls are O(sample), independent of
+    channel size — unlike a per-op `SINTERSTORE(channel, free_queue)`, which scans a
+    set proportional to the whole channel (or the global free set) and blocks the
+    single-threaded server for that long on *every* operation.
+
+    Trade-off: for a channel large enough that the sample is a strict subset, this is
+    probabilistic — if free subscribers are rare, the sample may miss them and the op
+    is parked for retry (correct: the channel is genuinely congested). For channels at
+    or below the sample size the whole set is drawn, so selection is exact, matching
+    the old behaviour. Oversampling (the multiplier) keeps the miss rate low until a
+    channel is heavily saturated.
     """
-    tmp = f"tmp:sinter:{uuid4().hex}"
-    try:
-        await redis.sinterstore(tmp, [keys.channel(channel_id), keys.FREE_QUEUE])
-        return await redis.srandmember(tmp, k)
-    finally:
-        await redis.delete(tmp)
+    sample_size = k * settings.FEED_FANOUT_SAMPLE_MULTIPLIER
+    candidates = await redis.srandmember(keys.channel(channel_id), sample_size)
+    if not candidates:
+        return []
+    free_flags = await redis.smismember(keys.FREE_QUEUE, *candidates)
+    free = [uid for uid, is_free in zip(candidates, free_flags) if is_free]
+    return free[:k]
 
 
 # --- subscription sync -----------------------------------------------------
@@ -169,12 +250,13 @@ async def sync_unsubscribe(redis: Redis, user_id: str, channel_id: int) -> None:
 async def backfill_queue(
     redis: Redis, session: AsyncSession, user_id: uuid.UUID, channel_id: int
 ) -> int:
-    """Seed a fresh subscriber's queue with recent un-reviewed posts from the channel.
+    """Fill a subscriber's free queue slots with recent un-reviewed channel posts.
 
-    Live distribution is push-based (operations → worker fan-out), but a user who
-    subscribes after posts already fanned out would otherwise see nothing. This
-    fills the remaining free slots with the newest channel posts they haven't yet
-    reviewed. Returns the number of posts backfilled.
+    Reconciliation only — used by `rebuild_from_pg`, not by the subscribe endpoint.
+    Live distribution is push-based (operations → worker fan-out) and that is the sole
+    delivery path for a new subscriber: they receive posts published from then on, plus
+    any parked in `ops:retry`. Calling this on subscribe would add a second, competing
+    delivery path for the same post. Returns the number of posts backfilled.
     """
     current_ids = await render_queue_ids(
         redis, str(user_id), settings.FEED_QUEUE_MAX_SLOTS
@@ -221,9 +303,9 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
       without having to re-subscribe.
 
     Idempotent: the backfill skips posts already queued, and token balances are set
-    (not incremented). The `ops` list is not touched. Note: because tokens are reset
-    to `reviewed_count`, re-running discards any spends since the last rebuild — run
-    it for reconciliation/onboarding, not routinely.
+    (not incremented). The operation stream and `ops:retry` are not touched. Note:
+    because tokens are reset to `reviewed_count`, re-running discards any spends since
+    the last rebuild — run it for reconciliation/onboarding, not routinely.
     """
     subs = (await session.execute(select(ChannelSubscription))).scalars().all()
     users = (await session.execute(select(User))).scalars().all()

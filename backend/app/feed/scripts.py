@@ -4,8 +4,8 @@ Each of these touches more than one key or does a read-modify-write that must no
 interleave with another consumer/request:
 
 - ``spend``: check-and-decrement the token balance (no negative balances).
-- ``place``: push a post into a recipient's queue and drop them from ``free_queue``
-  once full.
+- ``place``: push a post into a recipient's queue (skipping one already there) and
+  drop them from ``free_queue`` once full.
 - ``claim``: remove a post from a user's queue (the review concurrency guard) and
   re-add them to ``free_queue`` when a slot frees up.
 
@@ -31,8 +31,16 @@ return redis.call('DECRBY', KEYS[1], price)
 
 # KEYS[1]=queue:{user}  KEYS[2]=free_queue
 # ARGV[1]=post_id  ARGV[2]=user_id  ARGV[3]=max_slots
-# Returns the queue length after the push.
+# Returns the queue length after the push (unchanged if the post was already queued).
+#
+# Idempotent per (user, post): two independent paths deliver the same post to the same
+# user — the worker's fan-out (including an op parked in ops:retry while the channel had
+# no free subscriber) and backfill_queue on subscribe. Whichever runs second must not
+# push a second copy. LPOS returns false when absent (0 is a valid, truthy index).
 _PLACE = """
+if redis.call('LPOS', KEYS[1], ARGV[1]) then
+  return redis.call('LLEN', KEYS[1])
+end
 redis.call('LPUSH', KEYS[1], ARGV[1])
 local len = redis.call('LLEN', KEYS[1])
 if len >= tonumber(ARGV[3]) then
@@ -57,7 +65,7 @@ return removed
 
 # KEYS[1]=queue:{user}  KEYS[2]=free_queue  ARGV[1]=user_id  ARGV[2]=max_slots
 # Adds the user to free_queue iff their queue currently has room. Returns 1/0.
-# Used on subscribe so a new/roomy user becomes reachable by SINTER fan-out.
+# Used on subscribe so a new/roomy user becomes reachable by fan-out selection.
 _ENSURE_FREE = """
 local len = redis.call('LLEN', KEYS[1])
 if len < tonumber(ARGV[2]) then

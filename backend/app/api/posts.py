@@ -83,8 +83,8 @@ async def get_posts_feed(
     """Return the user's review queue, oldest first, rendered from Postgres by ID.
 
     The queue is maintained in Redis by the distribution worker; here we just read
-    the post_ids and hydrate them. A post can legitimately appear more than once
-    (duplicate delivery is allowed).
+    the post_ids and hydrate them. `place_post` dedupes on insert, so a post appears
+    at most once in the queue even when fan-out and backfill both deliver it.
     """
     post_ids = await service.render_queue_ids(redis, str(user.id), limit, skip)
     if not post_ids:
@@ -213,8 +213,8 @@ async def review_post(
     try:
         await session.commit()
     except IntegrityError:
-        # Duplicate delivery: the post was in the queue twice and is already reviewed.
-        # It has been removed from the queue above; nothing more to record.
+        # Re-delivery: a fan-out (e.g. a due ops:retry) put back a post this user had
+        # already reviewed. It has been removed from the queue above; nothing to record.
         await session.rollback()
         raise HTTPException(409, {"error": "already_reviewed"}) from None
 

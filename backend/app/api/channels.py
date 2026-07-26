@@ -70,10 +70,13 @@ async def subscribe_channel(
 
     # Mirror into Redis: add to the channel's subscriber set and make the user
     # reachable by fan-out (in free_queue if their queue has room).
+    #
+    # Deliberately no history backfill. A new subscriber's queue fills from the worker
+    # alone: posts published from now on, plus any parked in ops:retry because the
+    # channel had no free recipient — which is exactly the backlog case. Pulling
+    # already-distributed history here would be a second delivery path racing those
+    # retries, which is how the same post used to land in the queue twice.
     await service.sync_subscribe(redis, str(user.id), channel_id)
-    # Cold-start: seed the queue with recent un-reviewed posts so a new subscriber
-    # has something to review immediately (live posts arrive via the worker).
-    await service.backfill_queue(redis, session, user.id, channel_id)
 
     subscribed_ids = await _subscribed_channel_ids(session, user.id)
     return _to_read(channel, subscribed_ids)

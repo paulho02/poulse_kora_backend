@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import os
+import socket
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -22,12 +25,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run the feed operation-queue consumer as an in-process background task.
+    """Run the feed operation-stream consumer as an in-process background task.
 
-    Single process today ⇒ a single consumer. If this ever runs with more than one
-    web process, move the consumer to a dedicated worker (see app/feed/worker.py).
+    Each process joins the consumer group under its own unique name, so running several
+    web processes/replicas simply adds consumers that share the load — the Streams
+    group delivers each op to exactly one, and XAUTOCLAIM reclaims any left by a crash
+    (see app/feed/worker.py). For heavy fan-out, prefer a dedicated worker deployment
+    over piling consumers onto web processes, but correctness no longer depends on it.
     """
-    task = asyncio.create_task(run_consumer(redis_client))
+    consumer_name = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    task = asyncio.create_task(run_consumer(redis_client, consumer_name))
     app.state.feed_consumer_task = task
     try:
         yield

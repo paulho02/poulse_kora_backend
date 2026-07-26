@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     FEED_QUEUE_MAX_SLOTS: int = 20
     # Recipients (K) each operation fans a post out to.
     FEED_FANOUT: int = 3
+    # Recipient selection samples K * this many channel subscribers, then keeps the
+    # ones with a free slot (see service.select_recipients). Higher ⇒ more reliably
+    # finds K free recipients in a saturated channel, at the cost of a larger (still
+    # O(sample)) membership check. Must be >= 1.
+    FEED_FANOUT_SAMPLE_MULTIPLIER: int = 4
     # Dynamic admission price for creating an original post, as a function of the
     # operation-queue length: clamp(MIN + len(ops) // STEP_ITEMS, MIN, MAX).
     FEED_PRICE_MIN: int = 1
@@ -34,6 +39,22 @@ class Settings(BaseSettings):
     FEED_PRICE_STEP_ITEMS: int = 20
     # Seconds an undeliverable operation (no free recipient) waits before retry.
     FEED_RETRY_INTERVAL_SECONDS: int = 20
+    # How long an operation may keep retrying before it is abandoned (5 days). Without
+    # this a post published to a channel that never gains a free subscriber would cycle
+    # through the stream forever, and its presence in XLEN would inflate the admission
+    # price for everyone. The deadline is set on the first park and carried across
+    # re-parks, so it bounds total age, not the gap between attempts.
+    FEED_RETRY_MAX_AGE_SECONDS: int = 5 * 24 * 60 * 60
+
+    # --- operation stream (Redis Streams consumer group) ---
+    # How long (ms) a delivered-but-unacked op may sit idle before another consumer
+    # may reclaim it (XAUTOCLAIM). Must exceed the worst-case fan-out time for one op,
+    # or a slow op gets reclaimed and processed twice (tolerated, but wasteful).
+    FEED_STREAM_CLAIM_MIN_IDLE_MS: int = 30_000
+    # Max abandoned ops a single reclaim sweep pulls back per loop iteration.
+    FEED_STREAM_RECLAIM_COUNT: int = 10
+    # Block up to this long (seconds) waiting for a new stream entry per read.
+    FEED_STREAM_BLOCK_SECONDS: float = 1.0
 
     BACKEND_CORS_ORIGINS: list[AnyHttpUrl] = []
 
