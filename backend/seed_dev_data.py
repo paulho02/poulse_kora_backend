@@ -1,11 +1,12 @@
 """Seed the dev database with bot-authored posts so the Relay review flow
 (feed / forward / drop) can actually be exercised.
 
-`get_posts_feed` (app/api/posts.py) excludes posts authored by the viewer, so a
-single real dev account never sees anything in its own feed until *someone else*
-has posted. This script creates a handful of fixed "bot" users and tops up every
-channel with a few realistic posts from them, so any real account just needs to
-subscribe to a channel (via the app) to have something to review.
+A post is never delivered to its own author (FEED_EXCLUDE_OWN_POSTS), so a single
+real dev account never sees anything in its own feed until *someone else* has
+posted — and in a channel where it is the only subscriber, its posts are abandoned
+outright rather than parked. This script creates a handful of fixed "bot" users and
+tops up every channel with a few realistic posts from them, so any real account just
+needs to subscribe to a channel (via the app) to have something to review.
 
 Safe to re-run: bot users are matched by email, and each channel is only topped
 up to TARGET_POSTS_PER_CHANNEL bot-authored posts, so re-running won't pile up
@@ -175,6 +176,7 @@ async def main():
             f"Done. {len(bots)} bot users, {total_created} new posts. "
             f"Redis: {redis_stats['subscriptions']} subscriptions, "
             f"{redis_stats['users']} users seeded, "
+            f"{redis_stats['seen_seeded']} reviews seeded into seen sets, "
             f"{redis_stats['backfilled']} posts backfilled into queues."
         )
 

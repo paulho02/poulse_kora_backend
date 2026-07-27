@@ -23,6 +23,13 @@ OPS_RETRY = "ops:retry"
 # Users with at least one free slot in their review queue.
 FREE_QUEUE = "free_queue"
 
+# Shared admission-price snapshot ({"price", "computed_at", "expires_at"} JSON),
+# refreshed by a background task every FEED_PRICE_REFRESH_SECONDS (see
+# app/feed/service.py: refresh_price_snapshot). One key for the whole deployment, so
+# every reader and every charge agree on the same price for the same window instead of
+# each computing its own live value.
+PRICE_SNAPSHOT = "feed:price"
+
 
 def queue(user_id: str) -> str:
     """Per-user review queue (list of post_ids)."""
@@ -37,3 +44,14 @@ def channel(channel_id: int) -> str:
 def tokens(user_id: str) -> str:
     """Spendable token balance (atomic counter)."""
     return f"tokens:{user_id}"
+
+
+def seen(post_id: int) -> str:
+    """Set of user_ids a post has already been delivered to (the re-delivery guard).
+
+    Written by the `place` script in the same atomic call that pushes the post into a
+    queue, so membership is recorded before the recipient can act on it. Expires after
+    FEED_SEEN_TTL_SECONDS, refreshed on each delivery — the set dies with the post
+    rather than accumulating forever.
+    """
+    return f"seen:{post_id}"

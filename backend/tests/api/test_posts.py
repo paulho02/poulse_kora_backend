@@ -3,7 +3,8 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.feed import service
+from app.feed import keys, service
+from app.feed.worker import consume_once
 from app.models.channel import Channel
 from app.models.post import Post
 from app.models.user import User
@@ -149,6 +150,31 @@ class TestPostEconomy:
         data = resp.json()
         assert data["token_balance"] == 3
         assert data["post_price"] >= settings.FEED_PRICE_MIN
+        assert "post_price_expires_at" in data
+
+    async def test_economy_price_is_shared_until_expiry(
+        self, client: AsyncClient, redis: Redis, create_user
+    ):
+        """Two reads must agree, even if congestion changes in between — the whole
+        point of the shared snapshot is that clients never see the price drift
+        between calls a few seconds apart."""
+        user: User = await create_user()
+
+        resp1 = await client.get(
+            settings.API_PATH + "/posts/economy", headers=get_jwt_header(user)
+        )
+        data1 = resp1.json()
+
+        for i in range(settings.FEED_PRICE_STEP_ITEMS * 3):
+            await service.enqueue_operation(redis, post_id=i, channel_id=1)
+
+        resp2 = await client.get(
+            settings.API_PATH + "/posts/economy", headers=get_jwt_header(user)
+        )
+        data2 = resp2.json()
+
+        assert data2["post_price"] == data1["post_price"]
+        assert data2["post_price_expires_at"] == data1["post_price_expires_at"]
 
 
 class TestGetPost:
@@ -272,6 +298,65 @@ class TestReviewPost:
             json={"kind": "forward"},
         )
         assert resp.status_code == 404
+
+
+class TestDeliveryExclusions:
+    async def test_author_never_receives_their_own_published_post(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel,
+    ):
+        """End to end: publish, then fan out the way the background consumer would.
+        The author is the channel's only subscriber, so nobody gets it — and crucially
+        the author's own feed stays empty."""
+        author: User = await create_user()
+        channel: Channel = await create_channel()
+        await subscribe(db, author, channel)
+        await service.sync_subscribe(redis, str(author.id), channel.id)
+        await service.earn_token(redis, str(author.id), settings.FEED_PRICE_MAX)
+        header = get_jwt_header(author)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=header,
+            json={"channel_id": channel.id, "text": "mine"},
+        )
+        assert resp.status_code == 201, resp.text
+
+        # The author rides along on the operation — that is the whole mechanism.
+        entries = await redis.xrange(keys.STREAM)
+        assert entries[0][1]["author_id"] == str(author.id)
+
+        await consume_once(redis, "test-consumer", timeout=2.0)
+
+        feed = await client.get(settings.API_PATH + "/posts/feed", headers=header)
+        assert feed.status_code == 200, feed.text
+        assert feed.json() == []
+
+    async def test_forwarded_post_does_not_return_to_the_forwarder(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        """The loop that used to bite: forwarding re-injects the post, and before the
+        seen set the forwarder was a perfectly valid recipient for it again."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)
+        await subscribe(db, user, channel)
+        await service.sync_subscribe(redis, str(user.id), channel.id)
+        await service.place_post(redis, str(user.id), post.id)
+        header = get_jwt_header(user)
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=header,
+            json={"kind": "forward"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        await consume_once(redis, "test-consumer", timeout=2.0)
+
+        feed = await client.get(settings.API_PATH + "/posts/feed", headers=header)
+        assert feed.json() == []
 
 
 class TestInteractionRateLimit:

@@ -46,9 +46,12 @@ class PostCreateResult(BaseModel):
 
 
 class PostEconomy(BaseModel):
-    """The viewer's current posting economy — spendable tokens and the live price
-    to publish one original post. Fetched on demand (e.g. on feed/create refresh);
-    not real-time."""
+    """The viewer's current posting economy — spendable tokens and the shared price
+    to publish one original post. The price is a periodic snapshot (see
+    app/feed/service.py: get_price_snapshot), not computed live, so it is the same
+    for every viewer until `post_price_expires_at` — creating a post before then is
+    charged this exact price."""
 
     token_balance: int
     post_price: int
+    post_price_expires_at: datetime

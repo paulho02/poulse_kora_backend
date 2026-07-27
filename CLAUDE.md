@@ -82,6 +82,20 @@ after cloning).
   OpenAPI `operationId` (enforced unique by `use_route_names_as_operation_ids` in `factory.py`) —
   this matters because a frontend API client can be generated from the OpenAPI schema
   (`yarn genapi`, only relevant if the React Admin frontend is revived).
+- **Delivery exclusions** (`backend/app/feed/`): two independent guards behind two flags.
+  `FEED_EXCLUDE_OWN_POSTS` carries `author_id` on the stream entry so the worker skips the
+  post's author — no stored state, no extra round trip. `FEED_EXCLUDE_SEEN` keeps a per-post
+  `seen:{post_id}` set written **inside the `place` Lua script**, so a recipient is recorded
+  atomically with delivery, before they could review or forward it. `select_recipients`
+  filters on both (efficiency); `place_post` re-checks and returns `PLACE_REFUSED`
+  (correctness) — it's the choke point every delivery path goes through, so never count a
+  refusal as a delivery. Postgres' unique `(user, post)` review constraint remains the
+  backstop, so a lost/expired set degrades to a 409 rather than breaking. **Enabling
+  `FEED_EXCLUDE_SEEN` on an existing DB requires `python rebuild_redis.py`** to seed the
+  sets from `post_reviews`. Consequence to know: exclusions make channel *saturation*
+  reachable, so `process_operation` now asks `has_eligible_recipient` whether to park or
+  abandon — an exhausted channel drops the op instead of retrying it for 5 days. An *empty*
+  channel is still parked (that backlog is how a new channel reaches its first subscriber).
 - **Rate limiting** (`backend/app/core/rate_limit.py`, `app/deps/rate_limit.py`): feed writes
   (create post, forward, drop) share **one per-user budget** — `INTERACTION_RATE_LIMIT` hits per
   sliding `INTERACTION_RATE_WINDOW_SECONDS` window, enforced by a Lua sliding-window log in Redis

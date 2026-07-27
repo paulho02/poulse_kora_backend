@@ -4,8 +4,8 @@ Each of these touches more than one key or does a read-modify-write that must no
 interleave with another consumer/request:
 
 - ``spend``: check-and-decrement the token balance (no negative balances).
-- ``place``: push a post into a recipient's queue (skipping one already there) and
-  drop them from ``free_queue`` once full.
+- ``place``: push a post into a recipient's queue (skipping one already there), record
+  the delivery in the post's ``seen`` set, and drop them from ``free_queue`` once full.
 - ``claim``: remove a post from a user's queue (the review concurrency guard) and
   re-add them to ``free_queue`` when a slot frees up.
 
@@ -29,17 +29,35 @@ end
 return redis.call('DECRBY', KEYS[1], price)
 """
 
-# KEYS[1]=queue:{user}  KEYS[2]=free_queue
+# KEYS[1]=queue:{user}  KEYS[2]=free_queue  KEYS[3]=seen:{post}
 # ARGV[1]=post_id  ARGV[2]=user_id  ARGV[3]=max_slots
-# Returns the queue length after the push (unchanged if the post was already queued).
+# ARGV[4]=exclude_seen (1/0)  ARGV[5]=seen_ttl_seconds
+# Returns the queue length after the push, or -1 if the post was refused because this
+# user has already had it (service.PLACE_REFUSED).
 #
 # Idempotent per (user, post): two independent paths deliver the same post to the same
 # user — the worker's fan-out (including an op parked in ops:retry while the channel had
 # no free subscriber) and backfill_queue on subscribe. Whichever runs second must not
-# push a second copy. LPOS returns false when absent (0 is a valid, truthy index).
+# push a second copy. LPOS returns false when absent (0 is a valid, truthy index). That
+# check stays *first*: a post still sitting in the queue is a no-op re-delivery, not a
+# refusal, and callers have always been able to treat it as success.
+#
+# The seen-set write lives here rather than on the review path so that recording and
+# delivering are one atomic step. A user can only review what is in their queue, and it
+# can only get there through this script — so by the time any review or forward is
+# possible, the exclusion is already durable. No ordering discipline for callers to get
+# wrong, and concurrent workers cannot both place the same post with one of them
+# observing a stale set.
 _PLACE = """
 if redis.call('LPOS', KEYS[1], ARGV[1]) then
   return redis.call('LLEN', KEYS[1])
+end
+if tonumber(ARGV[4]) == 1 then
+  if redis.call('SISMEMBER', KEYS[3], ARGV[2]) == 1 then
+    return -1
+  end
+  redis.call('SADD', KEYS[3], ARGV[2])
+  redis.call('EXPIRE', KEYS[3], ARGV[5])
 end
 redis.call('LPUSH', KEYS[1], ARGV[1])
 local len = redis.call('LLEN', KEYS[1])

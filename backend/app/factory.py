@@ -19,6 +19,7 @@ from app.api import api_router
 from app.core.config import settings
 from app.core.errors import slugify_detail
 from app.deps.users import fastapi_users, jwt_authentication
+from app.feed import service
 from app.feed.worker import run_consumer
 from app.redis import redis_client
 from app.schemas.user import UserCreate, UserRead, UserUpdate
@@ -28,23 +29,36 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run the feed operation-stream consumer as an in-process background task.
+    """Run the feed operation-stream consumer and the price-snapshot refresher as
+    in-process background tasks.
 
     Each process joins the consumer group under its own unique name, so running several
     web processes/replicas simply adds consumers that share the load — the Streams
     group delivers each op to exactly one, and XAUTOCLAIM reclaims any left by a crash
     (see app/feed/worker.py). For heavy fan-out, prefer a dedicated worker deployment
     over piling consumers onto web processes, but correctness no longer depends on it.
+
+    The price refresher (app/feed/service.py: run_price_refresher) has no per-consumer
+    identity to join — every process just recomputes and overwrites the same shared
+    snapshot key on its own timer, which is harmless since the computation is
+    deterministic given the same Redis state.
     """
     consumer_name = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     task = asyncio.create_task(run_consumer(redis_client, consumer_name))
+    price_task = asyncio.create_task(service.run_price_refresher(redis_client))
     app.state.feed_consumer_task = task
+    app.state.price_refresher_task = price_task
     try:
         yield
     finally:
         task.cancel()
+        price_task.cancel()
         try:
             await task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await price_task
         except asyncio.CancelledError:
             pass
 

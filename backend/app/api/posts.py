@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -11,7 +13,6 @@ from app.deps.rate_limit import limit_interactions
 from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentUser
 from app.feed import service
-from app.feed.pricing import compute_price
 from app.models.channel import Channel
 from app.models.channel_subscription import ChannelSubscription
 from app.models.post import Post
@@ -126,13 +127,18 @@ async def create_post(
     that rises with operation-queue congestion; superusers post for free. The post
     is enqueued as an operation for the worker to distribute.
 
+    The price charged is the current shared snapshot (see
+    service.get_price_snapshot), not a fresh live computation — the same number a
+    concurrent `GET /posts/economy` would have quoted, rather than one that could have
+    drifted in the seconds between the two calls.
+
     Shares the per-user interaction budget with reviewing (see app/deps/rate_limit.py),
     so a burst of posts and forwards together still can't flood the queue."""
     channel = await session.get(Channel, post_in.channel_id)
     if not channel:
         raise api_error(404, "channel_not_found")
 
-    price = compute_price(await service.operation_queue_len(redis), settings)
+    price = (await service.get_price_snapshot(redis))["price"]
     if user.is_superuser:
         token_balance = await service.token_balance(redis, str(user.id))
     else:
@@ -155,7 +161,9 @@ async def create_post(
     session.add(post)
     await session.commit()
 
-    await service.enqueue_operation(redis, post.id, post.channel_id)
+    await service.enqueue_operation(
+        redis, post.id, post.channel_id, author_id=str(post.author_id)
+    )
 
     post = await _get_post_with_relations(session, post.id)
     return PostCreateResult(
@@ -167,13 +175,20 @@ async def create_post(
 
 @router.get("/economy", response_model=PostEconomy)
 async def get_post_economy(user: CurrentUser, redis: CurrentRedis):
-    """Current spendable token balance and the live price to publish a post.
+    """Current spendable token balance and the shared price to publish a post, plus
+    the instant that price stops being guaranteed (see service.get_price_snapshot).
 
     Declared before `/{post_id}` so the literal path wins the route match.
     """
-    price = compute_price(await service.operation_queue_len(redis), settings)
+    snapshot = await service.get_price_snapshot(redis)
     balance = await service.token_balance(redis, str(user.id))
-    return PostEconomy(token_balance=balance, post_price=price)
+    return PostEconomy(
+        token_balance=balance,
+        post_price=snapshot["price"],
+        post_price_expires_at=datetime.fromtimestamp(
+            snapshot["expires_at"], tz=timezone.utc
+        ),
+    )
 
 
 @router.get("/{post_id}", response_model=PostRead)
@@ -237,7 +252,11 @@ async def review_post(
     token_balance = await service.earn_token(redis, str(user.id))
 
     if review_in.kind == "forward":
-        await service.enqueue_operation(redis, post_id, post.channel_id)
+        # The author travels with the post, not with whoever forwarded it — a forward
+        # must still never land back on the person who wrote it.
+        await service.enqueue_operation(
+            redis, post_id, post.channel_id, author_id=str(post.author_id)
+        )
 
     return PostReviewResult(
         post_id=post_id,

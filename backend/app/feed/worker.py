@@ -15,8 +15,12 @@ gives two things at once:
   processing (recently delivered) is never stolen. This is safe to run with N consumers.
 
 Delivery is at-least-once (a reclaimed, partially-done op re-delivers to some
-recipients), which the feed already tolerates — duplicate delivery is deduped at
-review time by the unique `(user, post)` constraint.
+recipients), which the feed already tolerates — `place_post` refuses a recipient who
+has already had the post, and the unique `(user, post)` review constraint is the final
+backstop. One consequence worth knowing: because the second pass can no longer land on
+the same recipients, a reclaimed op reaches a *fresh* set of users rather than mostly
+re-hitting the original ones, so a crash mid-fan-out spreads a post slightly wider than
+intended. Over-delivery on crash, never duplicate delivery.
 
 Self-trimming: a fully processed entry is `XDEL`'d and `XACK`'d, so the stream retains
 only outstanding work (undelivered backlog + in-flight). No separate trim janitor is
@@ -40,30 +44,59 @@ logger = logging.getLogger(__name__)
 
 
 async def process_operation(
-    redis: Redis, post_id: int, channel_id: int, expires_at: float | None = None
+    redis: Redis,
+    post_id: int,
+    channel_id: int,
+    expires_at: float | None = None,
+    author_id: str | None = None,
 ) -> int:
     """Fan `post_id` out to up to FEED_FANOUT eligible recipients. Returns the count.
 
     `expires_at` is the retry deadline carried by an op that has already been parked at
     least once; it is passed straight back to `schedule_retry` so re-parking does not
     reset the clock. None means this op has never been parked.
+
+    `author_id` is the post's author, skipped when FEED_EXCLUDE_OWN_POSTS is on. None on
+    ops written before the field existed, which simply fan out to everyone as before.
     """
     recipients = await service.select_recipients(
-        redis, channel_id, settings.FEED_FANOUT
+        redis, channel_id, settings.FEED_FANOUT, post_id=post_id, author_id=author_id
     )
+    # A placement can still be refused after selection (a concurrent worker got there
+    # first), so count what actually landed rather than what we intended to send.
+    delivered = 0
     for user_id in recipients:
-        await service.place_post(redis, user_id, post_id)
-    if not recipients:
-        # Nobody subscribed to this channel has a free slot: park for retry instead of
-        # discarding. Delivered once any subscriber frees a slot or a new one arrives.
-        await service.schedule_retry(redis, post_id, channel_id, expires_at=expires_at)
+        if await service.place_post(redis, user_id, post_id) != service.PLACE_REFUSED:
+            delivered += 1
+    if delivered:
+        return delivered
+
+    if await service.has_eligible_recipient(redis, channel_id, post_id, author_id):
+        # Nobody has a free slot right now: park for retry rather than discarding.
+        # Delivered once any subscriber frees a slot or a new one arrives.
+        await service.schedule_retry(
+            redis, post_id, channel_id, expires_at=expires_at, author_id=author_id
+        )
         logger.info(
             "feed op undeliverable, retry scheduled in %ss: post_id=%s channel_id=%s",
             settings.FEED_RETRY_INTERVAL_SECONDS,
             post_id,
             channel_id,
         )
-    return len(recipients)
+    else:
+        # Every subscriber has already had this post (or the only one left is its
+        # author). Parking it would cycle it through the stream every
+        # FEED_RETRY_INTERVAL_SECONDS for up to FEED_RETRY_MAX_AGE_SECONDS, inflating
+        # the admission price the whole time, to serve only the chance that someone new
+        # subscribes. We give that chance up: a post whose channel has already read it
+        # is not what a new subscriber needs. Note this is strictly narrower than an
+        # *empty* channel, which is still parked — that backlog is worth keeping.
+        logger.info(
+            "feed op exhausted its channel, abandoned: post_id=%s channel_id=%s",
+            post_id,
+            channel_id,
+        )
+    return 0
 
 
 async def _process_and_confirm(redis: Redis, entry_id: str, fields: dict) -> dict:
@@ -77,7 +110,10 @@ async def _process_and_confirm(redis: Redis, entry_id: str, fields: dict) -> dic
     channel_id = int(fields["channel_id"])
     raw_expiry = fields.get("expires_at")
     expires_at = float(raw_expiry) if raw_expiry is not None else None
-    await process_operation(redis, post_id, channel_id, expires_at)
+    # Absent on ops enqueued before FEED_EXCLUDE_OWN_POSTS existed — tolerated, like
+    # `expires_at`, so a deploy doesn't have to drain the stream first.
+    author_id = fields.get("author_id")
+    await process_operation(redis, post_id, channel_id, expires_at, author_id)
     await redis.xdel(keys.STREAM, entry_id)
     await redis.xack(keys.STREAM, keys.STREAM_GROUP, entry_id)
     return {"post_id": post_id, "channel_id": channel_id}

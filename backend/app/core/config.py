@@ -37,6 +37,19 @@ class Settings(BaseSettings):
     FEED_PRICE_MIN: int = 1
     FEED_PRICE_MAX: int = 5
     FEED_PRICE_STEP_ITEMS: int = 20
+    # The price above is expensive to keep consistent if computed live on every
+    # request (two calls a few seconds apart can see different queue lengths). Instead
+    # a background task recomputes it on a timer and publishes one shared snapshot that
+    # every reader and every charge reads from (see app/feed/service.py:
+    # refresh_price_snapshot / get_price_snapshot). The snapshot's `expires_at` —
+    # computed_at + FEED_PRICE_REFRESH_SECONDS — is a guarantee shown to clients (see
+    # GET /posts/economy) that the price will not change before then; the refresh loop
+    # honors it even across several uncoordinated processes (see run_price_refresher).
+    # FEED_PRICE_TTL_SECONDS is unrelated to that guarantee — it's just the Redis key's
+    # own TTL, comfortably longer than the refresh interval, so a stalled refresher
+    # shows up as a missing snapshot rather than a silently stale price served forever.
+    FEED_PRICE_REFRESH_SECONDS: int = 60
+    FEED_PRICE_TTL_SECONDS: int = 90
     # Seconds an undeliverable operation (no free recipient) waits before retry.
     FEED_RETRY_INTERVAL_SECONDS: int = 20
     # How long an operation may keep retrying before it is abandoned (5 days). Without
@@ -45,6 +58,25 @@ class Settings(BaseSettings):
     # price for everyone. The deadline is set on the first park and carried across
     # re-parks, so it bounds total age, not the gap between attempts.
     FEED_RETRY_MAX_AGE_SECONDS: int = 5 * 24 * 60 * 60
+
+    # --- delivery exclusions ---
+    # Never fan a post out to its own author. Free to enforce: `author_id` rides along
+    # on the stream entry, so filtering it costs no extra round trip and no stored state.
+    # Note the side effect — a channel whose only free subscriber is the author now
+    # delivers nothing, and the op is abandoned rather than retried (see
+    # service.has_eligible_recipient).
+    FEED_EXCLUDE_OWN_POSTS: bool = True
+    # Never deliver a post to a user it has already reached. Backed by a per-post
+    # `seen:{post_id}` set written *atomically by the `place` script*, so a user is
+    # recorded the instant the post lands in their queue — before they could possibly
+    # review or forward it, which is what makes it race-free. Postgres' unique
+    # (user, post) review constraint stays the backstop, so losing the set degrades to
+    # today's 409 rather than breaking correctness.
+    FEED_EXCLUDE_SEEN: bool = True
+    # Lifetime of a `seen:{post_id}` set, refreshed on every delivery. Must exceed
+    # FEED_RETRY_MAX_AGE_SECONDS, or a post still circulating could outlive the record
+    # of who has already had it.
+    FEED_SEEN_TTL_SECONDS: int = 7 * 24 * 60 * 60
 
     # --- operation stream (Redis Streams consumer group) ---
     # How long (ms) a delivered-but-unacked op may sit idle before another consumer

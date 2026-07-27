@@ -2,10 +2,15 @@
 
 Redis is the backbone of the feed algorithm but Postgres remains the source of
 truth. Channel subscriber sets and the free-slot set are fully derivable from the
-`channel_subscriptions` / `users` tables, and token balances are seeded from each
-user's lifetime `reviewed_count` (a proxy — actual spends aren't tracked in PG).
+`channel_subscriptions` / `users` tables, token balances are seeded from each
+user's lifetime `reviewed_count` (a proxy — actual spends aren't tracked in PG), and
+the `seen:*` re-delivery guards are seeded from `post_reviews`.
 Per-user queues and the operation queue are NOT derivable and rely on Redis AOF for
 durability; this script leaves them untouched.
+
+Also the migration step for enabling FEED_EXCLUDE_SEEN on an existing database: the
+`seen:*` sets start empty, so without a run here every user gets one last round of
+posts they had already reviewed.
 
 Idempotent — safe to re-run (e.g. after a Redis flush, or to reconcile drift).
 
@@ -26,6 +31,7 @@ async def main():
     print(
         f"Rebuilt Redis state: {stats['subscriptions']} subscriptions across "
         f"channel sets, {stats['users']} users seeded (free_queue + tokens), "
+        f"{stats['seen_seeded']} reviews seeded into seen sets, "
         f"{stats['backfilled']} posts backfilled into queues."
     )
 
