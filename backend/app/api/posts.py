@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.core.errors import api_error
 from app.core.relay_rules import is_review_gate_unlocked
 from app.deps.db import CurrentAsyncSession
+from app.deps.rate_limit import limit_interactions
 from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentUser
 from app.feed import service
@@ -109,7 +110,12 @@ async def get_posts_feed(
     return [_serialize_post(p, user) for p in ordered]
 
 
-@router.post("", response_model=PostCreateResult, status_code=201)
+@router.post(
+    "",
+    response_model=PostCreateResult,
+    status_code=201,
+    dependencies=[Depends(limit_interactions)],
+)
 async def create_post(
     post_in: PostCreate,
     session: CurrentAsyncSession,
@@ -118,7 +124,10 @@ async def create_post(
 ):
     """Publish an original post. Costs a dynamic number of tokens (admission price)
     that rises with operation-queue congestion; superusers post for free. The post
-    is enqueued as an operation for the worker to distribute."""
+    is enqueued as an operation for the worker to distribute.
+
+    Shares the per-user interaction budget with reviewing (see app/deps/rate_limit.py),
+    so a burst of posts and forwards together still can't flood the queue."""
     channel = await session.get(Channel, post_in.channel_id)
     if not channel:
         raise api_error(404, "channel_not_found")
@@ -179,7 +188,11 @@ async def get_post(
     return _serialize_post(post, user)
 
 
-@router.post("/{post_id}/review", response_model=PostReviewResult)
+@router.post(
+    "/{post_id}/review",
+    response_model=PostReviewResult,
+    dependencies=[Depends(limit_interactions)],
+)
 async def review_post(
     post_id: int,
     review_in: PostReviewCreate,
@@ -192,6 +205,10 @@ async def review_post(
     Removing the post from the Redis queue is the concurrency guard (a post can only
     be reviewed while it sits in the queue). Reviewing earns one token; forwarding
     re-injects the post as a new operation so it propagates to more users.
+
+    Rate-limited per user (see app/deps/rate_limit.py): swiping faster than the limit
+    isn't reading, and a token is earned per review, so the cap also stops someone
+    farming tokens by machine-gunning drops.
     """
     post = await session.get(Post, post_id)
     if not post:

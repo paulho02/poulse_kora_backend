@@ -82,6 +82,14 @@ after cloning).
   OpenAPI `operationId` (enforced unique by `use_route_names_as_operation_ids` in `factory.py`) —
   this matters because a frontend API client can be generated from the OpenAPI schema
   (`yarn genapi`, only relevant if the React Admin frontend is revived).
+- **Rate limiting** (`backend/app/core/rate_limit.py`, `app/deps/rate_limit.py`): feed writes
+  (create post, forward, drop) share **one per-user budget** — `INTERACTION_RATE_LIMIT` hits per
+  sliding `INTERACTION_RATE_WINDOW_SECONDS` window, enforced by a Lua sliding-window log in Redis
+  (one round trip, one sorted set per active user, self-expiring). Superusers are exempt; setting
+  the limit to 0 disables it. Attach to a route with
+  `dependencies=[Depends(limit_interactions)]` — it runs before the handler, so a throttled request
+  spends nothing and mutates nothing. Rejections are `429 {"error": "rate_limited", "retry_after": n}`
+  plus a `Retry-After` header.
 - **List endpoints follow the React Admin data-provider convention**: `app/deps/request_params.py`
   parses react-admin-style `sort`/`range` query params into skip/limit/order, and responses set a
   `Content-Range` header (`{skip}-{end}/{total}`). This convention exists purely because of the

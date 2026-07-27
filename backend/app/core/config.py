@@ -56,6 +56,15 @@ class Settings(BaseSettings):
     # Block up to this long (seconds) waiting for a new stream entry per read.
     FEED_STREAM_BLOCK_SECONDS: float = 1.0
 
+    # --- interaction rate limiting ---
+    # Feed writes (create a post, forward, drop) share one per-user budget: at most
+    # INTERACTION_RATE_LIMIT of them in any sliding window of
+    # INTERACTION_RATE_WINDOW_SECONDS (see app/core/rate_limit.py). One shared budget
+    # rather than one per endpoint, so alternating between them doesn't dodge it.
+    # Set the limit to 0 to disable rate limiting entirely.
+    INTERACTION_RATE_LIMIT: int = 5
+    INTERACTION_RATE_WINDOW_SECONDS: float = 10.0
+
     BACKEND_CORS_ORIGINS: list[AnyHttpUrl] = []
 
     TEST_DATABASE_URL: PostgresDsn | None = None

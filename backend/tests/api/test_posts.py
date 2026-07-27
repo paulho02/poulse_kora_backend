@@ -272,3 +272,95 @@ class TestReviewPost:
             json={"kind": "forward"},
         )
         assert resp.status_code == 404
+
+
+class TestInteractionRateLimit:
+    """The per-user budget shared by create/forward/drop (app/deps/rate_limit.py)."""
+
+    async def test_review_burst_past_the_limit_is_throttled(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        limit = settings.INTERACTION_RATE_LIMIT
+        posts = [await create_post(channel=channel) for _ in range(limit + 1)]
+        for post in posts:
+            await service.place_post(redis, str(user.id), post.id)
+        header = get_jwt_header(user)
+
+        for post in posts[:limit]:
+            resp = await client.post(
+                settings.API_PATH + f"/posts/{post.id}/review",
+                headers=header,
+                json={"kind": "drop"},
+            )
+            assert resp.status_code == 200, resp.text
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{posts[-1].id}/review",
+            headers=header,
+            json={"kind": "drop"},
+        )
+        assert resp.status_code == 429, resp.text
+        body = resp.json()["detail"]
+        assert body["error"] == "rate_limited"
+        assert 1 <= body["retry_after"] <= settings.INTERACTION_RATE_WINDOW_SECONDS
+        assert resp.headers["Retry-After"] == str(body["retry_after"])
+        # Rejected before the handler ran: the post stays reviewable.
+        assert await service.render_queue_ids(redis, str(user.id), 10) == [posts[-1].id]
+
+    async def test_budget_is_shared_between_reviewing_and_posting(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        """Alternating between endpoints must not buy extra interactions."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        limit = settings.INTERACTION_RATE_LIMIT
+        posts = [await create_post(channel=channel) for _ in range(limit)]
+        for post in posts:
+            await service.place_post(redis, str(user.id), post.id)
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        header = get_jwt_header(user)
+
+        for post in posts:
+            resp = await client.post(
+                settings.API_PATH + f"/posts/{post.id}/review",
+                headers=header,
+                json={"kind": "drop"},
+            )
+            assert resp.status_code == 200, resp.text
+
+        balance_before = await service.token_balance(redis, str(user.id))
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=header,
+            json={"channel_id": channel.id, "text": "one too many"},
+        )
+        assert resp.status_code == 429, resp.text
+        # Throttled ahead of the handler, so nothing was charged for it.
+        assert await service.token_balance(redis, str(user.id)) == balance_before
+
+    async def test_superuser_is_exempt(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        user: User = await create_user()
+        user.is_superuser = True
+        db.add(user)
+        await db.commit()
+        channel: Channel = await create_channel()
+        posts = [
+            await create_post(channel=channel)
+            for _ in range(settings.INTERACTION_RATE_LIMIT + 1)
+        ]
+        for post in posts:
+            await service.place_post(redis, str(user.id), post.id)
+        header = get_jwt_header(user)
+
+        for post in posts:
+            resp = await client.post(
+                settings.API_PATH + f"/posts/{post.id}/review",
+                headers=header,
+                json={"kind": "drop"},
+            )
+            assert resp.status_code == 200, resp.text
