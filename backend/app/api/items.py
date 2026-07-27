@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from sqlalchemy import func, select
 from starlette.responses import Response
 
+from app.core.errors import api_error
 from app.deps.db import CurrentAsyncSession
 from app.deps.request_params import ItemRequestParams
 from app.deps.users import CurrentUser
@@ -63,7 +64,7 @@ async def update_item(
 ):
     item: Item | None = await session.get(Item, item_id)
     if not item or item.user_id != user.id:
-        raise HTTPException(404)
+        raise api_error(404, "item_not_found")
     update_data = item_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(item, field, value)
@@ -80,7 +81,7 @@ async def get_item(
 ):
     item: Item | None = await session.get(Item, item_id)
     if not item or item.user_id != user.id:
-        raise HTTPException(404)
+        raise api_error(404, "item_not_found")
     return item
 
 
@@ -92,7 +93,7 @@ async def delete_item(
 ):
     item: Item | None = await session.get(Item, item_id)
     if not item or item.user_id != user.id:
-        raise HTTPException(404)
+        raise api_error(404, "item_not_found")
     await session.delete(item)
     await session.commit()
     return {"success": True}

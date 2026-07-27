@@ -6,15 +6,18 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from fastapi_users import FastAPIUsers
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, JSONResponse
 
 from app.api import api_router
 from app.core.config import settings
+from app.core.errors import slugify_detail
 from app.deps.users import fastapi_users, jwt_authentication
 from app.feed.worker import run_consumer
 from app.redis import redis_client
@@ -57,9 +60,64 @@ def create_app():
         lifespan=lifespan,
     )
     setup_routers(app, fastapi_users)
+    setup_exception_handlers(app)
     setup_cors_middleware(app)
     serve_static_app(app)
     return app
+
+
+def setup_exception_handlers(app: FastAPI) -> None:
+    """Force every error response into the `{"detail": {"error": ..., ...}}` envelope.
+
+    Our own routes already raise that shape via `app.core.errors.api_error`, but
+    FastAPI, Starlette and fastapi-users all raise their own errors with either a
+    bare string detail (`"Not Found"`) or a differently-keyed dict. The client has
+    to be able to switch on one field, so normalize them all here rather than
+    teaching the client three formats.
+    """
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            # Already structured. fastapi-users uses `code`/`reason` for password
+            # validation failures, so promote that to `error` rather than leaving
+            # the client with an envelope it can't key on.
+            body = dict(detail)
+            if "error" not in body:
+                body["error"] = slugify_detail(str(body.pop("code", "error")))
+        else:
+            body = {"error": slugify_detail(str(detail)), "message": str(detail)}
+        return JSONResponse(
+            {"detail": body}, status_code=exc.status_code, headers=exc.headers
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ):
+        return JSONResponse(
+            {
+                "detail": {
+                    "error": "validation_error",
+                    "fields": [
+                        {
+                            "field": ".".join(str(p) for p in err["loc"][1:]),
+                            "message": err["msg"],
+                        }
+                        for err in exc.errors()
+                    ],
+                }
+            },
+            status_code=422,
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):
+        # Deliberately opaque: the client shows a generic "something went wrong".
+        # Starlette re-raises after this so the traceback still reaches the logs.
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse({"detail": {"error": "internal_error"}}, status_code=500)
 
 
 def setup_routers(app: FastAPI, fastapi_users: FastAPIUsers) -> None:

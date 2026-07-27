@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
+from app.core.errors import api_error
 from app.core.relay_rules import is_review_gate_unlocked
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import CurrentRedis
@@ -120,7 +121,7 @@ async def create_post(
     is enqueued as an operation for the worker to distribute."""
     channel = await session.get(Channel, post_in.channel_id)
     if not channel:
-        raise HTTPException(404)
+        raise api_error(404, "channel_not_found")
 
     price = compute_price(await service.operation_queue_len(redis), settings)
     if user.is_superuser:
@@ -128,13 +129,11 @@ async def create_post(
     else:
         token_balance = await service.spend_tokens(redis, str(user.id), price)
         if token_balance is None:
-            raise HTTPException(
+            raise api_error(
                 402,
-                {
-                    "error": "insufficient_tokens",
-                    "balance": await service.token_balance(redis, str(user.id)),
-                    "price": price,
-                },
+                "insufficient_tokens",
+                balance=await service.token_balance(redis, str(user.id)),
+                price=price,
             )
 
     post = Post(
@@ -176,7 +175,7 @@ async def get_post(
 ):
     post = await _get_post_with_relations(session, post_id)
     if not post or not await _is_subscribed(session, user.id, post.channel_id):
-        raise HTTPException(404)
+        raise api_error(404, "post_not_found")
     return _serialize_post(post, user)
 
 
@@ -196,11 +195,11 @@ async def review_post(
     """
     post = await session.get(Post, post_id)
     if not post:
-        raise HTTPException(404)
+        raise api_error(404, "post_not_found")
 
     removed = await service.claim_from_queue(redis, str(user.id), post_id)
     if removed == 0:
-        raise HTTPException(409, {"error": "not_in_queue"})
+        raise api_error(409, "not_in_queue")
 
     session.add(PostReview(user_id=user.id, post_id=post_id, kind=review_in.kind))
     user.reviewed_count += 1
@@ -216,7 +215,7 @@ async def review_post(
         # Re-delivery: a fan-out (e.g. a due ops:retry) put back a post this user had
         # already reviewed. It has been removed from the queue above; nothing to record.
         await session.rollback()
-        raise HTTPException(409, {"error": "already_reviewed"}) from None
+        raise api_error(409, "already_reviewed") from None
 
     token_balance = await service.earn_token(redis, str(user.id))
 

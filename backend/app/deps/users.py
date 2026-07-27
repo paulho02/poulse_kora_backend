@@ -32,9 +32,33 @@ jwt_authentication = AuthenticationBackend(
 )
 
 
+#: User fields the mobile app mirrors into its local, offline-editable settings store.
+#: Changing any of them bumps `User.settings_revision`; changing anything else
+#: (bio, username, password) does not, because those are only ever edited online.
+SETTINGS_FIELDS = frozenset({"dark_mode"})
+
+
 class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
     reset_password_token_secret = settings.SECRET_KEY
     verification_token_secret = settings.SECRET_KEY
+
+    async def _update(self, user: UserModel, update_dict: dict) -> UserModel:
+        """Bump `settings_revision` when a settings field actually changes value.
+
+        Hooked here rather than in a route because `PATCH /users/me` is served by
+        fastapi-users' own router. Compares against the pre-update `user`, so a
+        no-op PATCH (same value re-sent) doesn't inflate the revision and cause the
+        client to see a phantom conflict.
+        """
+        if any(
+            field in update_dict and getattr(user, field) != update_dict[field]
+            for field in SETTINGS_FIELDS
+        ):
+            update_dict = {
+                **update_dict,
+                "settings_revision": user.settings_revision + 1,
+            }
+        return await super()._update(user, update_dict)
 
 
 def get_user_db(session: CurrentAsyncSession):

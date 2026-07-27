@@ -7,6 +7,9 @@ class UserRead(schemas.BaseUser[uuid.UUID]):
     username: str | None
     bio: str | None
     dark_mode: bool
+    # Read-only: bumped server-side on settings changes, never accepted from clients
+    # (hence absent from UserUpdate). See User.settings_revision.
+    settings_revision: int
 
 
 class UserCreate(schemas.BaseUserCreate):

@@ -29,6 +29,17 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     bio: Mapped[str | None]
     dark_mode: Mapped[bool] = mapped_column(default=False, server_default="false")
 
+    # Bumped by UserManager._update whenever a *settings* field (see SETTINGS_FIELDS
+    # in app/deps/users.py) actually changes value. The mobile app keeps the revision
+    # it last reconciled with, so it can tell "nobody else touched this, safe to push
+    # my offline change" from "another device changed it too".
+    #
+    # This exists instead of reusing `updated` because `updated` is a whole-row
+    # onupdate: reviewing a post bumps reviewed_count and would therefore look like a
+    # settings conflict on every single forward/drop. It also avoids comparing a
+    # server clock against a device clock.
+    settings_revision: Mapped[int] = mapped_column(default=0, server_default="0")
+
     # Denormalized counters, updated transactionally alongside `PostReview` inserts
     # (see app/core/relay_rules.py) so the review-gate check is an O(1) attribute read.
     reviewed_count: Mapped[int] = mapped_column(default=0, server_default="0")

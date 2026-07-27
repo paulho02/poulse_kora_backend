@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from sqlalchemy import select
 
+from app.core.errors import api_error
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentUser
@@ -56,7 +57,7 @@ async def subscribe_channel(
 ):
     channel = await session.get(Channel, channel_id)
     if not channel:
-        raise HTTPException(404)
+        raise api_error(404, "channel_not_found")
 
     existing = await session.scalar(
         select(ChannelSubscription).filter(
@@ -91,7 +92,7 @@ async def unsubscribe_channel(
 ):
     channel = await session.get(Channel, channel_id)
     if not channel:
-        raise HTTPException(404)
+        raise api_error(404, "channel_not_found")
 
     existing = await session.scalar(
         select(ChannelSubscription).filter(
