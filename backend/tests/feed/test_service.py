@@ -176,3 +176,18 @@ class TestPostgresBridge:
         await service.rebuild_from_pg(redis, db)
         assert await redis.sismember(keys.channel(channel.id), str(user.id))
         assert await redis.sismember(keys.FREE_QUEUE, str(user.id))
+
+    async def test_rebuild_seeds_tokens_with_starting_grant_plus_reviewed_count(
+        self, redis: Redis, db, create_user
+    ):
+        """A rebuild must not retroactively strip a never-reviewed account's
+        starting grant — see FEED_STARTING_TOKENS."""
+        user = await create_user()
+        user.reviewed_count = 3
+        db.add(user)
+        await db.commit()
+
+        await service.rebuild_from_pg(redis, db)
+        assert await service.token_balance(redis, str(user.id)) == (
+            settings.FEED_STARTING_TOKENS + 3
+        )

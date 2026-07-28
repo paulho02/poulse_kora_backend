@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi_users import FastAPIUsers
 from fastapi_users.authentication import (
     AuthenticationBackend,
@@ -10,9 +10,12 @@ from fastapi_users.authentication import (
 )
 from fastapi_users.manager import BaseUserManager, UUIDIDMixin
 from fastapi_users_db_sqlalchemy import SQLAlchemyUserDatabase
+from redis.asyncio import Redis
 
 from app.core.config import settings
 from app.deps.db import CurrentAsyncSession
+from app.deps.redis import get_redis
+from app.feed.service import earn_token
 from app.models.user import User as UserModel
 
 bearer_transport = BearerTransport(tokenUrl="auth/jwt/login")
@@ -42,6 +45,17 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
     reset_password_token_secret = settings.SECRET_KEY
     verification_token_secret = settings.SECRET_KEY
 
+    def __init__(self, user_db, redis: Redis):
+        super().__init__(user_db)
+        self._redis = redis
+
+    async def on_after_register(
+        self, user: UserModel, request: Request | None = None
+    ) -> None:
+        """Grant the starting token balance so a brand-new account can publish a
+        first post immediately, without having to review anything first."""
+        await earn_token(self._redis, str(user.id), settings.FEED_STARTING_TOKENS)
+
     async def _update(self, user: UserModel, update_dict: dict) -> UserModel:
         """Bump `settings_revision` when a settings field actually changes value.
 
@@ -65,8 +79,8 @@ def get_user_db(session: CurrentAsyncSession):
     yield SQLAlchemyUserDatabase(session, UserModel)
 
 
-def get_user_manager(user_db=Depends(get_user_db)):
-    yield UserManager(user_db)
+def get_user_manager(user_db=Depends(get_user_db), redis: Redis = Depends(get_redis)):
+    yield UserManager(user_db, redis)
 
 
 fastapi_users = FastAPIUsers(get_user_manager, [jwt_authentication])

@@ -537,8 +537,10 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
     """Repopulate Redis distribution state from Postgres.
 
     - `channel:*` sets and `free_queue` from subscriptions.
-    - `tokens:*` seeded from each user's lifetime `reviewed_count` (a proxy — actual
-      spends are not tracked in PG).
+    - `tokens:*` seeded from `FEED_STARTING_TOKENS + reviewed_count` (a proxy — actual
+      spends are not tracked in PG, and reviewed_count is itself a proxy for earned
+      tokens, but the starting grant *is* durable policy, not something to lose in
+      a rebuild).
     - `seen:*` from `post_reviews`, so the re-delivery guard survives a rebuild.
     - Each subscriber's queue is backfilled with recent posts from their subscribed
       channels, so users who subscribed *before* Redis (empty queues) get content
@@ -546,9 +548,9 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
 
     Idempotent: the backfill skips posts already queued, seen-set writes are SADDs, and
     token balances are set (not incremented). The operation stream and `ops:retry` are
-    not touched. Note: because tokens are reset to `reviewed_count`, re-running discards
-    any spends since the last rebuild — run it for reconciliation/onboarding, not
-    routinely.
+    not touched. Note: because tokens are reset to `FEED_STARTING_TOKENS +
+    reviewed_count`, re-running discards any spends since the last rebuild — run it
+    for reconciliation/onboarding, not routinely.
     """
     subs = (await session.execute(select(ChannelSubscription))).scalars().all()
     users = (await session.execute(select(User))).scalars().all()
@@ -562,7 +564,10 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
             keys=[keys.queue(str(user.id)), keys.FREE_QUEUE],
             args=[str(user.id), settings.FEED_QUEUE_MAX_SLOTS],
         )
-        await redis.set(keys.tokens(str(user.id)), user.reviewed_count)
+        await redis.set(
+            keys.tokens(str(user.id)),
+            settings.FEED_STARTING_TOKENS + user.reviewed_count,
+        )
 
     backfilled = 0
     for sub in subs:

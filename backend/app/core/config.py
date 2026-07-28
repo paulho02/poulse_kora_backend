@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     # economy, see the FEED_* settings below), but kept for reference/compatibility.
     RELAY_REVIEW_GATE: int = 5
 
+    # Tokens a brand-new account starts with (granted on registration — see
+    # UserManager.on_after_register), so signing up is enough to publish a first
+    # post without having to review anything first. Also folded into
+    # `rebuild_from_pg`'s token seeding (starting balance + reviewed_count), so a
+    # Redis rebuild doesn't retroactively strip a never-reviewed account's grant.
+    FEED_STARTING_TOKENS: int = 5
+
     # --- Redis-backed feed distribution algorithm ---
     # Per-user review-queue capacity. A user is in the `free_queue` set while their
     # queue holds fewer than this many post_ids.

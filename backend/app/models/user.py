@@ -29,6 +29,14 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     bio: Mapped[str | None]
     dark_mode: Mapped[bool] = mapped_column(default=False, server_default="false")
 
+    # Flipped once, after the mobile app's one-time onboarding flow (intro slides,
+    # mandatory channel picks, disclaimer) is confirmed. A plain one-way flag: unlike
+    # `dark_mode` it has no offline-conflict scenario, so it isn't part of
+    # SETTINGS_FIELDS/settings_revision.
+    onboarding_completed: Mapped[bool] = mapped_column(
+        default=False, server_default="false"
+    )
+
     # Bumped by UserManager._update whenever a *settings* field (see SETTINGS_FIELDS
     # in app/deps/users.py) actually changes value. The mobile app keeps the revision
     # it last reconciled with, so it can tell "nobody else touched this, safe to push

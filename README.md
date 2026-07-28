@@ -112,12 +112,14 @@ already-queued posts are left in place.
 
 ### The token economy
 
-Tokens are a **posting throttle, not a durable currency.** You earn 1 per review and spend
-a congestion-scaled price to post; when the system is busy, posting costs more and requires
-more reviewing to afford. Balances live only in Redis and are **not** journaled in Postgres
-— `rebuild_redis.py` reseeds them from each user's lifetime `reviewed_count`, so a rebuild
-discards spend history. That's acceptable precisely because tokens are friction, not money.
-Don't build product features that assume the balance is authoritative or persistent.
+Tokens are a **posting throttle, not a durable currency.** A new account starts with
+`FEED_STARTING_TOKENS` (see `app/core/config.py`) so signing up is enough to publish a first
+post; after that, you earn 1 per review and spend a congestion-scaled price to post — when the
+system is busy, posting costs more and requires more reviewing to afford. Balances live only in
+Redis and are **not** journaled in Postgres — `rebuild_redis.py` reseeds them from
+`FEED_STARTING_TOKENS + reviewed_count`, so a rebuild discards spend history but keeps the
+starting grant. That's acceptable precisely because tokens are friction, not money. Don't build
+product features that assume the balance is authoritative or persistent.
 
 ### Crash safety & scaling (Streams consumer group)
 
@@ -330,6 +332,21 @@ directly without creating any new posts:
 ```bash
 docker compose exec backend python rebuild_redis.py
 ```
+
+### Info banner
+
+`set_banner.py` pushes (or clears) the announcement shown as a compact banner in the mobile
+app on launch — e.g. a maintenance downtime notice. It's stored in Redis with no TTL, so it
+stays until explicitly replaced or cleared, and bypasses the superuser-guarded API entirely
+so it can be run from a terminal without minting a JWT.
+
+```bash
+docker compose exec backend python set_banner.py "maintenance downtime tonight 10pm-midnight"
+docker compose exec backend python set_banner.py --clear
+```
+
+Each call to set the banner gets a fresh id, so pushing a new message always reaches clients
+that previously chose "don't show again" on an older one — even if the text repeats.
 
 ### Single docker image
 
