@@ -5,7 +5,7 @@ from starlette.responses import Response
 from app.core.errors import api_error
 from app.deps.db import CurrentAsyncSession
 from app.deps.request_params import ItemRequestParams
-from app.deps.users import CurrentUser
+from app.deps.users import CurrentVerifiedUser
 from app.models.item import Item
 from app.schemas.item import Item as ItemSchema
 from app.schemas.item import ItemCreate, ItemUpdate
@@ -18,7 +18,7 @@ async def get_items(
     response: Response,
     session: CurrentAsyncSession,
     request_params: ItemRequestParams,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
 ):
     total = await session.scalar(
         select(func.count(Item.id).filter(Item.user_id == user.id))
@@ -46,7 +46,7 @@ async def get_items(
 async def create_item(
     item_in: ItemCreate,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
 ):
     item = Item(**item_in.model_dump())
     item.user_id = user.id
@@ -60,7 +60,7 @@ async def update_item(
     item_id: int,
     item_in: ItemUpdate,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
 ):
     item: Item | None = await session.get(Item, item_id)
     if not item or item.user_id != user.id:
@@ -77,7 +77,7 @@ async def update_item(
 async def get_item(
     item_id: int,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
 ):
     item: Item | None = await session.get(Item, item_id)
     if not item or item.user_id != user.id:
@@ -89,7 +89,7 @@ async def get_item(
 async def delete_item(
     item_id: int,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
 ):
     item: Item | None = await session.get(Item, item_id)
     if not item or item.user_id != user.id:

@@ -4,7 +4,7 @@ from sqlalchemy import select
 from app.core.errors import api_error
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import CurrentRedis
-from app.deps.users import CurrentUser
+from app.deps.users import CurrentVerifiedUser
 from app.feed import service
 from app.models.channel import Channel
 from app.models.channel_subscription import ChannelSubscription
@@ -35,7 +35,7 @@ def _to_read(channel: Channel, subscribed_ids: set[int]) -> ChannelRead:
 @router.get("", response_model=list[ChannelRead])
 async def list_channels(
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
     q: str | None = None,
 ):
     query = select(Channel).order_by(Channel.name)
@@ -52,7 +52,7 @@ async def list_channels(
 async def subscribe_channel(
     channel_id: int,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
     redis: CurrentRedis,
 ):
     channel = await session.get(Channel, channel_id)
@@ -87,7 +87,7 @@ async def subscribe_channel(
 async def unsubscribe_channel(
     channel_id: int,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
     redis: CurrentRedis,
 ):
     channel = await session.get(Channel, channel_id)

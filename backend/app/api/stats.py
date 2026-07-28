@@ -12,7 +12,7 @@ from app.core.relay_rules import (
     is_review_gate_unlocked,
 )
 from app.deps.db import CurrentAsyncSession
-from app.deps.users import CurrentUser
+from app.deps.users import CurrentVerifiedUser
 from app.models.post import Post
 from app.models.post_review import PostReview
 from app.schemas.stats import (
@@ -31,7 +31,7 @@ _FORWARD_BUCKET_CAP = 5
 @router.get("/me", response_model=UserStatsRead)
 async def get_my_stats(
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
 ):
     today = datetime.now(timezone.utc).date()
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
@@ -79,7 +79,7 @@ async def get_my_stats(
 @router.get("/global", response_model=GlobalStatsRead)
 async def get_global_stats(
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
 ):
     """App-wide stats shown to every user.
 

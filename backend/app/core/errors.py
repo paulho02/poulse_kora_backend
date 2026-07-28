@@ -34,3 +34,19 @@ def slugify_detail(detail: str) -> str:
     internals, fastapi-users). Our routes should always pass an explicit code.
     """
     return _NON_SLUG.sub("_", detail.strip().lower()).strip("_") or "error"
+
+
+def detail_text(value) -> str:
+    """Stringify an exception-detail value for `slugify_detail`/display.
+
+    fastapi-users raises its own errors with `ErrorCode(str, Enum)` members as the
+    detail (e.g. `ErrorCode.LOGIN_BAD_CREDENTIALS`) - calling the builtin `str()` on
+    one does NOT return the string value ("LOGIN_BAD_CREDENTIALS"), it returns
+    Enum's own `__str__` ("ErrorCode.LOGIN_BAD_CREDENTIALS"), because a `(str, Enum)`
+    mixin doesn't inherit `str`'s `__str__`. That garbled text was slipping into the
+    API's `error`/`message` fields (e.g. `errorcode_login_bad_credentials`) for
+    every bare-string fastapi-users error. Since such values already *are* `str`
+    instances with the right character data, returning them as-is sidesteps the
+    `__str__` override entirely; only genuinely non-str values fall back to `str()`.
+    """
+    return value if isinstance(value, str) else str(value)

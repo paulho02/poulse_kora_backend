@@ -17,7 +17,7 @@ from starlette.responses import FileResponse, JSONResponse
 
 from app.api import api_router
 from app.core.config import settings
-from app.core.errors import slugify_detail
+from app.core.errors import detail_text, slugify_detail
 from app.deps.users import fastapi_users, jwt_authentication
 from app.feed import service
 from app.feed.worker import run_consumer
@@ -99,9 +99,10 @@ def setup_exception_handlers(app: FastAPI) -> None:
             # the client with an envelope it can't key on.
             body = dict(detail)
             if "error" not in body:
-                body["error"] = slugify_detail(str(body.pop("code", "error")))
+                body["error"] = slugify_detail(detail_text(body.pop("code", "error")))
         else:
-            body = {"error": slugify_detail(str(detail)), "message": str(detail)}
+            text = detail_text(detail)
+            body = {"error": slugify_detail(text), "message": text}
         return JSONResponse(
             {"detail": body}, status_code=exc.status_code, headers=exc.headers
         )

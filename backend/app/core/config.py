@@ -104,6 +104,46 @@ class Settings(BaseSettings):
     INTERACTION_RATE_LIMIT: int = 5
     INTERACTION_RATE_WINDOW_SECONDS: float = 10.0
 
+    # --- password policy ---
+    # Off: fastapi-users applies no length/composition rule at all (see
+    # UserManager.validate_password) - "the user can enter any password he wants",
+    # by explicit design. On: at least PASSWORD_MIN_LENGTH characters, spanning at
+    # least PASSWORD_MIN_CHARACTER_CLASSES of {lowercase, uppercase, digit, symbol}.
+    REQUIRE_STRONG_PASSWORD: bool = False
+    PASSWORD_MIN_LENGTH: int = 10
+    PASSWORD_MIN_CHARACTER_CLASSES: int = 3
+
+    # --- email verification ---
+    # Off: `is_verified` is never checked (see app.deps.users.CurrentVerifiedUser) and
+    # no code is ever sent on registration - an unverified account works exactly
+    # like a verified one. On: CurrentVerifiedUser rejects unverified, non-superuser
+    # accounts with 403 "unverified_user" everywhere it's used (feed/channels/items/
+    # stats), and registration sends a short numeric code by email that the client
+    # must redeem via POST /auth/email-verification/confirm before those routes work.
+    # `GET/PATCH /users/me` deliberately stay open to unverified users regardless -
+    # the client needs the former to see `is_verified` at all, and the latter is
+    # self-service account editing rather than a platform action.
+    REQUIRE_EMAIL_VERIFICATION: bool = True
+    EMAIL_VERIFICATION_CODE_LENGTH: int = 6
+    EMAIL_VERIFICATION_CODE_TTL_SECONDS: int = 15 * 60
+    # A submitted-but-wrong code counts even if it's for a code that has already
+    # since expired, so this also bounds brute-forcing an old code's Redis key.
+    EMAIL_VERIFICATION_MAX_ATTEMPTS: int = 5
+    EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS: int = 60
+
+    # --- outbound email (SMTP) ---
+    # Any relay works unchanged (Gmail SMTP, AWS SES, Mailgun, Postmark, ...) - just
+    # set these in .env. Left unset (the default, e.g. local dev/tests), send_email
+    # logs the message instead of sending it, so registering an account never
+    # requires real SMTP credentials to work end-to-end.
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_USE_TLS: bool = True
+    SMTP_FROM_EMAIL: str = "no-reply@poulsekora.app"
+    SMTP_FROM_NAME: str = "Poulse Kora"
+
     BACKEND_CORS_ORIGINS: list[AnyHttpUrl] = []
 
     TEST_DATABASE_URL: PostgresDsn | None = None

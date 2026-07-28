@@ -11,7 +11,7 @@ from app.core.relay_rules import is_review_gate_unlocked
 from app.deps.db import CurrentAsyncSession
 from app.deps.rate_limit import limit_interactions
 from app.deps.redis import CurrentRedis
-from app.deps.users import CurrentUser
+from app.deps.users import CurrentVerifiedUser
 from app.feed import service
 from app.models.channel import Channel
 from app.models.channel_subscription import ChannelSubscription
@@ -77,7 +77,7 @@ async def _get_post_with_relations(session: CurrentAsyncSession, post_id: int) -
 @router.get("/feed", response_model=list[PostRead])
 async def get_posts_feed(
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
     redis: CurrentRedis,
     channel_id: int | None = None,
     skip: int = 0,
@@ -120,7 +120,7 @@ async def get_posts_feed(
 async def create_post(
     post_in: PostCreate,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
     redis: CurrentRedis,
 ):
     """Publish an original post. Costs a dynamic number of tokens (admission price)
@@ -174,7 +174,7 @@ async def create_post(
 
 
 @router.get("/economy", response_model=PostEconomy)
-async def get_post_economy(user: CurrentUser, redis: CurrentRedis):
+async def get_post_economy(user: CurrentVerifiedUser, redis: CurrentRedis):
     """Current spendable token balance and the shared price to publish a post, plus
     the instant that price stops being guaranteed (see service.get_price_snapshot).
 
@@ -195,7 +195,7 @@ async def get_post_economy(user: CurrentUser, redis: CurrentRedis):
 async def get_post(
     post_id: int,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
 ):
     post = await _get_post_with_relations(session, post_id)
     if not post or not await _is_subscribed(session, user.id, post.channel_id):
@@ -212,7 +212,7 @@ async def review_post(
     post_id: int,
     review_in: PostReviewCreate,
     session: CurrentAsyncSession,
-    user: CurrentUser,
+    user: CurrentVerifiedUser,
     redis: CurrentRedis,
 ):
     """Forward or drop a post from the user's queue.

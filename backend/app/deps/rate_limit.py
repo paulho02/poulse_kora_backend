@@ -18,14 +18,14 @@ from app.core.config import settings
 from app.core.errors import api_error
 from app.core.rate_limit import consume
 from app.deps.redis import CurrentRedis
-from app.deps.users import CurrentUser
+from app.deps.users import CurrentVerifiedUser
 
 # All feed writes (create post, forward, drop) share this one budget, so a user
 # cannot dodge it by alternating between endpoints.
 INTERACTION_SCOPE = "interact"
 
 
-async def limit_interactions(user: CurrentUser, redis: CurrentRedis) -> None:
+async def limit_interactions(user: CurrentVerifiedUser, redis: CurrentRedis) -> None:
     """Spend one interaction slot, or raise 429 with the wait in seconds.
 
     Superusers are exempt, matching how they bypass the token economy and the review

@@ -84,11 +84,16 @@ def redis():
 def create_user(db: AsyncSession, default_password: str):
     user_manager = next(get_user_manager())
 
-    async def inner():
+    async def inner(is_verified: bool = True):
+        # Defaults to verified: most tests exercise feed/channel/item behavior and
+        # shouldn't have to know about email verification to get a working user.
+        # Pass is_verified=False for tests that specifically exercise the
+        # REQUIRE_EMAIL_VERIFICATION gate (see tests/api/test_email_verification.py).
         user = User(
             id=uuid.uuid4(),
             email=f"{generate_random_string(20)}@{generate_random_string(10)}.com",
             hashed_password=user_manager.password_helper.hash(default_password),
+            is_verified=is_verified,
         )
         db.add(user)
         await db.commit()
