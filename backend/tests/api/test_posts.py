@@ -67,6 +67,31 @@ class TestPostsFeed:
         assert data["author"]["id"] is None
         assert data["author"]["username"] is None
 
+    async def test_feed_filtered_by_channel_id(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        user: User = await create_user()
+        channel_a: Channel = await create_channel()
+        channel_b: Channel = await create_channel()
+        post_a: Post = await create_post(channel=channel_a)
+        post_b: Post = await create_post(channel=channel_b)
+        await service.place_post(redis, str(user.id), post_a.id)
+        await service.place_post(redis, str(user.id), post_b.id)
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed",
+            params={"channel_id": channel_a.id},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [p["id"] for p in resp.json()]
+        assert ids == [post_a.id]
+
 
 class TestCreatePost:
     async def test_create_fails_insufficient_tokens(
@@ -298,6 +323,47 @@ class TestReviewPost:
             json={"kind": "forward"},
         )
         assert resp.status_code == 404
+
+    async def test_redelivery_after_review_is_already_reviewed_conflict(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+        monkeypatch,
+    ):
+        """The `post_reviews` unique constraint backstop (see CLAUDE.md /
+        app.feed.service `FEED_EXCLUDE_SEEN`): normally `place_post` refuses to
+        re-deliver a post the user's `seen` set already has, so this can only be
+        reached if that guard is bypassed (e.g. an expired/lost seen set). Simulate
+        that by disabling FEED_EXCLUDE_SEEN just for the re-delivery."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), post.id)
+        header = get_jwt_header(user)
+
+        first = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=header,
+            json={"kind": "forward"},
+        )
+        assert first.status_code == 200, first.text
+
+        monkeypatch.setattr(settings, "FEED_EXCLUDE_SEEN", False)
+        assert await service.place_post(redis, str(user.id), post.id) == 1
+        monkeypatch.undo()
+
+        second = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=header,
+            json={"kind": "drop"},
+        )
+        assert second.status_code == 409, second.text
+        assert second.json()["detail"]["error"] == "already_reviewed"
+        # Still removed from the queue by the failed attempt's claim.
+        assert await service.render_queue_ids(redis, str(user.id), 10) == []
 
 
 class TestDeliveryExclusions:

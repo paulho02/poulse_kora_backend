@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 import uuid
@@ -11,6 +12,7 @@ from app.feed.worker import (
     consume_once,
     process_operation,
     reclaim_orphaned_operations,
+    run_consumer,
 )
 
 CONSUMER = "test-consumer"
@@ -59,6 +61,34 @@ class TestConsumeOnce:
         # Self-heals the missing group, then blocks briefly on the empty stream.
         assert await consume_once(redis, CONSUMER, timeout=0.1) is None
 
+    async def test_default_timeout_comes_from_settings(self, redis: Redis, monkeypatch):
+        monkeypatch.setattr(settings, "FEED_STREAM_BLOCK_SECONDS", 0.1)
+        assert await consume_once(redis, CONSUMER) is None
+
+    async def test_unexpected_redis_error_is_not_swallowed(
+        self, redis: Redis, monkeypatch
+    ):
+        from redis.exceptions import ResponseError
+
+        async def boom(*args, **kwargs):
+            raise ResponseError("WRONGTYPE some other error")
+
+        monkeypatch.setattr(redis, "xreadgroup", boom)
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await consume_once(redis, CONSUMER, timeout=1.0)
+
+    async def test_empty_entries_in_a_truthy_response_returns_none(
+        self, redis: Redis, monkeypatch
+    ):
+        """Defensive: XREADGROUP returning a stream entry with no records must not
+        be treated as an item to process."""
+
+        async def empty_response(*args, **kwargs):
+            return [(keys.STREAM.encode(), [])]
+
+        monkeypatch.setattr(redis, "xreadgroup", empty_response)
+        assert await consume_once(redis, CONSUMER, timeout=1.0) is None
+
     async def test_success_retires_entry(self, redis: Redis):
         await service.sync_subscribe(redis, str(uuid.uuid4()), 8)
         await service.enqueue_operation(redis, post_id=55, channel_id=8)
@@ -104,6 +134,96 @@ class TestReliableQueue:
     async def test_reclaim_noop_when_nothing_pending(self, redis: Redis):
         await service.ensure_group(redis)
         assert await reclaim_orphaned_operations(redis, CONSUMER) == 0
+
+    async def test_reclaim_self_heals_a_missing_group(self, redis: Redis):
+        """Mirrors consume_once's own NOGROUP self-heal (fresh deploy, or a
+        flushed group) - reclaim must not crash when the group doesn't exist yet."""
+        assert not await redis.exists(keys.STREAM)
+        assert await reclaim_orphaned_operations(redis, CONSUMER) == 0
+        # ensure_group actually ran: a second call no longer needs to self-heal.
+        assert await reclaim_orphaned_operations(redis, CONSUMER) == 0
+
+    async def test_reclaim_unexpected_redis_error_is_not_swallowed(
+        self, redis: Redis, monkeypatch
+    ):
+        from redis.exceptions import ResponseError
+
+        async def boom(*args, **kwargs):
+            raise ResponseError("WRONGTYPE some other error")
+
+        monkeypatch.setattr(redis, "xautoclaim", boom)
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await reclaim_orphaned_operations(redis, CONSUMER)
+
+
+class TestEnsureGroup:
+    async def test_is_idempotent(self, redis: Redis):
+        """A second call must swallow BUSYGROUP rather than raise."""
+        await service.ensure_group(redis)
+        await service.ensure_group(redis)
+
+    async def test_unexpected_redis_error_is_not_swallowed(self, redis: Redis, monkeypatch):
+        from redis.exceptions import ResponseError
+
+        async def boom(*args, **kwargs):
+            raise ResponseError("WRONGTYPE some other error")
+
+        monkeypatch.setattr(redis, "xgroup_create", boom)
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await service.ensure_group(redis)
+
+
+class TestRunConsumer:
+    async def test_processes_ops_and_stops_cleanly_on_cancel(self, redis: Redis):
+        channel_id = 90
+        user = str(uuid.uuid4())
+        await service.sync_subscribe(redis, user, channel_id)
+        await service.enqueue_operation(redis, post_id=900, channel_id=channel_id)
+
+        task = asyncio.create_task(run_consumer(redis, "loop-consumer"))
+        try:
+            for _ in range(50):
+                if 900 in await service.render_queue_ids(redis, user, 10):
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail("run_consumer never delivered the enqueued op")
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    async def test_survives_a_transient_error_and_keeps_looping(
+        self, redis: Redis, monkeypatch
+    ):
+        """The consumer's job outlives any single bad iteration (see run_consumer's
+        docstring/`except Exception` branch): a transient failure is logged, not
+        fatal, so ops enqueued afterward still get processed."""
+        calls = {"n": 0}
+
+        async def flaky_reclaim(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient blip")
+            return 0
+
+        monkeypatch.setattr(
+            "app.feed.worker.reclaim_orphaned_operations", flaky_reclaim
+        )
+        monkeypatch.setattr(settings, "FEED_STREAM_BLOCK_SECONDS", 0.05)
+
+        task = asyncio.create_task(run_consumer(redis, "flaky-consumer"))
+        try:
+            for _ in range(50):
+                if calls["n"] >= 2:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail("run_consumer did not continue past the transient error")
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
 
 class TestBacklogDelivery:

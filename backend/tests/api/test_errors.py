@@ -10,9 +10,11 @@ wrong" in the app. These tests pin the shape rather than the prose.
 from collections.abc import Callable
 
 from httpx import AsyncClient
+from httpx._transports.asgi import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.feed import service
 from tests.utils import get_jwt_header
 
 
@@ -82,6 +84,33 @@ class TestErrorEnvelope:
         # The client renders these two directly ("need 5, you have 0").
         assert detail["balance"] == 0
         assert detail["price"] > 0
+
+    async def test_unhandled_exception_is_a_structured_500(
+        self,
+        app,
+        create_user: Callable,
+        monkeypatch,
+    ) -> None:
+        """See app.factory.setup_exception_handlers: the client must never see a
+        raw traceback or FastAPI's default error shape for a genuine bug.
+
+        Uses a one-off client with raise_app_exceptions=False: ASGITransport's
+        default re-raises after the response is sent (so a real ASGI server can log
+        it), which would otherwise surface here as the raw RuntimeError instead of
+        the response we want to assert on."""
+        user = await create_user()
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("something exploded")
+
+        monkeypatch.setattr(service, "render_queue_ids", boom)
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                f"{settings.API_PATH}/posts/feed", headers=get_jwt_header(user)
+            )
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == {"error": "internal_error"}
 
 
 class TestSettingsRevision:

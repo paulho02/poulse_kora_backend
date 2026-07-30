@@ -215,6 +215,48 @@ class TestSaturation:
         # Full, but has never had post 400 ⇒ still a candidate.
         assert await service.has_eligible_recipient(redis, channel_id, 400)
 
+    async def test_has_eligible_recipient_cheap_gate_shortcut(self, redis: Redis):
+        """With unseen subscribers clearly outnumbering seen+author, the function
+        must return True via the cheap O(1) SCARD gate without needing the O(channel)
+        SDIFF scan (see the docstring's "cheap gate first")."""
+        channel_id = 75
+        subscribers = [str(uuid.uuid4()) for _ in range(3)]
+        for u in subscribers:
+            await service.sync_subscribe(redis, u, channel_id)
+        # Nobody has seen post 401 yet: seen_count(0) + 1 < subscribers(3).
+        assert await service.has_eligible_recipient(redis, channel_id, 401)
+
+    async def test_both_exclusion_flags_off_always_eligible(
+        self, redis: Redis, toggle
+    ):
+        """Exhaustion is only a meaningful concept because of the two exclusion
+        flags; with both off there is nothing to be exhausted from."""
+        toggle("FEED_EXCLUDE_SEEN", False)
+        toggle("FEED_EXCLUDE_OWN_POSTS", False)
+        channel_id = 76
+        user = str(uuid.uuid4())
+        await service.sync_subscribe(redis, user, channel_id)
+        await service.place_post(redis, user, 402)
+        await service.claim_from_queue(redis, user, 402)
+
+        assert await service.has_eligible_recipient(redis, channel_id, 402)
+
+    async def test_seen_disabled_but_own_posts_enabled_uses_smembers_path(
+        self, redis: Redis, toggle
+    ):
+        """With FEED_EXCLUDE_SEEN off, the "who's left" scan reads the whole channel
+        (smembers) rather than diffing against a seen set (sdiff) - exercised here
+        with a sole subscriber who is also the author, so it is still correctly
+        exhausted (author-only) even though "seen" plays no part."""
+        toggle("FEED_EXCLUDE_SEEN", False)
+        channel_id = 77
+        author = str(uuid.uuid4())
+        await service.sync_subscribe(redis, author, channel_id)
+
+        assert not await service.has_eligible_recipient(
+            redis, channel_id, 403, author_id=author
+        )
+
 
 class TestSeenSeeding:
     async def test_rebuild_seeds_seen_from_reviews(
@@ -250,3 +292,19 @@ class TestSeenSeeding:
         placed = await service.backfill_queue(redis, db, author.id, channel.id)
         assert placed == 0
         assert post.id not in await service.render_queue_ids(redis, str(author.id), 10)
+
+    async def test_seeding_is_a_noop_when_the_flag_is_off(
+        self, redis: Redis, db, create_user, create_channel, create_post, toggle
+    ):
+        from tests.utils import review, subscribe
+
+        toggle("FEED_EXCLUDE_SEEN", False)
+        user = await create_user()
+        channel = await create_channel()
+        post = await create_post(channel=channel)
+        await subscribe(db, user, channel)
+        await review(db, user, post, "forward")
+
+        stats = await service.rebuild_from_pg(redis, db)
+        assert stats["seen_seeded"] == 0
+        assert not await redis.sismember(keys.seen(post.id), str(user.id))

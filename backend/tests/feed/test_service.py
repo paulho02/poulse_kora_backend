@@ -166,6 +166,18 @@ class TestPostgresBridge:
         ids = await service.render_queue_ids(redis, str(user.id), 10)
         assert set(ids) == {post_a.id, post_b.id}
 
+    async def test_backfill_is_a_noop_when_the_queue_is_already_full(
+        self, redis: Redis, db, create_user, create_channel, create_post
+    ):
+        user = await create_user()
+        channel = await create_channel()
+        await create_post(channel=channel)
+        for post_id in range(1, settings.FEED_QUEUE_MAX_SLOTS + 1):
+            await service.place_post(redis, str(user.id), post_id)
+
+        count = await service.backfill_queue(redis, db, user.id, channel.id)
+        assert count == 0
+
     async def test_rebuild_populates_channel_set_and_free_queue(
         self, redis: Redis, db, create_user, create_channel
     ):

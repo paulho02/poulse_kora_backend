@@ -25,7 +25,7 @@ aiosmtplib = "^5.1.2"
 black = "^23.10.1"
 pytest = "^7.4.3"
 ipython = "^8.16.1"
-pytest-cov = "^4.1.0"
+pytest-cov = "^6"
 httpx = "^0.24.1"
 pytest-asyncio = "^0.21.1"
 
@@ -38,6 +38,12 @@ skip = [".env"]
 
 [tool.pytest.ini_options]
 asyncio_mode = 'auto'
+
+[tool.coverage.run]
+# The default C tracer loses track of frames across this codebase's async/await +
+# SQLAlchemy-async pattern (verified: lines that demonstrably execute were reported
+# "missing"). sysmon (Python 3.12+ sys.monitoring, coverage 7.4+) traces correctly.
+core = "sysmon"
 
 [tool.ruff]
 target-version = "py313"

@@ -53,6 +53,29 @@ class TestGetMyStats:
         assert "early_adopter" in badge_codes_earned
         assert "streak_5" in badge_codes_earned
 
+    async def test_stats_reflect_drops_too(
+        self,
+        client: AsyncClient,
+        db: AsyncSession,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await subscribe(db, user, channel)
+        post = await create_post(channel=channel)
+        await review(db, user, post, "drop")
+
+        resp = await client.get(
+            settings.API_PATH + "/stats/me", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["reviewed_count"] == 1
+        assert data["dropped_count"] == 1
+        assert data["forwarded_count"] == 0
+
 
 class TestGetGlobalStats:
     async def test_global_stats_shape(self, client: AsyncClient, create_user):

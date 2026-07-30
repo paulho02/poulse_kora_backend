@@ -54,7 +54,9 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     forwarded_count: Mapped[int] = mapped_column(default=0, server_default="0")
     dropped_count: Mapped[int] = mapped_column(default=0, server_default="0")
 
-    items: Mapped["Item"] = relationship(back_populates="user", cascade="all, delete")
+    items: Mapped[list["Item"]] = relationship(
+        back_populates="user", cascade="all, delete"
+    )
     channel_subscriptions: Mapped[list["ChannelSubscription"]] = relationship(
         back_populates="user", cascade="all, delete"
     )

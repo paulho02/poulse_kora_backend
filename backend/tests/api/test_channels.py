@@ -120,3 +120,13 @@ class TestUnsubscribeChannel:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["is_subscribed"] is False
+
+    async def test_unsubscribe_nonexistent_channel(
+        self, client: AsyncClient, create_user
+    ):
+        user: User = await create_user()
+        resp = await client.post(
+            settings.API_PATH + f"/channels/{10**6}/unsubscribe",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 404

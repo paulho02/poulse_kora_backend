@@ -1,7 +1,10 @@
+import asyncio
+
+import pytest
 from redis.asyncio import Redis
 
 from app.core.config import settings
-from app.feed import service
+from app.feed import keys, service
 from app.feed.pricing import compute_price
 
 
@@ -92,3 +95,71 @@ class TestMaybeRefreshPriceSnapshot:
         assert refreshed["price"] > first["price"]
         assert refreshed["computed_at"] == after_expiry
         assert (await service.get_price_snapshot(redis)) == refreshed
+
+
+class TestRunPriceRefresher:
+    async def test_runs_immediately_and_stops_cleanly_on_cancel(self, redis: Redis):
+        """Runs once before the first sleep (see the docstring) — a fresh deploy
+        must not leave the snapshot missing for a full FEED_PRICE_REFRESH_SECONDS."""
+        assert not await redis.exists(keys.PRICE_SNAPSHOT)
+
+        task = asyncio.create_task(service.run_price_refresher(redis))
+        try:
+            for _ in range(50):
+                if await redis.exists(keys.PRICE_SNAPSHOT):
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                pytest.fail("run_price_refresher never published a snapshot")
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    async def test_survives_a_transient_error_and_keeps_looping(
+        self, redis: Redis, monkeypatch
+    ):
+        calls = {"n": 0}
+        real = service.maybe_refresh_price_snapshot
+
+        async def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient blip")
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(service, "maybe_refresh_price_snapshot", flaky)
+        monkeypatch.setattr(settings, "FEED_PRICE_REFRESH_SECONDS", 0.02)
+
+        task = asyncio.create_task(service.run_price_refresher(redis))
+        try:
+            for _ in range(50):
+                if calls["n"] >= 2:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                pytest.fail("run_price_refresher did not continue past the error")
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    async def test_cancellation_during_the_refresh_call_itself_propagates(
+        self, redis: Redis, monkeypatch
+    ):
+        """Cancellation must never be treated as "just another exception to log and
+        continue" - confirmed here specifically for the window inside the refresh
+        call itself, not just the (much larger, easier to hit by accident) sleep."""
+        started = asyncio.Event()
+
+        async def hang_forever(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(service, "maybe_refresh_price_snapshot", hang_forever)
+
+        task = asyncio.create_task(service.run_price_refresher(redis))
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
