@@ -7,3 +7,25 @@ REDIS_URL=redis://:CHANGE_ME@redis:6379/0
 TEST_REDIS_URL=redis://:CHANGE_ME@redis:6379/1
 SECRET_KEY=CHANGE_ME
 BACKEND_CORS_ORIGINS='["http://localhost:3000","http://127.0.0.1:3000"]'
+
+# --- Railway / deployed environments ---
+# This file is the local-dev/CI template only; it is never used as-is on Railway.
+# See RAILWAY.md for the full deploy guide. Quick reference for what changes there:
+#
+# DATABASE_URL / REDIS_URL: don't set literal values in Railway. Instead reference
+#   the Postgres/Redis service variables, e.g. ${{Postgres.DATABASE_URL}} and
+#   ${{Redis.REDIS_URL}} (exact names depend on what you called those services).
+#   TEST_DATABASE_URL / TEST_REDIS_URL are dev/CI-only (pytest) and don't need to be
+#   set on Railway at all.
+# SECRET_KEY: generate a real one per environment, e.g. `openssl rand -hex 32`.
+#   Never reuse a CHANGE_ME/dev value anywhere reachable from the internet.
+# BACKEND_CORS_ORIGINS: must list the exact https:// origin(s) the deployed Flutter
+#   web app is served from (its Railway domain, and any custom domain), e.g.
+#   '["https://poulse-kora-app-production.up.railway.app"]'. No wildcards.
+# REQUIRE_STRONG_PASSWORD: defaults to false (fine for pure local dev). Set to true
+#   for any environment reachable over the internet, including "int".
+# SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL: required
+#   once real users need to receive the email-verification code
+#   (REQUIRE_EMAIL_VERIFICATION defaults to true) — left unset, verification codes
+#   are only logged server-side and no one can complete verification.
+# SENTRY_DSN: optional, recommended once traffic is more than just you.
