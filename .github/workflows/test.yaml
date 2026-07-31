@@ -18,7 +18,7 @@ jobs:
 
     - name: Build backend
       id: docker_build_backend
-      uses: docker/build-push-action@v2
+      uses: docker/build-push-action@v7
       with:
         push: false
         tags: "poulse_kora_backend-backend:latest"
@@ -30,7 +30,7 @@ jobs:
     # Frontend disabled for now (unused React Admin app), see docker-compose.yml
     # - name: Build frontend
     #   id: docker_build_frontend
-    #   uses: docker/build-push-action@v2
+    #   uses: docker/build-push-action@v7
     #   with:
     #     push: false
     #     tags: "poulse_kora_backend-frontend:latest"
