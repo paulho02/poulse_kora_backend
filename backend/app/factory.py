@@ -162,18 +162,37 @@ def setup_routers(app: FastAPI, fastapi_users: FastAPIUsers) -> None:
 
 
 def serve_static_app(app):
-    app.mount("/", StaticFiles(directory="static"), name="static")
+    """Serves the (currently frontend-disabled, vestigial) static bundle as a
+    SPA fallback for unmatched GET/HEAD requests only.
+
+    Deliberately *not* `app.mount("/", ...)`, and not even a registered route
+    at all — just a plain post-routing middleware check. A mount (or any
+    route) registered at "/" matches literally any path, method included,
+    since neither `Mount` nor a method-restricted `Route` can be excluded from
+    matching a path outright — only from matching a *method* on that path.
+    That's enough to turn any non-GET/HEAD request to an unmatched path (a
+    typo'd path, a missing `/api/v1` prefix, or a CORS preflight OPTIONS
+    request when CORS isn't configured to intercept it first) into a
+    synthesized 405 "path exists, wrong method" instead of a normal "path
+    doesn't exist" 404 — and, worse, masks a genuine wrong-method call on a
+    real endpoint the same way. Only reaching for a static/index.html
+    response after the real router has already produced its own 404 keeps
+    Starlette's own 404/405 semantics authoritative everywhere else.
+    """
+    static_files = StaticFiles(directory="static")
 
     @app.middleware("http")
-    async def _add_404_middleware(request: Request, call_next):
-        """Serves static assets on 404"""
+    async def _static_fallback_middleware(request: Request, call_next):
         response = await call_next(request)
+        if request.method not in ("GET", "HEAD") or response.status_code != 404:
+            return response
         path = request["path"]
         if path.startswith(settings.API_PATH) or path.startswith("/docs"):
             return response
-        if response.status_code == 404:
+        try:
+            return await static_files.get_response(path.lstrip("/"), request.scope)
+        except StarletteHTTPException:
             return FileResponse("static/index.html")
-        return response
 
 
 def setup_cors_middleware(app):

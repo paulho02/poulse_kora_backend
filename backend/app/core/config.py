@@ -144,7 +144,7 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = "no-reply@poulsekora.app"
     SMTP_FROM_NAME: str = "Poulse Kora"
 
-    BACKEND_CORS_ORIGINS: list[AnyHttpUrl] = []
+    BACKEND_CORS_ORIGINS: list[str] = []
 
     TEST_DATABASE_URL: PostgresDsn | None = None
     DATABASE_URL: PostgresDsn
