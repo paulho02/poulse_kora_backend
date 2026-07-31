@@ -18,6 +18,7 @@ from app.models.channel_subscription import ChannelSubscription
 from app.models.post import Post
 from app.models.post_review import PostReview
 from app.models.user import User
+from app.models.user_subscription import UserSubscription
 from app.schemas.post import (
     PostAuthor,
     PostCreate,
@@ -51,6 +52,7 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
         author=author,
         forwarded_count=post.forwarded_count,
         dropped_count=post.dropped_count,
+        subscription_kind=post.subscription_kind,
         created=post.created,
     )
 
@@ -151,12 +153,22 @@ async def create_post(
                 price=price,
             )
 
+    is_supporter = (
+        await session.scalar(
+            select(UserSubscription).where(
+                UserSubscription.user_id == user.id,
+                UserSubscription.kind == "supporter",
+            )
+        )
+    ) is not None
+
     post = Post(
         channel_id=post_in.channel_id,
         author_id=user.id,
         text=post_in.text,
         has_image=post_in.has_image,
         is_anonymous=post_in.is_anonymous,
+        subscription_kind="supporter" if is_supporter else None,
     )
     session.add(post)
     await session.commit()

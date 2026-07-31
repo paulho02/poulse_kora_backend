@@ -6,7 +6,7 @@ from fastapi_users_db_sqlalchemy import GUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.functions import func
 from sqlalchemy.sql.schema import ForeignKey
-from sqlalchemy.sql.sqltypes import DateTime
+from sqlalchemy.sql.sqltypes import DateTime, String
 
 from app.db import Base
 
@@ -29,6 +29,11 @@ class Post(Base):
 
     forwarded_count: Mapped[int] = mapped_column(default=0, server_default="0")
     dropped_count: Mapped[int] = mapped_column(default=0, server_default="0")
+
+    # Snapshot of the author's subscription at creation time (e.g. "supporter"),
+    # or None for free/no perk. Set once, never updated — a supporter's posts keep
+    # their look even after the subscription later lapses. See UserSubscription.
+    subscription_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     created: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

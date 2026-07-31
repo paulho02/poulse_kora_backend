@@ -8,7 +8,7 @@ from app.feed.worker import consume_once
 from app.models.channel import Channel
 from app.models.post import Post
 from app.models.user import User
-from tests.utils import get_jwt_header, subscribe
+from tests.utils import get_jwt_header, grant_subscription, subscribe
 
 
 class TestPostsFeed:
@@ -159,6 +159,64 @@ class TestCreatePost:
             json={"channel_id": 10**6, "text": "hi"},
         )
         assert resp.status_code == 404
+
+    async def test_create_post_snapshots_supporter_subscription(
+        self, client: AsyncClient, redis: Redis, db: AsyncSession, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        await grant_subscription(db, user, "supporter")
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            json={"channel_id": channel.id, "text": "supporter post"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["post"]["subscription_kind"] == "supporter"
+
+    async def test_create_post_without_subscription_has_no_badge(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            json={"channel_id": channel.id, "text": "free post"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["post"]["subscription_kind"] is None
+
+    async def test_post_keeps_supporter_badge_after_subscription_revoked(
+        self, client: AsyncClient, redis: Redis, db: AsyncSession, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await subscribe(db, user, channel)
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        subscription = await grant_subscription(db, user, "supporter")
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            json={"channel_id": channel.id, "text": "supporter post"},
+        )
+        assert resp.status_code == 201, resp.text
+        post_id = resp.json()["post"]["id"]
+
+        await db.delete(subscription)
+        await db.commit()
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post_id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["subscription_kind"] == "supporter"
 
 
 class TestPostEconomy:

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from app.models.item import Item  # noqa: F401
     from app.models.post import Post  # noqa: F401
     from app.models.post_review import PostReview  # noqa: F401
+    from app.models.user_subscription import UserSubscription  # noqa: F401
 
 
 class User(SQLAlchemyBaseUserTableUUID, Base):
@@ -64,6 +65,9 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
         back_populates="author", cascade="all, delete"
     )
     post_reviews: Mapped[list["PostReview"]] = relationship(
+        back_populates="user", cascade="all, delete"
+    )
+    subscriptions: Mapped[list["UserSubscription"]] = relationship(
         back_populates="user", cascade="all, delete"
     )
 

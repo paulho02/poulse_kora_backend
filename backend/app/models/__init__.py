@@ -5,3 +5,4 @@ from app.models.item import Item
 from app.models.post import Post
 from app.models.post_review import PostReview
 from app.models.user import User
+from app.models.user_subscription import UserSubscription

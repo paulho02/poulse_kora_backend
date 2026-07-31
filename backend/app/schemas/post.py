@@ -28,6 +28,7 @@ class PostRead(BaseModel):
     author: PostAuthor
     forwarded_count: int
     dropped_count: int
+    subscription_kind: str | None
     created: datetime
 
     model_config = ConfigDict(from_attributes=True)
