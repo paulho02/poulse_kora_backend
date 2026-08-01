@@ -23,7 +23,7 @@ from app.deps.redis import get_redis
 from app.feed.service import earn_token
 from app.models.user import User as UserModel
 
-bearer_transport = BearerTransport(tokenUrl="auth/jwt/login")
+bearer_transport = BearerTransport(tokenUrl=f"{settings.API_PATH}/auth/jwt/login")
 
 
 def get_jwt_strategy() -> JWTStrategy:
