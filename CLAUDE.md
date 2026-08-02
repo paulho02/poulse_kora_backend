@@ -51,6 +51,11 @@ docker compose exec backend python shell.py
 # account has something to see and review (forward/drop) after subscribing to
 # a channel. Idempotent, safe to re-run.
 docker compose exec backend python seed_dev_data.py
+
+# Bulk-create N test posts in a channel (by ID or name), authored by an
+# auto-created superuser bot. Calls the real create_post route function
+# directly, so it always reflects actual post creation behavior.
+docker compose exec backend python bulk_create_posts.py <channel> <amount>
 ```
 
 Backend OpenAPI docs: `http://localhost:8000/docs/`.
