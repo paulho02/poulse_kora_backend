@@ -155,6 +155,34 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = "no-reply@poulsekora.app"
     SMTP_FROM_NAME: str = "Poulse Kora"
 
+    # --- supporter subscription (payments) ---
+    # Master switch: off means every /subscriptions/* route answers 404
+    # "subscriptions_disabled" and no Mollie call is ever made, so the feature can be
+    # merged and deployed dark, then flipped on later with no redeploy. The webhook
+    # route is the one exception — it keeps processing regardless, so a subscription
+    # already in flight when this gets toggled off isn't stranded mid-payment.
+    SUBSCRIPTIONS_ENABLED: bool = False
+    # Mollie (https://www.mollie.com) processes the actual payment; see
+    # app/core/mollie.py and app/api/subscriptions.py for the full flow. Test-mode
+    # keys (`test_...`) work against the same API for local dev.
+    MOLLIE_API_KEY: str | None = None
+    MOLLIE_API_BASE_URL: str = "https://api.mollie.com/v2"
+    # Price and billing interval of the "supporter" plan. Amount is Mollie's expected
+    # format: a decimal string with exactly 2 places, e.g. "5.00".
+    SUPPORTER_PRICE_AMOUNT: str = "1.99"
+    SUPPORTER_PRICE_CURRENCY: str = "EUR"
+    # Mollie Subscriptions API interval format, e.g. "1 month", "1 year".
+    SUPPORTER_INTERVAL: str = "1 month"
+    # This backend's own public HTTPS origin, used to build the webhook callback URL
+    # passed to Mollie (must be reachable from the internet — a local dev server
+    # needs a tunnel, e.g. ngrok, for webhooks to ever arrive).
+    PUBLIC_BASE_URL: str = "http://localhost:8000"
+    # Where Mollie's hosted checkout redirects the browser after payment. For the MVP
+    # (web checkout only, no native app purchase yet — see CLAUDE.md) this is a plain
+    # web page; once the app opens checkout itself, point this at a custom URL scheme
+    # / universal link the app can catch instead.
+    SUBSCRIPTION_CHECKOUT_REDIRECT_URL: str = "http://localhost:8000/"
+
     BACKEND_CORS_ORIGINS: list[str] = []
 
     TEST_DATABASE_URL: PostgresDsn | None = None

@@ -1,8 +1,12 @@
 """Grant or revoke a user's subscription (e.g. "supporter") directly in Postgres.
 
-Stand-in for the real payment flow, which doesn't exist yet — this bypasses the
-API/JWT entirely, the same way `seed_dev_data.py` talks to Postgres directly. Once a
-real checkout flow is built, this script (or its logic) is what it would call into.
+Manual override alongside the real payment flow (see app/api/subscriptions.py,
+app/models/supporter_subscription.py) — handy for comping a supporter or fixing a
+one-off support case without touching Mollie. Bypasses the API/JWT entirely, the
+same way `seed_dev_data.py` talks to Postgres directly. Note this only touches the
+`UserSubscription` entitlement row, not `SupporterSubscription` (the Mollie-side
+lifecycle) — a webhook for a manually-granted user would find no matching row and
+just ignore it, which is the intended behavior here.
 
 Usage (inside the backend container):
     docker compose exec backend python grant_subscription.py user@example.com supporter

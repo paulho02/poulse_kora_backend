@@ -7,6 +7,7 @@ from app.api import (
     items,
     posts,
     stats,
+    subscriptions,
     users,
     utils,
 )
@@ -21,3 +22,4 @@ api_router.include_router(items.router, tags=["items"])
 api_router.include_router(channels.router, tags=["channels"])
 api_router.include_router(posts.router, tags=["posts"])
 api_router.include_router(stats.router, tags=["stats"])
+api_router.include_router(subscriptions.router, tags=["subscriptions"])

@@ -8,6 +8,16 @@ TEST_REDIS_URL=redis://:CHANGE_ME@redis:6379/1
 SECRET_KEY=CHANGE_ME
 BACKEND_CORS_ORIGINS='["http://localhost:3000","http://127.0.0.1:3000"]'
 
+# --- supporter subscription (Mollie) ---
+# SUBSCRIPTIONS_ENABLED defaults to false — leave unset until Mollie is actually
+# configured. MOLLIE_API_KEY: get a test-mode key (`test_...`) from
+# https://my.mollie.com to develop against without moving real money.
+SUBSCRIPTIONS_ENABLED=false
+MOLLIE_API_KEY=
+# Must be a publicly reachable HTTPS URL for Mollie's webhook to ever reach this
+# backend — a local dev server needs a tunnel (e.g. ngrok) with that URL set here.
+PUBLIC_BASE_URL=http://localhost:8000
+
 # --- Railway / deployed environments ---
 # This file is the local-dev/CI template only; it is never used as-is on Railway.
 # See RAILWAY.md for the full deploy guide. Quick reference for what changes there:
