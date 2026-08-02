@@ -81,7 +81,12 @@ class TestRegister:
         assert resp.status_code == 400
         detail = resp.json()["detail"]
         assert detail["error"] == "register_invalid_password"
-        assert detail["reason"]
+        # "weak" is both too short and single-character-class against the
+        # default PASSWORD_MIN_LENGTH/PASSWORD_MIN_CHARACTER_CLASSES, so both
+        # structured violation codes should be present (see
+        # app.core.password_policy.strength_violations).
+        codes = {v["code"] for v in detail["reason"]}
+        assert codes == {"password_too_short", "password_missing_variety"}
 
     async def test_weak_password_is_accepted_when_policy_off(
         self, client: AsyncClient

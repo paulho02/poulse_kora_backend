@@ -1,6 +1,8 @@
 import uuid
 
 from fastapi_users import schemas
+from pydantic import Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 class UserRead(schemas.BaseUser[uuid.UUID]):
@@ -15,6 +17,12 @@ class UserRead(schemas.BaseUser[uuid.UUID]):
 
 class UserCreate(schemas.BaseUserCreate):
     username: str
+    # BaseUserCreate exposes these as client-settable, and the register router already
+    # discards them (it calls user_manager.create(..., safe=True)) so they can't be set
+    # in practice. SkipJsonSchema removes them from the OpenAPI schema too, so a
+    # generated FE client never even offers the fields on the register form.
+    is_superuser: SkipJsonSchema[bool | None] = Field(default=False, exclude=True)
+    is_verified: SkipJsonSchema[bool | None] = Field(default=False, exclude=True)
 
 
 class UserUpdate(schemas.BaseUserUpdate):

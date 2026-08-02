@@ -118,3 +118,15 @@ after cloning).
   factories, not per-test — data persists across tests in a run and rollback is best-effort cleanup,
   not full isolation. `tests/utils.py` has `get_jwt_header(user)` for authenticating requests without
   hitting the login endpoint.
+- **Localization**: `SUPPORTED_LOCALES`/`DEFAULT_LOCALE` in `app/core/config.py` (English + German
+  today). Locale is resolved per-request from `Accept-Language` (`app/core/locale.py`,
+  `app/deps/locale.py`'s `CurrentLocale` dependency) — deliberately no persisted `User.locale`
+  column, since the pre-login banner endpoint has no user yet. **New user-facing backend strings
+  must not be hardcoded English prose** — almost everything already follows the `api_error(status,
+  "some_code")` contract (`app/core/errors.py`): the code is stable, and the Flutter client's
+  `lib/l10n/*.arb` supplies the actual copy for it (see that repo's CLAUDE.md). Only two things on
+  this side generate real free text: `app/core/password_policy.py` (returns a structured
+  `[{code, params}, ...]` violation list, never prose — extend with more codes if you add a rule,
+  don't return a sentence) and `app/core/banner.py` (admin-authored content with no fixed code set,
+  stored as one message per locale and resolved server-side to `Accept-Language` — follow this
+  per-locale-dict pattern for any similar free-text-from-an-admin feature, not a single string).

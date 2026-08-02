@@ -17,7 +17,7 @@ from app.core import email_verification as ev
 from app.core.config import settings
 from app.core.email import send_email
 from app.core.errors import api_error
-from app.core.password_policy import strength_violation
+from app.core.password_policy import strength_violations
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import get_redis
 from app.feed.service import earn_token
@@ -59,12 +59,13 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         app.core.password_policy) - off means fastapi-users applies no rule at all,
         by design. Raising here is what turns into the structured
         `register_invalid_password` / `update_user_invalid_password` API error,
-        carrying `reason` as human-readable copy the client can render directly."""
+        carrying `reason` as a list of `{code, params}` violations the client
+        localizes (see `lib/src/core/errors/error_messages.dart`)."""
         if not settings.REQUIRE_STRONG_PASSWORD:
             return
-        reason = strength_violation(password)
-        if reason:
-            raise InvalidPasswordException(reason=reason)
+        violations = strength_violations(password)
+        if violations:
+            raise InvalidPasswordException(reason=violations)
 
     async def on_after_register(
         self, user: UserModel, request: Request | None = None

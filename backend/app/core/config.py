@@ -104,6 +104,17 @@ class Settings(BaseSettings):
     INTERACTION_RATE_LIMIT: int = 5
     INTERACTION_RATE_WINDOW_SECONDS: float = 10.0
 
+    # --- localization ---
+    # Locales the API can resolve `Accept-Language` into (app.core.locale), and the
+    # set of locales the banner accepts a message for (app.schemas.banner). ISO
+    # 639-1 codes. "en" must always be present - it's the fallback used when a
+    # request's locale is missing/unsupported and when a banner has no text for the
+    # resolved locale. Extending this list (plus a matching translation in the
+    # Flutter app's `lib/l10n/*.arb` and `supportedAppLocales`) is the whole story
+    # for adding a language - no other backend code changes.
+    SUPPORTED_LOCALES: list[str] = ["en", "de"]
+    DEFAULT_LOCALE: str = "en"
+
     # --- password policy ---
     # Off: fastapi-users applies no length/composition rule at all (see
     # UserManager.validate_password) - "the user can enter any password he wants",
