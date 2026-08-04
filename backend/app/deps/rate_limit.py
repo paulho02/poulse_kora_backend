@@ -18,11 +18,16 @@ from app.core.config import settings
 from app.core.errors import api_error
 from app.core.rate_limit import consume
 from app.deps.redis import CurrentRedis
-from app.deps.users import CurrentVerifiedUser
+from app.deps.users import CurrentUser, CurrentVerifiedUser
 
 # All feed writes (create post, forward, drop) share this one budget, so a user
 # cannot dodge it by alternating between endpoints.
 INTERACTION_SCOPE = "interact"
+
+# Separate from INTERACTION_SCOPE: change-password checks a guessable secret (the
+# current password), so it needs its own budget rather than sharing one that a
+# burst of ordinary posting/reviewing would also draw down.
+PASSWORD_CHANGE_SCOPE = "change_password"
 
 
 async def limit_interactions(user: CurrentVerifiedUser, redis: CurrentRedis) -> None:
@@ -62,3 +67,36 @@ async def limit_interactions(user: CurrentVerifiedUser, redis: CurrentRedis) -> 
 
 
 InteractionRateLimit = Annotated[None, Depends(limit_interactions)]
+
+
+async def limit_password_change(user: CurrentUser, redis: CurrentRedis) -> None:
+    """Spend one change-password attempt, or raise 429 with the wait in seconds.
+
+    `CurrentUser`, not `CurrentVerifiedUser`: securing an account (changing its
+    password) must work regardless of email-verification status, same reasoning
+    as the email-verification routes themselves. Superusers are exempt, matching
+    `limit_interactions`. Setting `PASSWORD_CHANGE_RATE_LIMIT` to 0 disables it.
+    """
+    if settings.PASSWORD_CHANGE_RATE_LIMIT <= 0 or user.is_superuser:
+        return
+
+    retry_ms = await consume(
+        redis,
+        PASSWORD_CHANGE_SCOPE,
+        str(user.id),
+        settings.PASSWORD_CHANGE_RATE_LIMIT,
+        settings.PASSWORD_CHANGE_RATE_WINDOW_SECONDS,
+    )
+    if retry_ms <= 0:
+        return
+
+    retry_after = max(1, math.ceil(retry_ms / 1000))
+    exc = api_error(
+        429,
+        "rate_limited",
+        retry_after=retry_after,
+        limit=settings.PASSWORD_CHANGE_RATE_LIMIT,
+        window_seconds=settings.PASSWORD_CHANGE_RATE_WINDOW_SECONDS,
+    )
+    exc.headers = {"Retry-After": str(retry_after)}
+    raise exc

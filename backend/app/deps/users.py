@@ -80,6 +80,21 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
             subject, body = ev.email_content(code)
             await send_email(user.email, subject, body)
 
+    async def update(self, user_update, user: UserModel, safe: bool = False, request=None):
+        """`PATCH /users/me` is fastapi-users' own stock route, and `BaseUserUpdate`
+        exposes a bare `password` field with no proof the caller knows the current
+        one - anyone holding a valid token (a leaked/stolen one included) could
+        otherwise silently change the account password. Password changes must go
+        through `POST /auth/change-password` (app/api/change_password.py) instead,
+        which does require it; refuse one here rather than leave that route as a
+        silent bypass around it.
+        """
+        if user_update.password is not None:
+            raise InvalidPasswordException(
+                reason=[{"code": "password_change_wrong_endpoint", "params": {}}]
+            )
+        return await super().update(user_update, user, safe=safe, request=request)
+
     async def _update(self, user: UserModel, update_dict: dict) -> UserModel:
         """Bump `settings_revision` when a settings field actually changes value.
 

@@ -124,6 +124,15 @@ class Settings(BaseSettings):
     PASSWORD_MIN_LENGTH: int = 10
     PASSWORD_MIN_CHARACTER_CLASSES: int = 3
 
+    # --- change-password rate limiting ---
+    # At most PASSWORD_CHANGE_RATE_LIMIT attempts per user in any sliding window of
+    # PASSWORD_CHANGE_RATE_WINDOW_SECONDS (see app/core/rate_limit.py) - the current
+    # password is a guessable secret being checked here, so this route needs its own
+    # budget rather than sharing INTERACTION_RATE_LIMIT. Set the limit to 0 to
+    # disable rate limiting entirely.
+    PASSWORD_CHANGE_RATE_LIMIT: int = 5
+    PASSWORD_CHANGE_RATE_WINDOW_SECONDS: float = 300.0
+
     # --- email verification ---
     # Off: `is_verified` is never checked (see app.deps.users.CurrentVerifiedUser) and
     # no code is ever sent on registration - an unverified account works exactly

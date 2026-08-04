@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi_users import schemas
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 
 
@@ -30,3 +30,8 @@ class UserUpdate(schemas.BaseUserUpdate):
     bio: str | None = None
     dark_mode: bool | None = None
     onboarding_completed: bool | None = None
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
