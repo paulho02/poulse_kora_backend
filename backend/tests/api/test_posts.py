@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from httpx import AsyncClient
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +10,7 @@ from app.feed.worker import consume_once
 from app.models.channel import Channel
 from app.models.post import Post
 from app.models.user import User
-from tests.utils import get_jwt_header, grant_subscription, subscribe
+from tests.utils import get_jwt_header, grant_subscription, review, subscribe
 
 
 class TestPostsFeed:
@@ -573,3 +575,107 @@ class TestInteractionRateLimit:
                 json={"kind": "drop"},
             )
             assert resp.status_code == 200, resp.text
+
+
+class TestMyPosts:
+    async def test_only_returns_own_posts_newest_first(
+        self,
+        client: AsyncClient,
+        db: AsyncSession,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+
+        user: User = await create_user()
+        other: User = await create_user()
+        channel: Channel = await create_channel()
+        now = datetime.now(timezone.utc)
+
+        older: Post = await create_post(channel=channel, author=user, text="older")
+        older.created = now - timedelta(days=1)
+        newer: Post = await create_post(channel=channel, author=user, text="newer")
+        newer.created = now
+        db.add_all([older, newer])
+        await db.commit()
+
+        await create_post(channel=channel, author=other, text="not mine")
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/mine", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert [p["id"] for p in data] == [newer.id, older.id]
+
+    async def test_pagination_via_skip_limit(
+        self, client: AsyncClient, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        for _ in range(3):
+            await create_post(channel=channel, author=user)
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/mine",
+            headers=get_jwt_header(user),
+            params={"skip": 1, "limit": 1},
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()) == 1
+
+
+class TestMyReviewedPosts:
+    async def test_sorted_by_review_time_not_post_creation_time(
+        self,
+        client: AsyncClient,
+        db: AsyncSession,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        now = datetime.now(timezone.utc)
+
+        # post_a was created first but reviewed last; post_b is the opposite.
+        # A creation-time sort would put post_a first — a review-time sort must not.
+        post_a: Post = await create_post(channel=channel, text="a")
+        post_a.created = now - timedelta(days=2)
+        post_b: Post = await create_post(channel=channel, text="b")
+        post_b.created = now - timedelta(days=1)
+        db.add_all([post_a, post_b])
+        await db.commit()
+
+        review_a = await review(db, user, post_a, "drop")
+        review_a.created = now
+        review_b = await review(db, user, post_b, "forward")
+        review_b.created = now - timedelta(hours=1)
+        db.add_all([review_a, review_b])
+        await db.commit()
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/reviewed", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert [d["post"]["id"] for d in data] == [post_a.id, post_b.id]
+        assert data[0]["kind"] == "drop"
+        assert data[1]["kind"] == "forward"
+
+    async def test_only_returns_own_reviews(
+        self, client: AsyncClient, db: AsyncSession, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        other: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)
+
+        await review(db, other, post, "forward")
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/reviewed", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == []

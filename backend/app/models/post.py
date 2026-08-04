@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi_users_db_sqlalchemy import GUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.functions import func
-from sqlalchemy.sql.schema import ForeignKey
+from sqlalchemy.sql.schema import ForeignKey, Index
 from sqlalchemy.sql.sqltypes import DateTime, String
 
 from app.db import Base
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 class Post(Base):
     __tablename__ = "posts"
+    __table_args__ = (Index("ix_posts_author_created", "author_id", "created"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))

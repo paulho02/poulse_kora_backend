@@ -26,7 +26,7 @@ from app.schemas.post import (
     PostEconomy,
     PostRead,
 )
-from app.schemas.post_review import PostReviewCreate, PostReviewResult
+from app.schemas.post_review import PostReviewCreate, PostReviewResult, ReviewedPostRead
 
 router = APIRouter(prefix="/posts")
 
@@ -201,6 +201,73 @@ async def get_post_economy(user: CurrentVerifiedUser, redis: CurrentRedis):
             snapshot["expires_at"], tz=timezone.utc
         ),
     )
+
+
+@router.get("/mine", response_model=list[PostRead])
+async def get_my_posts(
+    session: CurrentAsyncSession,
+    user: CurrentVerifiedUser,
+    skip: int = 0,
+    limit: int = 20,
+):
+    """The current user's own posts, newest first — backs the "Posted" history screen.
+
+    Declared before `/{post_id}` so the literal path wins the route match.
+    """
+    posts = (
+        (
+            await session.execute(
+                select(Post)
+                .options(selectinload(Post.channel), selectinload(Post.author))
+                .filter(Post.author_id == user.id)
+                .order_by(Post.created.desc())
+                .offset(skip)
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_serialize_post(p, user) for p in posts]
+
+
+@router.get("/reviewed", response_model=list[ReviewedPostRead])
+async def get_my_reviewed_posts(
+    session: CurrentAsyncSession,
+    user: CurrentVerifiedUser,
+    skip: int = 0,
+    limit: int = 20,
+):
+    """Posts the current user has forwarded or dropped, ordered by review time (not
+    post creation time) — backs the "Reviews" history screen.
+
+    Declared before `/{post_id}` so the literal path wins the route match.
+    """
+    reviews = (
+        (
+            await session.execute(
+                select(PostReview)
+                .options(
+                    selectinload(PostReview.post).selectinload(Post.channel),
+                    selectinload(PostReview.post).selectinload(Post.author),
+                )
+                .filter(PostReview.user_id == user.id)
+                .order_by(PostReview.created.desc())
+                .offset(skip)
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        ReviewedPostRead(
+            post=_serialize_post(r.post, user),
+            kind=r.kind,
+            reviewed_at=r.created,
+        )
+        for r in reviews
+    ]
 
 
 @router.get("/{post_id}", response_model=PostRead)

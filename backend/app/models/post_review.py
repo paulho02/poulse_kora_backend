@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi_users_db_sqlalchemy import GUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.functions import func
-from sqlalchemy.sql.schema import ForeignKey, UniqueConstraint
+from sqlalchemy.sql.schema import ForeignKey, Index, UniqueConstraint
 from sqlalchemy.sql.sqltypes import DateTime, String
 
 from app.db import Base
@@ -24,6 +24,7 @@ class PostReview(Base):
     __tablename__ = "post_reviews"
     __table_args__ = (
         UniqueConstraint("user_id", "post_id", name="uq_post_review_user_post"),
+        Index("ix_post_reviews_user_created", "user_id", "created"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
