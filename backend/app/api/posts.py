@@ -14,7 +14,6 @@ from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentVerifiedUser
 from app.feed import service
 from app.models.channel import Channel
-from app.models.channel_subscription import ChannelSubscription
 from app.models.post import Post
 from app.models.post_review import PostReview
 from app.models.user import User
@@ -57,12 +56,22 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
     )
 
 
-async def _is_subscribed(session: CurrentAsyncSession, user_id, channel_id: int) -> bool:
+async def _can_view_post(
+    session: CurrentAsyncSession, redis: CurrentRedis, user: User, post: Post
+) -> bool:
+    """A post is only visible to its author or someone it was actually delivered to
+    (currently in their queue, or already reviewed by them) — channel subscription
+    alone is not enough, since fan-out/exclusions mean a subscriber may never have
+    had this particular post placed in their feed.
+    """
+    if user.is_superuser or post.author_id == user.id:
+        return True
+    if await service.is_queued(redis, str(user.id), post.id):
+        return True
     return (
         await session.scalar(
-            select(ChannelSubscription).filter(
-                ChannelSubscription.user_id == user_id,
-                ChannelSubscription.channel_id == channel_id,
+            select(PostReview).filter(
+                PostReview.user_id == user.id, PostReview.post_id == post.id
             )
         )
     ) is not None
@@ -275,9 +284,10 @@ async def get_post(
     post_id: int,
     session: CurrentAsyncSession,
     user: CurrentVerifiedUser,
+    redis: CurrentRedis,
 ):
     post = await _get_post_with_relations(session, post_id)
-    if not post or not await _is_subscribed(session, user.id, post.channel_id):
+    if not post or not await _can_view_post(session, redis, user, post):
         raise api_error(404, "post_not_found")
     return _serialize_post(post, user)
 

@@ -331,6 +331,11 @@ async def render_queue_ids(
     return [int(pid) for pid in raw]
 
 
+async def is_queued(redis: Redis, user_id: str, post_id: int) -> bool:
+    """Whether `post_id` currently sits in the user's queue, delivered and unreviewed."""
+    return await redis.lpos(keys.queue(user_id), str(post_id)) is not None
+
+
 # --- recipient selection ---------------------------------------------------
 
 async def select_recipients(

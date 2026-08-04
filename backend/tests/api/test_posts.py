@@ -287,6 +287,59 @@ class TestGetPost:
         assert resp.status_code == 200, resp.text
         assert resp.json()["author"]["id"] == str(author.id)
 
+    async def test_get_post_404_for_subscriber_post_never_in_their_feed(
+        self, client: AsyncClient, db: AsyncSession, create_user, create_channel, create_post
+    ):
+        """Being subscribed to the channel is not enough — the post must actually
+        have been delivered to this user's feed (or already reviewed by them)."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await subscribe(db, user, channel)
+        post: Post = await create_post(channel=channel)
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 404
+
+    async def test_get_post_visible_when_in_users_queue(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+
+    async def test_get_post_visible_after_being_reviewed(
+        self,
+        client: AsyncClient,
+        db: AsyncSession,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), post.id)
+        await review(db, user, post, "drop")
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+
 
 class TestReviewPost:
     async def test_forward_earns_token_reinjects_and_pops(
