@@ -7,10 +7,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.functions import func
 
 from app.db import Base
+from app.models.oauth_account import GOOGLE_OAUTH_NAME
 
 if TYPE_CHECKING:
     from app.models.channel_subscription import ChannelSubscription  # noqa: F401
     from app.models.item import Item  # noqa: F401
+    from app.models.oauth_account import OAuthAccount  # noqa: F401
     from app.models.post import Post  # noqa: F401
     from app.models.post_review import PostReview  # noqa: F401
     from app.models.user_subscription import UserSubscription  # noqa: F401
@@ -70,6 +72,50 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     subscriptions: Mapped[list["UserSubscription"]] = relationship(
         back_populates="user", cascade="all, delete"
     )
+
+    # Eager-loaded because `auth_provider` below is read while serializing UserRead
+    # and inside several route guards, and a lazy attribute access is an error under
+    # async SQLAlchemy. `selectin` rather than the `joined` fastapi-users' docs show:
+    # a joined eager load *against a collection* obliges every `select(User)` in the
+    # codebase to call `.unique()` on its result or raise at runtime - which broke
+    # `GET /users` and `rebuild_from_pg` the moment this was added, and would quietly
+    # wait to break the next such query somebody writes. `selectin` costs one extra
+    # indexed lookup on a tiny table instead, and carries no such rule.
+    oauth_accounts: Mapped[list["OAuthAccount"]] = relationship(
+        "OAuthAccount", lazy="selectin", cascade="all, delete"
+    )
+
+    @property
+    def auth_provider(self) -> str:
+        """How this account signs in: "google" once any OAuth account is linked,
+        "password" otherwise.
+
+        Linking is one-way and irreversible (see app/api/google_auth.py), so this
+        flipping to "google" is what closes the routes back to password auth:
+        `POST /auth/jwt/login` and `POST /auth/change-password` refuse from here on.
+        Exposed on `UserRead` so the client can hide those affordances rather than
+        let the user discover the refusal.
+
+        `email` is *not* one of them: it is the contact address, not the credential,
+        and stays editable via `PATCH /users/me`. See `google_email` below for the
+        address that actually signs this account in.
+        """
+        return "google" if self.oauth_accounts else "password"
+
+    @property
+    def google_email(self) -> str | None:
+        """Address of the linked Google account, or None if there isn't one.
+
+        Deliberately *not* the same thing as `email`: linking accepts a Google
+        account whose address differs (see app/api/google_auth.py), so after that
+        the account has two addresses — this one to sign in with, `email` to be
+        contacted at. Exposed on `UserRead` because otherwise nothing in the UI
+        could tell the user which Google account actually signs them in.
+        """
+        for account in self.oauth_accounts:
+            if account.oauth_name == GOOGLE_OAUTH_NAME:
+                return account.account_email
+        return None
 
     def __repr__(self):
         return f"User(id={self.id!r}, name={self.email!r})"

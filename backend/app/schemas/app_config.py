@@ -7,3 +7,4 @@ class PublicAppConfig(BaseModel):
     password_min_length: int
     password_min_character_classes: int
     email_verification_resend_cooldown_seconds: int
+    google_oauth_enabled: bool

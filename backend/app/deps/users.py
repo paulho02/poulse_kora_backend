@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import Annotated
 
@@ -8,7 +9,7 @@ from fastapi_users.authentication import (
     BearerTransport,
     JWTStrategy,
 )
-from fastapi_users.exceptions import InvalidPasswordException
+from fastapi_users.exceptions import InvalidPasswordException, UserNotExists
 from fastapi_users.manager import BaseUserManager, UUIDIDMixin
 from fastapi_users_db_sqlalchemy import SQLAlchemyUserDatabase
 from redis.asyncio import Redis
@@ -21,7 +22,10 @@ from app.core.password_policy import strength_violations
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import get_redis
 from app.feed.service import earn_token
+from app.models.oauth_account import OAuthAccount
 from app.models.user import User as UserModel
+
+logger = logging.getLogger(__name__)
 
 bearer_transport = BearerTransport(tokenUrl=f"{settings.API_PATH}/auth/jwt/login")
 
@@ -74,11 +78,42 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         first post immediately, without having to review anything first, and (when
         REQUIRE_EMAIL_VERIFICATION is on) send the first verification code."""
         await earn_token(self._redis, str(user.id), settings.FEED_STARTING_TOKENS)
-        if settings.REQUIRE_EMAIL_VERIFICATION:
+        # `not user.is_verified` skips the code for Google signups, which arrive here
+        # already verified (oauth_callback with is_verified_by_default) - Google has
+        # confirmed the address, so mailing a code would be asking the user to prove
+        # something we already know.
+        if settings.REQUIRE_EMAIL_VERIFICATION and not user.is_verified:
             code = await ev.issue_code(self._redis, str(user.id))
             await ev.start_resend_cooldown(self._redis, str(user.id))
             subject, body = ev.email_content(code)
             await send_email(user.email, subject, body)
+
+    async def authenticate(self, credentials):
+        """Tell a Google account apart from a wrong password.
+
+        Linking to Google overwrites `hashed_password` with a random value nobody
+        holds (see app/api/google_auth.py), so a Google user typing their old
+        password lands in the ordinary failure path below and would otherwise be told
+        their credentials are bad - true, but useless: they would keep retrying a
+        password that can never work again. `login_use_google` points them at the
+        button instead.
+
+        This does confirm to an unauthenticated caller that an account exists for
+        that email. Accepted: `POST /auth/register` already discloses exactly the
+        same fact via `register_user_already_exists`.
+        """
+        user = await super().authenticate(credentials)
+        if user is not None:
+            return user
+
+        # Only on the failure path, so a successful login costs no extra query.
+        try:
+            existing = await self.get_by_email(credentials.username)
+        except UserNotExists:
+            return None
+        if existing.oauth_accounts:
+            raise api_error(400, "login_use_google")
+        return None
 
     async def update(self, user_update, user: UserModel, safe: bool = False, request=None):
         """`PATCH /users/me` is fastapi-users' own stock route, and `BaseUserUpdate`
@@ -93,15 +128,22 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
             raise InvalidPasswordException(
                 reason=[{"code": "password_change_wrong_endpoint", "params": {}}]
             )
+        # Note there is deliberately no Google-account email lock here. A Google
+        # account is bound to its identity by `sub`, not by address (see
+        # app/api/google_auth.py), so `email` is just the contact address and stays
+        # as editable as it is on a password account.
         return await super().update(user_update, user, safe=safe, request=request)
 
     async def _update(self, user: UserModel, update_dict: dict) -> UserModel:
-        """Bump `settings_revision` when a settings field actually changes value.
+        """Derive the fields a write implies: `settings_revision` on a settings
+        change, and revoking `is_verified` on an email change.
 
         Hooked here rather than in a route because `PATCH /users/me` is served by
-        fastapi-users' own router. Compares against the pre-update `user`, so a
-        no-op PATCH (same value re-sent) doesn't inflate the revision and cause the
-        client to see a phantom conflict.
+        fastapi-users' own router, and because this is the single chokepoint every
+        update goes through - including a superuser editing someone else via
+        `PATCH /users/{id}`. Both checks compare against the pre-update `user`, so a
+        no-op PATCH (same value re-sent) neither inflates the revision nor kicks the
+        account back into verification.
         """
         if any(
             field in update_dict and getattr(user, field) != update_dict[field]
@@ -111,11 +153,55 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
                 **update_dict,
                 "settings_revision": user.settings_revision + 1,
             }
+        # `is_verified` asserts one specific thing: that this person can read mail
+        # at `user.email`. It is proof about an *address*, not about an account, so
+        # pointing the account at a different address invalidates it - otherwise
+        # anyone could verify an address they own, then switch to one they don't and
+        # keep the access that proof bought them.
+        #
+        # Deliberately unconditional, including when the new address happens to be
+        # the linked Google one (which Google has in fact verified). Re-proving in
+        # that corner costs the user one code; special-casing it would put a second
+        # path to `is_verified = True` in a place nobody would think to audit.
+        if "email" in update_dict and update_dict["email"] != user.email:
+            update_dict = {**update_dict, "is_verified": False}
         return await super()._update(user, update_dict)
+
+    async def on_after_update(
+        self, user: UserModel, update_dict: dict, request: Request | None = None
+    ) -> None:
+        """Mail a fresh verification code after an email change.
+
+        `_update` has just revoked `is_verified`, so the client is about to be
+        redirected to the verify-email screen. That screen does not request a code
+        on its own - it only offers a manual "resend" - so without this the user
+        lands on a screen announcing a code that was never sent.
+
+        `update_dict` is empty when this fires from `oauth_associate_callback`
+        (app/api/google_auth.py), which is why the guard is on the key rather than
+        on the user's state alone.
+        """
+        if not settings.REQUIRE_EMAIL_VERIFICATION:
+            return
+        if "email" not in update_dict or user.is_verified:
+            return
+
+        code = await ev.issue_code(self._redis, str(user.id))
+        subject, body = ev.email_content(code)
+        try:
+            await send_email(user.email, subject, body)
+        except Exception:
+            # The email change itself is already committed, so failing the request
+            # now would tell the client nothing happened when in fact everything
+            # did. Leave the cooldown unset instead, so "resend" is immediately
+            # available on the screen the user is about to land on.
+            logger.exception("Could not send verification code to %s", user.email)
+            return
+        await ev.start_resend_cooldown(self._redis, str(user.id))
 
 
 def get_user_db(session: CurrentAsyncSession):
-    yield SQLAlchemyUserDatabase(session, UserModel)
+    yield SQLAlchemyUserDatabase(session, UserModel, OAuthAccount)
 
 
 def get_user_manager(user_db=Depends(get_user_db), redis: Redis = Depends(get_redis)):

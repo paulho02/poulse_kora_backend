@@ -18,6 +18,14 @@ MOLLIE_API_KEY=
 # backend — a local dev server needs a tunnel (e.g. ngrok) with that URL set here.
 PUBLIC_BASE_URL=http://localhost:8000
 
+# --- Google sign-in ---
+# Defaults to false; leave unset until the Google Cloud OAuth clients exist.
+# GOOGLE_CLIENT_IDS lists the `aud` values accepted on incoming ID tokens. The
+# mobile app passes the *web* client ID as google_sign_in's `serverClientId` on
+# Android and as `clientId` on web, so one entry usually covers both platforms.
+GOOGLE_OAUTH_ENABLED=false
+GOOGLE_CLIENT_IDS='["CHANGE_ME.apps.googleusercontent.com"]'
+
 # --- Railway / deployed environments ---
 # This file is the local-dev/CI template only; it is never used as-is on Railway.
 # See RAILWAY.md for the full deploy guide. Quick reference for what changes there:
@@ -38,4 +46,9 @@ PUBLIC_BASE_URL=http://localhost:8000
 #   once real users need to receive the email-verification code
 #   (REQUIRE_EMAIL_VERIFICATION defaults to true) — left unset, verification codes
 #   are only logged server-side and no one can complete verification.
+# GOOGLE_OAUTH_ENABLED / GOOGLE_CLIENT_IDS: set both once the Google Cloud OAuth
+#   clients exist. The web client's "Authorized JavaScript origins" must list every
+#   origin the Flutter web app is served from (http://localhost:3000 for dev, plus
+#   the deployed domains); the Android client needs the signing SHA-1 of whichever
+#   keystore the APK is built with.
 # SENTRY_DSN: optional, recommended once traffic is more than just you.

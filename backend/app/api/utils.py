@@ -22,6 +22,7 @@ def get_public_config():
         email_verification_resend_cooldown_seconds=(
             settings.EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS
         ),
+        google_oauth_enabled=settings.GOOGLE_OAUTH_ENABLED,
     )
 
 

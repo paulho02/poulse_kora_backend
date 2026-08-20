@@ -21,6 +21,10 @@ pydantic-settings = "^2.8.1"
 redis = { extras = ["hiredis"], version = "^5.2.1" }
 aiosmtplib = "^5.1.2"
 httpx = "^0.24.1"
+# Official Google library, used only to verify Google ID tokens (signature,
+# issuer, expiry) in app/core/google_oauth.py. The `requests` extra selects its
+# HTTP transport; `requests` is already a direct dependency above.
+google-auth = { extras = ["requests"], version = "^2.38.0" }
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.10.1"

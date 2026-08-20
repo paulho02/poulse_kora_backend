@@ -13,6 +13,14 @@ class UserRead(schemas.BaseUser[uuid.UUID]):
     # Read-only: bumped server-side on settings changes, never accepted from clients
     # (hence absent from UserUpdate). See User.settings_revision.
     settings_revision: int
+    # "password" | "google", derived from User.oauth_accounts. The client hides the
+    # change-password entry and runs the onboarding username step off this, rather
+    # than letting the user find out by being refused.
+    auth_provider: str
+    # Address of the linked Google account. Not the same as `email` once an
+    # account links a Google account with a different address - `email` is the
+    # contact address, this is what signs you in. None for password accounts.
+    google_email: str | None
 
 
 class UserCreate(schemas.BaseUserCreate):
@@ -35,3 +43,16 @@ class UserUpdate(schemas.BaseUserUpdate):
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str
+
+
+class GoogleAuthRequest(BaseModel):
+    id_token: str
+    #: Second pass of the two-step upgrade. False the first time: if the address
+    #: already belongs to a password account, the route answers 409
+    #: `google_link_required` instead of linking, the client explains that the
+    #: upgrade is permanent, and only a confirmed user comes back with this true.
+    link_existing: bool = False
+
+
+class GoogleLinkRequest(BaseModel):
+    id_token: str

@@ -1,0 +1,58 @@
+"""Deriving a username for accounts created without one.
+
+Registration requires a username (`UserCreate.username`), but Google sign-in has no
+such field - the client never asks, because there is nothing to ask *before* the
+Google account is known. So a Google signup gets one derived from its Google profile
+here, and confirms/edits it during onboarding (the app's username step).
+"""
+
+import re
+import secrets
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.user import User
+
+#: Long enough to stay recognizable, short enough to leave room for a suffix.
+MAX_LENGTH = 20
+#: Used when the seed slugifies to nothing at all (e.g. a name in a non-Latin script).
+FALLBACK = "user"
+#: Sequential suffixes first, so the common case reads naturally (paul, paul2, paul3);
+#: after this many collisions we stop scanning and go random.
+_SEQUENTIAL_ATTEMPTS = 20
+
+
+def slugify_username(seed: str) -> str:
+    """Reduce `seed` to lowercase alphanumerics, truncated to MAX_LENGTH."""
+    slug = re.sub(r"[^a-z0-9]", "", seed.lower())[:MAX_LENGTH]
+    return slug or FALLBACK
+
+
+async def generate_unique_username(session: AsyncSession, *, seed: str) -> str:
+    """Return a username derived from `seed` that no user currently holds.
+
+    Best-effort, not a reservation: `User.username` is unique, so two concurrent
+    signups deriving the same seed can still collide on INSERT. The caller is
+    expected to treat that as retryable rather than rely on this being atomic - see
+    app/api/google_auth.py.
+    """
+    base = slugify_username(seed)
+
+    for attempt in range(_SEQUENTIAL_ATTEMPTS):
+        candidate = base if attempt == 0 else f"{base[: MAX_LENGTH - 2]}{attempt + 1}"
+        if not await _taken(session, candidate):
+            return candidate
+
+    # A popular base name. Stop probing one at a time and jump somewhere sparse.
+    while True:
+        candidate = f"{base[: MAX_LENGTH - 6]}{secrets.randbelow(1_000_000):06d}"
+        if not await _taken(session, candidate):
+            return candidate
+
+
+async def _taken(session: AsyncSession, username: str) -> bool:
+    result = await session.execute(
+        select(User.id).where(User.username == username).limit(1)
+    )
+    return result.first() is not None

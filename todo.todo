@@ -1,0 +1,93 @@
+things to consider later:
+[ ] handle deleted user -> what happens to active posts in the feed?
+[ ] handle deleted posts -> should they even be deletable?
+[ ] review and maybe configure/revise FEED_FANOUT
+[ ] multi language support (channel system anpasse, sodass man bestimmte sprachen abonieren kann)
+    [ ] channel creation 
+[ ] price calculation for post
+[x] multi language support (overlay lanaguage)
+    [x] frontend: every text etc must be translateable
+    [x] backend: every error message that is displayed to users must be translateable (as well es the announcement banner)
+    [x] start with english and german
+    [x] a solid system that is extenable to other languages @done
+[x] implement subscription feature, but make it switchable to be able ship it later @done
+    -> Mollie, web checkout only for MVP (native IAP deferred). SUBSCRIPTIONS_ENABLED flag.
+    [ ] native in-app purchase (StoreKit/Play Billing) once needed for non-EU users
+[x] google oauth login (web and app) @done
+    -> ID-token flow (google_sign_in plugin -> POST /auth/google), not a redirect
+       flow: no deep links / URL schemes needed. Skips email verification, since
+       Google vouches for the address. Linking a password account to Google is
+       irreversible (password is overwritten) and needs explicit confirmation:
+       first call answers 409 google_link_required, client re-sends the same
+       token with link_existing after the dialog. Also reachable from
+       Settings -> "Sign in with Google instead".
+    [ ] Google Cloud setup (mine): Web OAuth client (authorized JS origins:
+        http://localhost:3000 + the Railway web URL) and an Android client
+        (package com.poulsekora.poulse_kora_app + keystore SHA-1). Then set
+        GOOGLE_OAUTH_ENABLED / GOOGLE_CLIENT_IDS on the backend and
+        --dart-define=GOOGLE_SERVER_CLIENT_ID on the app.
+    [ ] release keystore: android release builds still sign with the debug
+        keystore, so google sign-in breaks the day a real one lands unless its
+        SHA-1 is registered too
+    [ ] password reset: there is still no forgot-password flow at all, so a user
+        who loses their Google account has no recovery path
+
+
+bugs:
+[x] beta info banner onCLick popup not working 
+[x] if existing users are not validated yet, displaying in the app looks not nice -> weird error messages instead of routing to validation page
+    [x] additionally routing to validation page not always working properly
+    [x] addtionally, code sending not working on first try every time
+    -> app: _RouterRefreshNotifier only attached its profileProvider listener
+       inside a *live* login transition callback; routerProvider is built after
+       authReadyProvider resolves, so on a cold start with an already-stored
+       token, authNotifierProvider was already resolved and that transition
+       never fired - the listener never attached, so redirect never learned
+       profile.isVerified and left unverified users stuck on /feed hitting the
+       raw unverified_user error instead of /verify-email. Fixed by also
+       attaching it eagerly at construction if already logged in.
+       backend: on_after_register / resend both started the resend cooldown
+       *before* awaiting send_email; an SMTP failure (no retry/timeout in
+       app/core/email.py) then either 500'd /auth/register (account already
+       created, so a retry just hit user_already_exists) or 500'd resend -
+       either way leaving the cooldown active for up to 60s with no email ever
+       sent. Fixed to only start the cooldown after a successful send, and to
+       surface resend failures as a proper `email_send_failed` error instead
+       of a crash.
+[ ] a route can return null (e.g. get banner) -> check if best practise
+[x] when an action failes (e.g. forwarding/dropping a post), the animation still plays -> perform the check before the animation
+
+small changes:
+[x] custom server selection should be only available in the app and not in the web version
+[x] register route should not allow to set is_superuser or is verified
+    -> the field is not actually set in backend but should not be available in the FE
+[x] the web version, but with large screen should get a disclaimer banner that the app is the preferred and a link to the app store (placeholder for now)
+[ ] introduce new app naming
+[x] check if user can only get and interact with posts that are in his feed @done
+    -> review (forward/drop) was already safe (claim_from_queue checks queue membership).
+       GET /posts/{id} was not: it only checked channel subscription, so any subscriber
+       could view any post in the channel by guessing its id. Fixed to require the post
+       be in the user's queue, already reviewed by them, or authored by them.
+
+fable optimizations:
+[ ] simplify code and remove unnecessary complexity
+[ ] performance
+[ ] clean up and readable code
+[ ] functional gaps or logic users could miss 
+    [ ] core algorithm problems and potential issues and edge cases
+[ ] bad UX or confusing UI; potential error sources (user level)
+[ ] security issues, vulnerbilties, potential exploits
+[ ] legal and compliance (e.g. EU data privacy, DSGVO, ...)
+
+
+# Trust Score Brainstorming:
+- unterscheiden zwischen Creator Trust und Reviewer Trust
+    - Creator Trust -> einer hoher Creator Trust bedeutet Rabatt beim posten
+        - beeinflusst durch
+            - Anzahl an Weiterleitungen
+            - Account Alter
+    - Reviewer Trust -> einer hoher Reviewer Trust bedeutet dass forwarded posts mehr gewicht haben (also an mehr leute verteilt werden)
+        - beeinflusst durch
+            - Analyse der Historie und "Anomalie" Erkennung (bspw. immer nur posts loescht)
+            - Gesamtanzahl an Reviews
+            - Als Post getarnte Tests einbauen (bspw. steht in dem Post "Dies ist ein Test, bitte droppe den Post")

@@ -11,7 +11,7 @@ from redis.asyncio import Redis
 
 from app.core import email_verification as ev
 from app.core.config import settings
-from tests.utils import get_jwt_header
+from tests.utils import generate_random_string, get_jwt_header
 
 
 class TestVerificationGate:
@@ -187,3 +187,99 @@ class TestPublicConfig:
             body["email_verification_resend_cooldown_seconds"]
             == settings.EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS
         )
+
+
+class TestEmailChangeRevokesVerification:
+    """`is_verified` is proof about an *address*, not about an account.
+
+    Pointing the account at a different address makes the existing proof say
+    nothing about the new one, so it has to be earned again - otherwise verifying
+    an address you own and then switching to one you don't would keep the access
+    the first proof bought.
+    """
+
+    async def test_changing_email_unverifies_and_sends_a_new_code(
+        self, client: AsyncClient, create_user: Callable, redis: Redis
+    ) -> None:
+        user = await create_user(is_verified=True)
+        new_email = f"{generate_random_string(20)}@{generate_random_string(8)}.com"
+
+        resp = await client.patch(
+            f"{settings.API_PATH}/users/me",
+            json={"email": new_email},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["email"] == new_email
+        assert resp.json()["is_verified"] is False
+
+        # A code went out to the new address, so the verify screen the client is
+        # about to show isn't announcing something that never happened.
+        code = await redis.get(f"email_verify:code:{user.id}")
+        assert code is not None
+        # ...and the cooldown was armed, so "resend" is rate-limited as usual.
+        assert await ev.resend_cooldown_remaining(redis, str(user.id)) > 0
+
+    async def test_the_gate_closes_again(
+        self, client: AsyncClient, create_user: Callable
+    ) -> None:
+        user = await create_user(is_verified=True)
+        headers = get_jwt_header(user)
+        assert (
+            await client.get(f"{settings.API_PATH}/posts/feed", headers=headers)
+        ).status_code == 200
+
+        await client.patch(
+            f"{settings.API_PATH}/users/me",
+            json={"email": f"{generate_random_string(20)}@example.com"},
+            headers=headers,
+        )
+
+        resp = await client.get(f"{settings.API_PATH}/posts/feed", headers=headers)
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == {"error": "unverified_user"}
+
+    async def test_the_new_code_verifies_the_new_address(
+        self, client: AsyncClient, create_user: Callable, redis: Redis
+    ) -> None:
+        user = await create_user(is_verified=True)
+        await client.patch(
+            f"{settings.API_PATH}/users/me",
+            json={"email": f"{generate_random_string(20)}@example.com"},
+            headers=get_jwt_header(user),
+        )
+
+        code = await redis.get(f"email_verify:code:{user.id}")
+        resp = await client.post(
+            f"{settings.API_PATH}/auth/email-verification/confirm",
+            json={"code": code},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_verified"] is True
+
+    async def test_other_fields_leave_verification_alone(
+        self, client: AsyncClient, create_user: Callable
+    ) -> None:
+        user = await create_user(is_verified=True)
+        resp = await client.patch(
+            f"{settings.API_PATH}/users/me",
+            json={"bio": "hello", "dark_mode": True},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_verified"] is True
+
+    async def test_resending_the_same_email_is_a_no_op(
+        self, client: AsyncClient, create_user: Callable
+    ) -> None:
+        """A client that PATCHes the whole profile back unchanged must not knock
+        the account out of verification."""
+        user = await create_user(is_verified=True)
+        resp = await client.patch(
+            f"{settings.API_PATH}/users/me",
+            json={"email": user.email},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_verified"] is True

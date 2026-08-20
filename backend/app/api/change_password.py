@@ -27,6 +27,12 @@ async def change_password(
     session: CurrentAsyncSession,
     user_manager: UserManager = Depends(get_user_manager),
 ):
+    # A Google account has no password its owner knows - linking overwrote it with a
+    # random value (see app/api/google_auth.py). Refuse explicitly rather than let
+    # them fail the current-password check forever.
+    if user.oauth_accounts:
+        raise api_error(400, "google_account_no_password")
+
     verified, _ = user_manager.password_helper.verify_and_update(
         body.current_password, user.hashed_password
     )

@@ -151,6 +151,18 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_MAX_ATTEMPTS: int = 5
     EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS: int = 60
 
+    # --- Google sign-in ---
+    # Off: POST /auth/google and /auth/google/link answer 400 "google_oauth_disabled"
+    # and GET /config reports the feature off, so the client hides the button - the
+    # feature ships dark and is flipped on once the Google Cloud OAuth clients exist.
+    GOOGLE_OAUTH_ENABLED: bool = False
+    # Accepted `aud` values on incoming ID tokens. The mobile app initializes
+    # google_sign_in with `serverClientId` = the *web* client ID, so Android and web
+    # both mint tokens audienced to that same single value; this is a list only so an
+    # iOS client ID can be added later without a code change. Verified explicitly in
+    # app/core/google_oauth.py - an empty list accepts nothing.
+    GOOGLE_CLIENT_IDS: list[str] = []
+
     # --- outbound email (SMTP) ---
     # Any relay works unchanged (Gmail SMTP, AWS SES, Mailgun, Postmark, ...) - just
     # set these in .env. Left unset (the default, e.g. local dev/tests), send_email

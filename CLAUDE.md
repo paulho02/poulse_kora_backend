@@ -101,6 +101,34 @@ after cloning).
   reachable, so `process_operation` now asks `has_eligible_recipient` whether to park or
   abandon — an exhausted channel drops the op instead of retrying it for 5 days. An *empty*
   channel is still parked (that backlog is how a new channel reaches its first subscriber).
+- **Google sign-in** (`backend/app/api/google_auth.py`): an **ID-token** flow, not fastapi-users'
+  `get_oauth_router` — that is a browser redirect flow the mobile app has no deep links for, and
+  its `associate_by_email` linking is silent, leaving nowhere for the confirmation step. The client
+  gets a Google ID token itself, `POST /auth/google` verifies it (`app/core/google_oauth.py`, via
+  Google's `google-auth`) and mints our normal JWT. Underneath it is still fastapi-users' own
+  machinery: the `oauth_account` table, `SQLAlchemyUserDatabase(session, User, OAuthAccount)` and
+  `oauth_callback` / `oauth_associate_callback`. Behind `GOOGLE_OAUTH_ENABLED` +
+  `GOOGLE_CLIENT_IDS`, advertised to the client on `GET /config`.
+  **`email_verified` is checked and must stay checked** — linking matches on email, so accepting an
+  unverified claim would be an account-takeover path against every password account.
+  Account identity is **one-way**: linking overwrites `hashed_password` with a random value, so
+  `User.auth_provider` flipping to `"google"` is what makes `authenticate` answer `login_use_google`
+  and `POST /auth/change-password` answer `google_account_no_password` (both in `app/deps/users.py`).
+  **Email is a contact address, not a credential.** An account is bound to a Google identity by
+  `sub`, so `POST /auth/google/link` deliberately accepts a Google account whose address differs
+  from `User.email` and leaves that column alone — the one invariant it defends is that a `sub`
+  maps to at most one account (`google_account_in_use`), since two would leave a later sign-in
+  unable to tell which was meant. Consequences: `PATCH /users/me` may still change a Google
+  account's email (there is no lock, by design), and linking only sets `is_verified` when the two
+  addresses match — Google vouched for *its* address, and flipping the flag for a different one
+  would be a free pass around email verification. The same rule runs the other way in
+  `UserManager._update`: **changing `email` revokes `is_verified`** and mails a fresh code
+  (`on_after_update`), because the flag is proof about an address, not about an account.
+  A password account whose address matches gets 409 `google_link_required` on the first attempt and
+  is only linked when the client re-sends the *same* token with `link_existing` — no server state
+  between the two, since Google ID tokens live about an hour. `User.oauth_accounts` is
+  `lazy="selectin"`, deliberately not the `joined` fastapi-users' docs show: a joined *collection*
+  eager load obliges every `select(User)` in the codebase to call `.unique()` or raise at runtime.
 - **Rate limiting** (`backend/app/core/rate_limit.py`, `app/deps/rate_limit.py`): feed writes
   (create post, forward, drop) share **one per-user budget** — `INTERACTION_RATE_LIMIT` hits per
   sliding `INTERACTION_RATE_WINDOW_SECONDS` window, enforced by a Lua sliding-window log in Redis
