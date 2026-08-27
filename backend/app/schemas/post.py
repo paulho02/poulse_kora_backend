@@ -14,6 +14,10 @@ class PostCreate(BaseModel):
 class PostAuthor(BaseModel):
     id: uuid.UUID | None
     username: str | None
+    # None both when the author has no picture set and when the post is anonymous -
+    # see _serialize_post in app/api/posts.py, the single place that decides whether
+    # to reveal the author at all.
+    profile_picture_url: str | None
 
     model_config = ConfigDict(from_attributes=True)
 

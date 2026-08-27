@@ -21,6 +21,10 @@ class UserRead(schemas.BaseUser[uuid.UUID]):
     # account links a Google account with a different address - `email` is the
     # contact address, this is what signs you in. None for password accounts.
     google_email: str | None
+    # URL to fetch the raw image bytes from, or None if unset. Read-only here -
+    # set via PUT/DELETE /users/me/profile-picture (app/api/users.py), not this
+    # PATCH, since it's a binary upload rather than a JSON field.
+    profile_picture_url: str | None
 
 
 class UserCreate(schemas.BaseUserCreate):

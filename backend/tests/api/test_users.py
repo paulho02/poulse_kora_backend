@@ -221,3 +221,92 @@ class TestUpdateMe:
             settings.API_PATH + "/users/me", headers=get_jwt_header(user)
         )
         assert resp.json()["onboarding_completed"] is True
+
+
+class TestProfilePicture:
+    """PUT/DELETE /users/me/profile-picture, GET /users/{id}/profile-picture
+    (app/api/users.py)."""
+
+    async def test_upload_persists_and_is_fetchable(
+        self, client: AsyncClient, create_user
+    ):
+        user = await create_user()
+        resp = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        url = resp.json()["profile_picture_url"]
+        assert url == f"{settings.API_PATH}/users/{user.id}/profile-picture"
+
+        resp = await client.get(
+            settings.API_PATH + "/users/me", headers=get_jwt_header(user)
+        )
+        assert resp.json()["profile_picture_url"] == url
+
+        resp = await client.get(url, headers=get_jwt_header(user))
+        assert resp.status_code == 200, resp.text
+        assert resp.content == b"fake-png-bytes"
+        assert resp.headers["content-type"] == "image/png"
+
+    async def test_upload_rejects_disallowed_content_type(
+        self, client: AsyncClient, create_user
+    ):
+        user = await create_user()
+        resp = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.txt", b"not-an-image", "text/plain")},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"] == "profile_picture_invalid_type"
+
+    async def test_upload_rejects_oversized_file(
+        self, client: AsyncClient, create_user, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "PROFILE_PICTURE_MAX_BYTES", 10)
+        user = await create_user()
+        resp = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", b"this-is-way-too-large", "image/png")},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"] == "profile_picture_too_large"
+
+    async def test_delete_clears_picture(self, client: AsyncClient, create_user):
+        user = await create_user()
+        await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            headers=get_jwt_header(user),
+        )
+        resp = await client.delete(
+            settings.API_PATH + "/users/me/profile-picture",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["profile_picture_url"] is None
+
+        resp = await client.get(
+            f"{settings.API_PATH}/users/{user.id}/profile-picture",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["error"] == "profile_picture_not_found"
+
+    async def test_fetch_missing_picture_is_404(self, client: AsyncClient, create_user):
+        user = await create_user()
+        resp = await client.get(
+            f"{settings.API_PATH}/users/{user.id}/profile-picture",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 404
+
+    async def test_upload_not_logged_in(self, client: AsyncClient):
+        resp = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+        )
+        assert resp.status_code == 401

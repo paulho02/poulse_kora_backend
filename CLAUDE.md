@@ -129,6 +129,18 @@ after cloning).
   between the two, since Google ID tokens live about an hour. `User.oauth_accounts` is
   `lazy="selectin"`, deliberately not the `joined` fastapi-users' docs show: a joined *collection*
   eager load obliges every `select(User)` in the codebase to call `.unique()` or raise at runtime.
+- **Profile pictures** (`app/api/users.py`): stored **as bytes in Postgres** (`User.profile_picture`
+  + `profile_picture_content_type`) because there is no file storage yet — a deliberate stopgap, not
+  a pattern to copy. Set via `PUT /users/me/profile-picture` (multipart, validated against
+  `PROFILE_PICTURE_MAX_BYTES` / `PROFILE_PICTURE_ALLOWED_CONTENT_TYPES`), cleared via `DELETE`.
+  What `UserRead`/`PostAuthor` expose is **`profile_picture_url`, never the bytes** — a feed lists
+  many posts, often several by one author, so embedding base64 would repeat the whole image on every
+  one; the URL points at `GET /users/{id}/profile-picture`, which the client fetches and caches once
+  per author. That route **requires auth**, so clients cannot treat it as a plain image URL.
+  The anonymity rule needs no new code: `_serialize_post` populates the field only inside its
+  existing `reveal_author` branch, so an anonymous post withholds the picture along with the id and
+  username. Note the URL is derived from the user id and so is *unchanged* when a picture is
+  replaced — clients must evict their own cache on upload rather than diffing the string.
 - **Rate limiting** (`backend/app/core/rate_limit.py`, `app/deps/rate_limit.py`): feed writes
   (create post, forward, drop) share **one per-user budget** — `INTERACTION_RATE_LIMIT` hits per
   sliding `INTERACTION_RATE_WINDOW_SECONDS` window, enforced by a Lua sliding-window log in Redis

@@ -6,6 +6,7 @@ from sqlalchemy import DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.functions import func
 
+from app.core.config import settings
 from app.db import Base
 from app.models.oauth_account import GOOGLE_OAUTH_NAME
 
@@ -31,6 +32,13 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     username: Mapped[str | None] = mapped_column(unique=True)
     bio: Mapped[str | None]
     dark_mode: Mapped[bool] = mapped_column(default=False, server_default="false")
+
+    # Stored directly in the database - there is no file storage yet (see
+    # PROFILE_PICTURE_* in app/core/config.py for the size/type limits enforced on
+    # upload, app/api/users.py for the upload/fetch routes). `profile_picture_url`
+    # below is what actually gets exposed on UserRead/PostAuthor, never these bytes.
+    profile_picture: Mapped[bytes | None]
+    profile_picture_content_type: Mapped[str | None]
 
     # Flipped once, after the mobile app's one-time onboarding flow (intro slides,
     # mandatory channel picks, disclaimer) is confirmed. A plain one-way flag: unlike
@@ -116,6 +124,20 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
             if account.oauth_name == GOOGLE_OAUTH_NAME:
                 return account.account_email
         return None
+
+    @property
+    def profile_picture_url(self) -> str | None:
+        """URL to fetch this user's profile picture bytes (`GET
+        /users/{id}/profile-picture`), or None if none is set.
+
+        A URL rather than embedding the bytes/base64 directly on UserRead/PostAuthor:
+        a feed lists many posts, often several by the same author, and repeating the
+        full image on every one would bloat every feed response. A URL lets the
+        client fetch (and cache) the image once per author instead.
+        """
+        if self.profile_picture is None:
+            return None
+        return f"{settings.API_PATH}/users/{self.id}/profile-picture"
 
     def __repr__(self):
         return f"User(id={self.id!r}, name={self.email!r})"

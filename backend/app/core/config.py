@@ -204,6 +204,17 @@ class Settings(BaseSettings):
     # / universal link the app can catch instead.
     SUBSCRIPTION_CHECKOUT_REDIRECT_URL: str = "http://localhost:8000/"
 
+    # --- profile pictures ---
+    # Stored directly as bytes on `User.profile_picture` - there is no file storage
+    # yet, so the database is the only place to put them for now. Displayed beside a
+    # post's author (app/api/posts.py: _serialize_post), never for an anonymous post.
+    PROFILE_PICTURE_MAX_BYTES: int = 2 * 1024 * 1024  # 2 MB
+    PROFILE_PICTURE_ALLOWED_CONTENT_TYPES: list[str] = [
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    ]
+
     BACKEND_CORS_ORIGINS: list[str] = []
 
     TEST_DATABASE_URL: PostgresDsn | None = None

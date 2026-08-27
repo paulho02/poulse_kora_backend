@@ -68,6 +68,62 @@ class TestPostsFeed:
         [data] = [p for p in resp.json() if p["id"] == post.id]
         assert data["author"]["id"] is None
         assert data["author"]["username"] is None
+        assert data["author"]["profile_picture_url"] is None
+
+    async def test_feed_shows_authors_profile_picture(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        viewer: User = await create_user()
+        channel: Channel = await create_channel()
+        author: User = await create_user()
+        await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            headers=get_jwt_header(author),
+        )
+        post: Post = await create_post(channel=channel, author=author)
+        await service.place_post(redis, str(viewer.id), post.id)
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed", headers=get_jwt_header(viewer)
+        )
+        assert resp.status_code == 200, resp.text
+        [data] = [p for p in resp.json() if p["id"] == post.id]
+        assert (
+            data["author"]["profile_picture_url"]
+            == f"{settings.API_PATH}/users/{author.id}/profile-picture"
+        )
+
+    async def test_feed_anonymous_post_hides_authors_profile_picture(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        viewer: User = await create_user()
+        channel: Channel = await create_channel()
+        author: User = await create_user()
+        await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            headers=get_jwt_header(author),
+        )
+        post: Post = await create_post(channel=channel, author=author, is_anonymous=True)
+        await service.place_post(redis, str(viewer.id), post.id)
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed", headers=get_jwt_header(viewer)
+        )
+        assert resp.status_code == 200, resp.text
+        [data] = [p for p in resp.json() if p["id"] == post.id]
+        assert data["author"]["profile_picture_url"] is None
 
     async def test_feed_filtered_by_channel_id(
         self,

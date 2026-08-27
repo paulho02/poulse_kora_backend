@@ -37,9 +37,13 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
         or viewer.is_superuser
     )
     author = (
-        PostAuthor(id=post.author_id, username=post.author.username)
+        PostAuthor(
+            id=post.author_id,
+            username=post.author.username,
+            profile_picture_url=post.author.profile_picture_url,
+        )
         if reveal_author
-        else PostAuthor(id=None, username=None)
+        else PostAuthor(id=None, username=None, profile_picture_url=None)
     )
     return PostRead(
         id=post.id,
