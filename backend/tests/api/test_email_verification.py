@@ -5,10 +5,12 @@ Redis rather than fastapi-users' own link-based verify flow.
 """
 
 from collections.abc import Callable
+from unittest.mock import AsyncMock
 
 from httpx import AsyncClient
 from redis.asyncio import Redis
 
+from app.api import email_verification as email_verification_api
 from app.core import email_verification as ev
 from app.core.config import settings
 from tests.utils import generate_random_string, get_jwt_header
@@ -161,6 +163,31 @@ class TestResendEmailVerification:
         assert detail["error"] == "resend_cooldown"
         assert detail["retry_after"] > 0
         assert "Retry-After" in resp.headers
+
+    async def test_resend_send_failure_reports_an_error_and_does_not_start_cooldown(
+        self,
+        client: AsyncClient,
+        create_user: Callable,
+        redis: Redis,
+        monkeypatch,
+    ) -> None:
+        """A transient SMTP failure must surface as a distinct, actionable error -
+        not an opaque 500 - and must not consume the resend cooldown, since no
+        code was actually delivered; otherwise the user is locked out of a real
+        retry for a full cooldown window."""
+        monkeypatch.setattr(
+            email_verification_api,
+            "send_email",
+            AsyncMock(side_effect=OSError("smtp down")),
+        )
+        user = await create_user(is_verified=False)
+        resp = await client.post(
+            f"{settings.API_PATH}/auth/email-verification/resend",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 502
+        assert resp.json()["detail"]["error"] == "email_send_failed"
+        assert await ev.resend_cooldown_remaining(redis, str(user.id)) == 0
 
     async def test_resend_when_already_verified_is_a_no_op(
         self, client: AsyncClient, create_user: Callable
