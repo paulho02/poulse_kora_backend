@@ -1,7 +1,15 @@
+import io
+import json
+import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+import pytest
 from httpx import AsyncClient
+from PIL import Image
 from redis.asyncio import Redis
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -9,8 +17,102 @@ from app.feed import keys, service
 from app.feed.worker import consume_once
 from app.models.channel import Channel
 from app.models.post import Post
+from app.models.post_media import PostMedia
 from app.models.user import User
 from tests.utils import get_jwt_header, grant_subscription, review, subscribe
+
+
+def _make_test_jpeg(width: int = 64, height: int = 64, *, with_exif: bool = False) -> bytes:
+    img = Image.new("RGB", (width, height), color=(200, 50, 50))
+    buf = io.BytesIO()
+    if with_exif:
+        exif = Image.Exif()
+        exif[0x0112] = 1  # Orientation - a plain, easy-to-set representative tag;
+        # the real-world motivating case (see media_validation.py) is JPEG GPS EXIF.
+        img.save(buf, format="JPEG", exif=exif)
+    else:
+        img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _make_decompression_bomb_png() -> bytes:
+    """A tiny-byte-count file with a declared pixel count well over
+    2x Image.MAX_IMAGE_PIXELS (see media_validation.py) - solid color compresses to
+    a few KB despite the huge declared dimensions."""
+    img = Image.new("RGB", (12000, 12000), color=(0, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _make_test_video(
+    duration: float = 1.0,
+    *,
+    with_metadata: bool = False,
+    codec: str = "libx264",
+    size: str = "64x64",
+) -> bytes:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_path = Path(tmp_dir) / "clip.mp4"
+        cmd = [
+            "ffmpeg", "-y", "-f", "lavfi",
+            "-i", f"testsrc=duration={duration}:size={size}:rate=5",
+            "-c:v", codec,
+            "-pix_fmt", "yuv420p",
+        ]
+        if with_metadata:
+            cmd += ["-metadata", "location=+37.7749-122.4194/"]
+        cmd += [str(out_path)]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return out_path.read_bytes()
+
+
+def _probe_video(data: bytes) -> dict:
+    """format tags + the first video stream, of some stored/returned bytes."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        path = Path(tmp_dir) / "clip.mp4"
+        path.write_bytes(data)
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format_tags:format=format_name",
+                "-show_entries", "stream=codec_name,codec_type,width,height",
+                "-of", "json", str(path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        parsed = json.loads(result.stdout)
+        streams = parsed.get("streams", [])
+        video = next((s for s in streams if s.get("codec_type") == "video"), {})
+        return {
+            "tags": parsed.get("format", {}).get("tags", {}),
+            "video": video,
+        }
+
+
+def _probe_format_tags(data: bytes) -> dict:
+    return _probe_video(data)["tags"]
+
+
+def _text_block(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+
+def _media_block(file_index: int) -> dict:
+    return {"type": "media", "file_index": file_index}
+
+
+def _blocks_json(*blocks: dict) -> str:
+    """The `blocks` multipart form field `POST /posts` expects - a JSON-encoded
+    list, since multipart has no native way to carry a nested list of objects."""
+    return json.dumps(list(blocks))
+
+
+def _media_blocks(post_json: dict) -> list[dict]:
+    """The `media` sub-objects of every media-type block in a PostRead body, in
+    order - the equivalent of the old flat `post["media"]` list."""
+    return [b["media"] for b in post_json["blocks"] if b["type"] == "media"]
 
 
 class TestPostsFeed:
@@ -161,7 +263,7 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            json={"channel_id": channel.id, "text": "hi"},
+            data={"channel_id": channel.id, "blocks": _blocks_json(_text_block("hi"))},
         )
         assert resp.status_code == 402, resp.text
         body = resp.json()["detail"]
@@ -179,11 +281,16 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            json={"channel_id": channel.id, "text": "unlocked post"},
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("unlocked post")),
+            },
         )
         assert resp.status_code == 201, resp.text
         data = resp.json()
-        assert data["post"]["text"] == "unlocked post"
+        assert data["post"]["blocks"] == [
+            {"type": "text", "text": "unlocked post", "media": None}
+        ]
         assert data["price"] >= settings.FEED_PRICE_MIN
         assert data["token_balance"] == settings.FEED_PRICE_MAX - data["price"]
         # The new post is queued as an operation for the worker to distribute.
@@ -201,7 +308,10 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            json={"channel_id": channel.id, "text": "superuser post"},
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("superuser post")),
+            },
         )
         assert resp.status_code == 201, resp.text
         assert resp.json()["token_balance"] == 0  # nothing spent, nothing earned
@@ -214,7 +324,7 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            json={"channel_id": 10**6, "text": "hi"},
+            data={"channel_id": 10**6, "blocks": _blocks_json(_text_block("hi"))},
         )
         assert resp.status_code == 404
 
@@ -229,7 +339,10 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            json={"channel_id": channel.id, "text": "supporter post"},
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("supporter post")),
+            },
         )
         assert resp.status_code == 201, resp.text
         assert resp.json()["post"]["subscription_kind"] == "supporter"
@@ -244,7 +357,10 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            json={"channel_id": channel.id, "text": "free post"},
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("free post")),
+            },
         )
         assert resp.status_code == 201, resp.text
         assert resp.json()["post"]["subscription_kind"] is None
@@ -261,7 +377,10 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            json={"channel_id": channel.id, "text": "supporter post"},
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("supporter post")),
+            },
         )
         assert resp.status_code == 201, resp.text
         post_id = resp.json()["post"]["id"]
@@ -275,6 +394,521 @@ class TestCreatePost:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["subscription_kind"] == "supporter"
+
+
+class TestCreatePostMedia:
+    async def test_image_round_trips_with_reencoded_content_type(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("with a photo"), _media_block(0)),
+            },
+            files=[("files", ("photo.jpg", _make_test_jpeg(), "image/jpeg"))],
+        )
+        assert resp.status_code == 201, resp.text
+        [media] = _media_blocks(resp.json()["post"])
+        assert media["media_type"] == "image"
+        assert media["content_type"] == "image/jpeg"
+
+        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.headers["content-type"] == "image/jpeg"
+        assert Image.open(io.BytesIO(fetched.content)).format == "JPEG"
+
+    async def test_image_exif_is_stripped(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("tagged"), _media_block(0)),
+            },
+            files=[
+                ("files", ("photo.jpg", _make_test_jpeg(with_exif=True), "image/jpeg"))
+            ],
+        )
+        assert resp.status_code == 201, resp.text
+        url = _media_blocks(resp.json()["post"])[0]["url"]
+
+        fetched = await client.get(url, headers=get_jwt_header(user))
+        stored = Image.open(io.BytesIO(fetched.content))
+        assert stored.getexif() == {}
+
+    async def test_video_round_trips_with_measured_duration_and_stripped_metadata(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        clip = _make_test_video(duration=1.0, with_metadata=True)
+        assert _probe_format_tags(clip)  # sanity: the fixture actually has metadata
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("with a clip"), _media_block(0)),
+            },
+            files=[("files", ("clip.mp4", clip, "video/mp4"))],
+        )
+        assert resp.status_code == 201, resp.text
+        media = _media_blocks(resp.json()["post"])[0]
+        assert media["media_type"] == "video"
+        assert media["duration_seconds"] == pytest.approx(1.0, abs=0.5)
+
+        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        assert fetched.status_code == 200, fetched.text
+        # The transcode strips the location tag; ffmpeg still writes a handful of
+        # structural container tags (major_brand, encoder, ...) that carry no
+        # user data - only "location" is what this test is about.
+        assert "location" not in _probe_format_tags(fetched.content)
+
+    async def test_hevc_upload_is_transcoded_to_h264(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """The regression that made video unplayable in every browser: phones
+        default to HEVC, which no Chromium-based browser can decode, and the
+        old `-c copy` remux stored it unchanged. Such a clip parses far enough
+        to report a duration and then decodes to a 0x0 picture - so asserting
+        "it round-trips" is not enough, the stored codec itself has to be H.264.
+        """
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        clip = _make_test_video(duration=1.0, codec="libx265")
+        assert _probe_video(clip)["video"]["codec_name"] == "hevc"  # sanity
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("clip.mp4", clip, "video/mp4"))],
+        )
+        assert resp.status_code == 201, resp.text
+        media = _media_blocks(resp.json()["post"])[0]
+        assert media["content_type"] == "video/mp4"
+
+        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        assert fetched.status_code == 200, fetched.text
+        assert _probe_video(fetched.content)["video"]["codec_name"] == "h264"
+
+    async def test_oversized_video_is_scaled_down(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """Output is bounded by POST_VIDEO_MAX_DIMENSION_PX - which is what keeps
+        in-DB rows a sane size for high-bitrate phone footage."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        clip = _make_test_video(duration=1.0, size="1920x1080")
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("clip.mp4", clip, "video/mp4"))],
+        )
+        assert resp.status_code == 201, resp.text
+        url = _media_blocks(resp.json()["post"])[0]["url"]
+
+        fetched = await client.get(url, headers=get_jwt_header(user))
+        video = _probe_video(fetched.content)["video"]
+        assert video["width"] == settings.POST_VIDEO_MAX_DIMENSION_PX
+        assert video["height"] <= settings.POST_VIDEO_MAX_DIMENSION_PX
+        # Even dimensions, which H.264 requires.
+        assert video["width"] % 2 == 0 and video["height"] % 2 == 0
+
+    async def test_too_many_files_rejected_before_any_charge_or_post(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        balance_before = await service.token_balance(redis, str(user.id))
+        posts_before = await db.scalar(select(func.count()).select_from(Post))
+
+        count = settings.POST_MEDIA_MAX_FILES + 1
+        files = [
+            ("files", (f"p{i}.jpg", _make_test_jpeg(), "image/jpeg"))
+            for i in range(count)
+        ]
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(
+                    _text_block("too many"),
+                    *[_media_block(i) for i in range(count)],
+                ),
+            },
+            files=files,
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_too_many_files"
+        assert await service.token_balance(redis, str(user.id)) == balance_before
+        assert await db.scalar(select(func.count()).select_from(Post)) == posts_before
+
+    async def test_oversized_image_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "POST_IMAGE_MAX_BYTES", 10)
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("big"), _media_block(0)),
+            },
+            files=[("files", ("photo.jpg", _make_test_jpeg(), "image/jpeg"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_too_large"
+
+    async def test_video_over_duration_cap_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "POST_VIDEO_MAX_DURATION_SECONDS", 1)
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        clip = _make_test_video(duration=3.0)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("long clip"), _media_block(0)),
+            },
+            files=[("files", ("clip.mp4", clip, "video/mp4"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_video_too_long"
+
+    async def test_wrong_content_type_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("not an image"), _media_block(0)),
+            },
+            files=[("files", ("notes.txt", b"just text", "text/plain"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_invalid_type"
+
+    async def test_bytes_lying_about_content_type_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """The client-declared content_type is only used to pick image vs. video
+        handling - Pillow's own parse of the bytes is what actually decides."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("fake"), _media_block(0)),
+            },
+            files=[("files", ("fake.jpg", b"not-really-a-jpeg", "image/jpeg"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_invalid_type"
+
+    async def test_combined_total_over_cap_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "POST_MEDIA_MAX_TOTAL_BYTES", 1000)
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        # Each individually under POST_IMAGE_MAX_BYTES, but combined over the cap.
+        files = [
+            ("files", ("a.jpg", _make_test_jpeg(200, 200), "image/jpeg")),
+            ("files", ("b.jpg", _make_test_jpeg(200, 200), "image/jpeg")),
+        ]
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(
+                    _text_block("two photos"), _media_block(0), _media_block(1)
+                ),
+            },
+            files=files,
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_total_too_large"
+
+    async def test_decompression_bomb_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("bomb"), _media_block(0)),
+            },
+            files=[("files", ("bomb.png", _make_decompression_bomb_png(), "image/png"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_invalid_type"
+
+    async def test_block_order_preserved_including_interleaved_text(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """The point of blocks: text and media in whatever order the author
+        arranged them, not text-then-media-strip."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        files = [
+            ("files", (f"p{i}.jpg", _make_test_jpeg(), "image/jpeg")) for i in range(2)
+        ]
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(
+                    _text_block("intro"),
+                    _media_block(0),
+                    _text_block("caption between the two photos"),
+                    _media_block(1),
+                ),
+            },
+            files=files,
+        )
+        assert resp.status_code == 201, resp.text
+        blocks = resp.json()["post"]["blocks"]
+        assert [b["type"] for b in blocks] == ["text", "media", "text", "media"]
+        assert blocks[0]["text"] == "intro"
+        assert blocks[2]["text"] == "caption between the two photos"
+
+
+class TestCreatePostBlocks:
+    async def test_zero_blocks_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={"channel_id": channel.id, "blocks": _blocks_json()},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_blocks_empty"
+
+    async def test_too_many_blocks_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "POST_BLOCKS_MAX_COUNT", 3)
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(*[_text_block(f"p{i}") for i in range(4)]),
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_blocks_too_many"
+
+    async def test_file_index_out_of_range_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("hi"), _media_block(0)),
+            },
+            # No files attached at all - file_index 0 is out of range.
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_blocks_invalid"
+
+    async def test_duplicate_file_index_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0), _media_block(0)),
+            },
+            files=[("files", ("a.jpg", _make_test_jpeg(), "image/jpeg"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_blocks_invalid"
+
+    async def test_unreferenced_uploaded_file_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """A file attached but not pointed at by any block is rejected, not
+        silently dropped."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={"channel_id": channel.id, "blocks": _blocks_json(_text_block("hi"))},
+            files=[("files", ("a.jpg", _make_test_jpeg(), "image/jpeg"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_blocks_invalid"
+
+    async def test_all_media_post_with_no_text_blocks_succeeds(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={"channel_id": channel.id, "blocks": _blocks_json(_media_block(0))},
+            files=[("files", ("a.jpg", _make_test_jpeg(), "image/jpeg"))],
+        )
+        assert resp.status_code == 201, resp.text
+        assert [b["type"] for b in resp.json()["post"]["blocks"]] == ["media"]
+
+    async def test_all_text_multi_paragraph_post_succeeds(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(
+                    _text_block("first paragraph"), _text_block("second paragraph")
+                ),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        blocks = resp.json()["post"]["blocks"]
+        assert [b["text"] for b in blocks] == ["first paragraph", "second paragraph"]
+
+    async def test_empty_text_block_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={"channel_id": channel.id, "blocks": _blocks_json(_text_block("   "))},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_blocks_invalid"
+
+    async def test_malformed_blocks_json_rejected(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={"channel_id": channel.id, "blocks": "not json"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_blocks_invalid"
+
+    async def test_rejected_block_spends_no_tokens_and_creates_no_post(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        balance_before = await service.token_balance(redis, str(user.id))
+        posts_before = await db.scalar(select(func.count()).select_from(Post))
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0), _media_block(0)),
+            },
+            files=[("files", ("a.jpg", _make_test_jpeg(), "image/jpeg"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert await service.token_balance(redis, str(user.id)) == balance_before
+        assert await db.scalar(select(func.count()).select_from(Post)) == posts_before
 
 
 class TestPostEconomy:
@@ -395,6 +1029,116 @@ class TestGetPost:
             settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
         )
         assert resp.status_code == 200, resp.text
+
+
+class TestGetPostMedia:
+    """Authorization for GET /posts/{post_id}/media/{media_id} mirrors TestGetPost
+    above exactly - it reuses the same `_can_view_post` gate (see app/api/posts.py)
+    rather than the profile-picture route's "any authenticated user"."""
+
+    _MEDIA_DATA = b"fake-jpeg-bytes-0123456789"
+    _MEDIA_KWARGS = {
+        "media_type": "image",
+        "content_type": "image/jpeg",
+        "data": _MEDIA_DATA,
+        "size_bytes": len(_MEDIA_DATA),
+        "duration_seconds": None,
+    }
+
+    async def test_404_for_non_subscriber(
+        self, client: AsyncClient, create_user, create_post
+    ):
+        user: User = await create_user()
+        post: Post = await create_post(media=[self._MEDIA_KWARGS])
+        media_id = post.media[0].id
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 404
+
+    async def test_visible_to_author_even_if_anonymous(
+        self, client: AsyncClient, db: AsyncSession, create_user, create_channel, create_post
+    ):
+        author: User = await create_user()
+        channel: Channel = await create_channel()
+        await subscribe(db, author, channel)
+        post: Post = await create_post(
+            channel=channel, author=author, is_anonymous=True, media=[self._MEDIA_KWARGS]
+        )
+        media_id = post.media[0].id
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
+            headers=get_jwt_header(author),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.content == self._MEDIA_KWARGS["data"]
+
+    async def test_visible_when_in_users_queue(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
+        media_id = post.media[0].id
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+
+    async def test_404_for_media_id_belonging_to_a_different_post(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post_a: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
+        post_b: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
+        await service.place_post(redis, str(user.id), post_a.id)
+        other_media_id = post_b.media[0].id
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post_a.id}/media/{other_media_id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["error"] == "post_media_not_found"
+
+    async def test_range_request_returns_206_with_content_range(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
+        media_id = post.media[0].id
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
+            headers={**get_jwt_header(user), "Range": "bytes=0-4"},
+        )
+        assert resp.status_code == 206, resp.text
+        assert resp.content == self._MEDIA_KWARGS["data"][:5]
+        assert resp.headers["content-range"] == f"bytes 0-4/{self._MEDIA_KWARGS['size_bytes']}"
+
+    async def test_no_range_header_returns_200_with_accept_ranges(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
+        media_id = post.media[0].id
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["accept-ranges"] == "bytes"
 
 
 class TestReviewPost:
@@ -553,7 +1297,7 @@ class TestDeliveryExclusions:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=header,
-            json={"channel_id": channel.id, "text": "mine"},
+            data={"channel_id": channel.id, "blocks": _blocks_json(_text_block("mine"))},
         )
         assert resp.status_code == 201, resp.text
 
@@ -654,7 +1398,10 @@ class TestInteractionRateLimit:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=header,
-            json={"channel_id": channel.id, "text": "one too many"},
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_text_block("one too many")),
+            },
         )
         assert resp.status_code == 429, resp.text
         # Throttled ahead of the handler, so nothing was charged for it.

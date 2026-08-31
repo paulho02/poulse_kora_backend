@@ -25,6 +25,10 @@ httpx = "^0.24.1"
 # issuer, expiry) in app/core/google_oauth.py. The `requests` extra selects its
 # HTTP transport; `requests` is already a direct dependency above.
 google-auth = { extras = ["requests"], version = "^2.38.0" }
+# Post-media image validation/re-encoding: verifies uploaded bytes are actually a
+# decodable image, strips EXIF (see app/core/media_validation.py for why - GPS in a
+# photo's EXIF would deanonymize an anonymous poster), downscales oversized images.
+Pillow = "^11.1.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.10.1"

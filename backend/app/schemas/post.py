@@ -1,14 +1,42 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
 
+class PostBlockIn(BaseModel):
+    """One block of a post being created - either a paragraph of text, or a
+    reference to one of the files attached to the same multipart request. See
+    create_post in app/api/posts.py for how `file_index` is validated/consumed."""
+
+    type: Literal["text", "media"]
+    text: str | None = None
+    file_index: int | None = None  # index into the multipart `files` list
+
+
 class PostCreate(BaseModel):
     channel_id: int
-    text: str
-    has_image: bool = False
+    blocks: list[PostBlockIn]
     is_anonymous: bool = False
+
+
+class PostMediaRead(BaseModel):
+    id: int
+    media_type: str
+    content_type: str
+    url: str
+    duration_seconds: float | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PostBlockRead(BaseModel):
+    type: str  # "text" | "media"
+    text: str | None
+    media: PostMediaRead | None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PostAuthor(BaseModel):
@@ -26,8 +54,7 @@ class PostRead(BaseModel):
     id: int
     channel_id: int
     channel_name: str
-    text: str
-    has_image: bool
+    blocks: list[PostBlockRead]
     is_anonymous: bool
     author: PostAuthor
     forwarded_count: int

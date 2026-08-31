@@ -1,12 +1,15 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.errors import api_error
+from app.core.http_range import build_range_response
+from app.core.media_validation import ProcessedMedia, process_upload
 from app.core.relay_rules import is_review_gate_unlocked
 from app.deps.db import CurrentAsyncSession
 from app.deps.rate_limit import limit_interactions
@@ -15,19 +18,43 @@ from app.deps.users import CurrentVerifiedUser
 from app.feed import service
 from app.models.channel import Channel
 from app.models.post import Post
+from app.models.post_block import PostBlock
+from app.models.post_media import PostMedia
 from app.models.post_review import PostReview
 from app.models.user import User
 from app.models.user_subscription import UserSubscription
 from app.schemas.post import (
     PostAuthor,
+    PostBlockIn,
+    PostBlockRead,
     PostCreate,
     PostCreateResult,
     PostEconomy,
+    PostMediaRead,
     PostRead,
 )
 from app.schemas.post_review import PostReviewCreate, PostReviewResult, ReviewedPostRead
 
 router = APIRouter(prefix="/posts")
+
+_blocks_adapter = TypeAdapter(list[PostBlockIn])
+
+
+async def post_create_form(
+    channel_id: int = Form(...),
+    blocks: str = Form(...),
+    is_anonymous: bool = Form(False),
+) -> PostCreate:
+    """`POST /posts` is multipart (it accepts files), so its non-file fields arrive
+    as form fields rather than a JSON body. `blocks` is itself a JSON-encoded list
+    (multipart has no native way to carry a nested list of objects) - parsed here
+    into the same `PostBlockIn` shape `create_post` validates further.
+    """
+    try:
+        parsed_blocks = _blocks_adapter.validate_json(blocks)
+    except ValidationError:
+        raise api_error(400, "post_blocks_invalid") from None
+    return PostCreate(channel_id=channel_id, blocks=parsed_blocks, is_anonymous=is_anonymous)
 
 
 def _serialize_post(post: Post, viewer: User) -> PostRead:
@@ -49,8 +76,14 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
         id=post.id,
         channel_id=post.channel_id,
         channel_name=post.channel.name,
-        text=post.text,
-        has_image=post.has_image,
+        blocks=[
+            PostBlockRead(
+                type=b.block_type,
+                text=b.text,
+                media=PostMediaRead.model_validate(b.media) if b.media else None,
+            )
+            for b in post.blocks
+        ],
         is_anonymous=post.is_anonymous,
         author=author,
         forwarded_count=post.forwarded_count,
@@ -84,7 +117,11 @@ async def _can_view_post(
 async def _get_post_with_relations(session: CurrentAsyncSession, post_id: int) -> Post | None:
     return await session.scalar(
         select(Post)
-        .options(selectinload(Post.channel), selectinload(Post.author))
+        .options(
+            selectinload(Post.channel),
+            selectinload(Post.author),
+            selectinload(Post.blocks).selectinload(PostBlock.media),
+        )
         .filter(Post.id == post_id)
     )
 
@@ -112,7 +149,11 @@ async def get_posts_feed(
         (
             await session.execute(
                 select(Post)
-                .options(selectinload(Post.channel), selectinload(Post.author))
+                .options(
+                    selectinload(Post.channel),
+                    selectinload(Post.author),
+                    selectinload(Post.blocks).selectinload(PostBlock.media),
+                )
                 .filter(Post.id.in_(post_ids))
             )
         )
@@ -133,14 +174,30 @@ async def get_posts_feed(
     dependencies=[Depends(limit_interactions)],
 )
 async def create_post(
-    post_in: PostCreate,
     session: CurrentAsyncSession,
     user: CurrentVerifiedUser,
     redis: CurrentRedis,
+    post_in: PostCreate = Depends(post_create_form),
+    files: list[UploadFile] = File(default=[]),
 ):
-    """Publish an original post. Costs a dynamic number of tokens (admission price)
-    that rises with operation-queue congestion; superusers post for free. The post
-    is enqueued as an operation for the worker to distribute.
+    """Publish an original post: an ordered sequence of text and media blocks (see
+    `PostBlock`), article-style, up to POST_MEDIA_MAX_FILES media blocks total.
+    Costs a dynamic number of tokens (admission price) that rises with
+    operation-queue congestion; superusers post for free. The post is enqueued as
+    an operation for the worker to distribute.
+
+    Multipart, in one request/one transaction, rather than a "create post, then
+    attach media" two-step: the post is enqueued to Redis fan-out immediately on
+    creation (`service.enqueue_operation`), so a two-step flow would let a
+    recipient's `GET /posts/feed` render the post before a second call had attached
+    its media - and would leave a genuine partial-failure state (post live, upload
+    failed) with no obvious retry story.
+
+    `blocks` is a JSON-encoded list (parsed in `post_create_form`); each media block
+    names a `file_index` into the parallel `files` list rather than carrying bytes
+    itself. Every file is validated/re-encoded (app/core/media_validation.py) - and
+    any resulting error raised - before the channel-existence check's price is
+    charged, so a bad upload never costs tokens.
 
     The price charged is the current shared snapshot (see
     service.get_price_snapshot), not a fresh live computation — the same number a
@@ -152,6 +209,41 @@ async def create_post(
     channel = await session.get(Channel, post_in.channel_id)
     if not channel:
         raise api_error(404, "channel_not_found")
+
+    blocks = post_in.blocks
+    if not blocks:
+        raise api_error(400, "post_blocks_empty")
+    if len(blocks) > settings.POST_BLOCKS_MAX_COUNT:
+        raise api_error(400, "post_blocks_too_many")
+
+    media_blocks = [b for b in blocks if b.type == "media"]
+    if len(media_blocks) > settings.POST_MEDIA_MAX_FILES:
+        raise api_error(400, "post_media_too_many_files")
+
+    used_file_indices: set[int] = set()
+    for block in blocks:
+        if block.type == "text":
+            if not block.text or not block.text.strip():
+                raise api_error(400, "post_blocks_invalid")
+        else:
+            if block.file_index is None or not (0 <= block.file_index < len(files)):
+                raise api_error(400, "post_blocks_invalid")
+            if block.file_index in used_file_indices:
+                raise api_error(400, "post_blocks_invalid")
+            used_file_indices.add(block.file_index)
+    if len(used_file_indices) != len(files):
+        # An uploaded file nobody's block points at - reject rather than silently
+        # dropping it (it was still charged bandwidth/validation cost for nothing).
+        raise api_error(400, "post_blocks_invalid")
+
+    processed_by_index: dict[int, ProcessedMedia] = {}
+    total_media_bytes = 0
+    for index, file in enumerate(files):
+        item = await process_upload(file)
+        total_media_bytes += item.size_bytes
+        if total_media_bytes > settings.POST_MEDIA_MAX_TOTAL_BYTES:
+            raise api_error(400, "post_media_total_too_large")
+        processed_by_index[index] = item
 
     price = (await service.get_price_snapshot(redis))["price"]
     if user.is_superuser:
@@ -178,12 +270,41 @@ async def create_post(
     post = Post(
         channel_id=post_in.channel_id,
         author_id=user.id,
-        text=post_in.text,
-        has_image=post_in.has_image,
         is_anonymous=post_in.is_anonymous,
         subscription_kind="supporter" if is_supporter else None,
     )
     session.add(post)
+    await session.flush()  # need post.id for the block/media rows below
+    for position, block in enumerate(blocks):
+        if block.type == "media":
+            item = processed_by_index[block.file_index]
+            media = PostMedia(
+                post_id=post.id,
+                media_type=item.media_type,
+                content_type=item.content_type,
+                data=item.data,
+                size_bytes=item.size_bytes,
+                duration_seconds=item.duration_seconds,
+            )
+            session.add(media)
+            await session.flush()  # need media.id for the block's FK
+            session.add(
+                PostBlock(
+                    post_id=post.id,
+                    position=position,
+                    block_type="media",
+                    media_id=media.id,
+                )
+            )
+        else:
+            session.add(
+                PostBlock(
+                    post_id=post.id,
+                    position=position,
+                    block_type="text",
+                    text=block.text,
+                )
+            )
     await session.commit()
 
     await service.enqueue_operation(
@@ -231,7 +352,11 @@ async def get_my_posts(
         (
             await session.execute(
                 select(Post)
-                .options(selectinload(Post.channel), selectinload(Post.author))
+                .options(
+                    selectinload(Post.channel),
+                    selectinload(Post.author),
+                    selectinload(Post.blocks).selectinload(PostBlock.media),
+                )
                 .filter(Post.author_id == user.id)
                 .order_by(Post.created.desc())
                 .offset(skip)
@@ -263,6 +388,9 @@ async def get_my_reviewed_posts(
                 .options(
                     selectinload(PostReview.post).selectinload(Post.channel),
                     selectinload(PostReview.post).selectinload(Post.author),
+                    selectinload(PostReview.post)
+                    .selectinload(Post.blocks)
+                    .selectinload(PostBlock.media),
                 )
                 .filter(PostReview.user_id == user.id)
                 .order_by(PostReview.created.desc())
@@ -294,6 +422,36 @@ async def get_post(
     if not post or not await _can_view_post(session, redis, user, post):
         raise api_error(404, "post_not_found")
     return _serialize_post(post, user)
+
+
+@router.get("/{post_id}/media/{media_id}")
+async def get_post_media(
+    post_id: int,
+    media_id: int,
+    request: Request,
+    session: CurrentAsyncSession,
+    user: CurrentVerifiedUser,
+    redis: CurrentRedis,
+):
+    """Raw bytes for one image/video attached to a post, referenced by
+    `PostMediaRead.url`. Deliberately kept in this module (not app/api/users.py's
+    style of a standalone route) so it can reuse `_can_view_post` unchanged - a
+    post's media must be exactly as restricted as the post itself (queue
+    membership / already-reviewed / author / superuser), which is a stricter gate
+    than the profile-picture route's "any authenticated user".
+
+    Supports `Range` requests (see app/core/http_range.py) - required for
+    video_player's native ExoPlayer/AVPlayer to play/scrub video at all.
+    """
+    post = await _get_post_with_relations(session, post_id)
+    if not post or not await _can_view_post(session, redis, user, post):
+        raise api_error(404, "post_not_found")
+
+    media = await session.get(PostMedia, media_id)
+    if not media or media.post_id != post_id:
+        raise api_error(404, "post_media_not_found")
+
+    return build_range_response(request, media.data, media.content_type)
 
 
 @router.post(

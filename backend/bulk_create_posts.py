@@ -29,7 +29,7 @@ from app.deps.users import get_user_manager
 from app.models.channel import Channel
 from app.models.user import User
 from app.redis import redis_client
-from app.schemas.post import PostCreate
+from app.schemas.post import PostBlockIn, PostCreate
 
 BOT_EMAIL = "bulk.post.bot@kora.dev"
 BOT_USERNAME = "bulk_post_bot"
@@ -87,9 +87,19 @@ async def main():
         for i in range(1, args.amount + 1):
             post_in = PostCreate(
                 channel_id=channel.id,
-                text=f"This post is auto generated. {run_stamp}-{i}",
+                blocks=[
+                    PostBlockIn(
+                        type="text",
+                        text=f"This post is auto generated. {run_stamp}-{i}",
+                    )
+                ],
             )
-            result = await create_post(post_in, session, author, redis_client)
+            # create_post's Form(...)/File(...) defaults only resolve through
+            # FastAPI's request handling, not a direct coroutine call - post_in and
+            # files must be supplied explicitly here.
+            result = await create_post(
+                session, author, redis_client, post_in=post_in, files=[]
+            )
             print(f"[{i}/{args.amount}] created post id={result.post.id}")
 
         print(

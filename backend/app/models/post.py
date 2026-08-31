@@ -12,6 +12,8 @@ from app.db import Base
 
 if TYPE_CHECKING:
     from app.models.channel import Channel
+    from app.models.post_block import PostBlock
+    from app.models.post_media import PostMedia
     from app.models.post_review import PostReview
     from app.models.user import User
 
@@ -24,8 +26,6 @@ class Post(Base):
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
     author_id: Mapped[UUID] = mapped_column(GUID, ForeignKey("users.id"))
 
-    text: Mapped[str]
-    has_image: Mapped[bool] = mapped_column(default=False, server_default="false")
     is_anonymous: Mapped[bool] = mapped_column(default=False, server_default="false")
 
     forwarded_count: Mapped[int] = mapped_column(default=0, server_default="0")
@@ -47,4 +47,14 @@ class Post(Base):
     author: Mapped["User"] = relationship(back_populates="posts")
     reviews: Mapped[list["PostReview"]] = relationship(
         back_populates="post", cascade="all, delete"
+    )
+    # Convenience/cascade-only collection, unordered - not what serialization reads
+    # from (that's `blocks`, below). Kept mainly so deleting a Post still cascades
+    # to every PostMedia row regardless of whether a block still references it.
+    media: Mapped[list["PostMedia"]] = relationship(
+        back_populates="post", cascade="all, delete"
+    )
+    # The post's actual content, in display order - see PostBlock's docstring.
+    blocks: Mapped[list["PostBlock"]] = relationship(
+        back_populates="post", cascade="all, delete", order_by="PostBlock.position"
     )
