@@ -201,7 +201,24 @@ async def _process_video(file: UploadFile, orientation: str | None) -> Processed
     data = await file.read()
     if len(data) > settings.POST_VIDEO_MAX_BYTES:
         raise api_error(400, "post_media_too_large")
+    return await process_video_bytes(data, orientation)
 
+
+async def process_video_bytes(
+    data: bytes, orientation: str | None = None
+) -> ProcessedMedia:
+    """The video half of `process_upload`, over bytes already in hand.
+
+    Public because backfill_post_media.py re-runs this same pipeline over clips
+    already sitting in Postgres - the rows uploaded before posters, dimensions
+    and the H.264 transcode existed, which is why an old clip shows as a black
+    rectangle instead of a preview frame.
+
+    Deliberately does *not* re-check POST_VIDEO_MAX_BYTES: that limit is a rule
+    about what a client may upload, and applying it to bytes already accepted
+    under an older (or larger) one would make the backfill refuse precisely the
+    rows it exists to repair.
+    """
     with tempfile.TemporaryDirectory() as tmp_dir:
         src_path = Path(tmp_dir) / "in"
         src_path.write_bytes(data)

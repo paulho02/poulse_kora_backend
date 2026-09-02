@@ -56,6 +56,11 @@ docker compose exec backend python seed_dev_data.py
 # auto-created superuser bot. Calls the real create_post route function
 # directly, so it always reflects actual post creation behavior.
 docker compose exec backend python bulk_create_posts.py <channel> <amount>
+
+# Re-run the current media pipeline over videos stored before poster frames,
+# dimensions and the H.264 transcode existed - those render as a black
+# rectangle in the client. Idempotent; --dry-run just counts.
+docker compose exec backend python backfill_post_media.py [--dry-run]
 ```
 
 Backend OpenAPI docs: `http://localhost:8000/docs/`.
@@ -153,8 +158,11 @@ after cloning).
     cannot be re-encoded in a Flutter client at all, so the client sends only a
     `PostBlockIn.orientation` and the center crop happens in the transcode that was
     already running (falling back to `nearest_orientation` when omitted). Consequence:
-    `PostMedia.width/height` are nullable and rows predating this are *not* backfilled and
-    may be any shape — a client must treat missing dimensions as "unknown, letterbox it".
+    `PostMedia.width/height` stay nullable and a client must treat missing dimensions as
+    "unknown, letterbox it" — but rows predating the columns are no longer *left* that
+    way: `python backfill_post_media.py` re-runs the whole pipeline (transcode, crop,
+    measure, poster) over clips already in Postgres, which is the fix for an old video
+    rendering as a black rectangle.
   - **Every video carries a poster frame** (`PostMedia.poster`, served at
     `GET /posts/{id}/media/{id}/poster` behind the same view gate as the clip, since a
     poster is a frame *of* it). Taken from the transcoded output, so it is cropped and

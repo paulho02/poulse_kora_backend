@@ -27,9 +27,10 @@ class PostMedia(Base):
 
     Everything uploaded from now on is one of two fixed aspect ratios
     (POST_MEDIA_LANDSCAPE_RATIO / POST_MEDIA_PORTRAIT_RATIO), but the ratio columns
-    are still nullable: rows written before those existed have no measurements and
-    are not backfilled, so a client must treat missing `width`/`height` as "unknown
-    shape, letterbox it" rather than assuming either ratio.
+    stay nullable and a client must treat missing `width`/`height` as "unknown shape,
+    letterbox it" rather than assuming either ratio. Rows written before those columns
+    existed are repairable rather than stuck, though: backfill_post_media.py re-runs the
+    upload pipeline over the stored bytes to fill in the measurements and the poster.
     """
 
     __tablename__ = "post_media"
