@@ -13,6 +13,12 @@ class PostBlockIn(BaseModel):
     type: Literal["text", "media"]
     text: str | None = None
     file_index: int | None = None  # index into the multipart `files` list
+    # Videos only, and the single thing about a file the client gets to decide:
+    # which of the two fixed shapes to center-crop the clip to
+    # (app/core/media_validation.py). Images are cropped in the client and only
+    # validated server-side, so this is ignored for them; omitted, a video falls
+    # back to whichever allowed shape its source is closest to.
+    orientation: Literal["landscape", "portrait"] | None = None
 
 
 class PostCreate(BaseModel):
@@ -22,11 +28,25 @@ class PostCreate(BaseModel):
 
 
 class PostMediaRead(BaseModel):
+    """One attachment's metadata - never its bytes; `url` (and `poster_url`) is
+    where those live. See PostMedia in app/models/post_media.py.
+
+    `width`/`height` let a client lay the block out before the bytes arrive.
+    They are null only for rows predating the column, so treat missing dimensions
+    as "unknown shape" rather than assuming one of the two fixed ratios.
+    """
+
     id: int
     media_type: str
     content_type: str
     url: str
     duration_seconds: float | None
+    width: int | None
+    height: int | None
+    # Video only: a still frame to show in place of the clip until playback
+    # starts. Null for images (which are their own preview) and for a video whose
+    # frame extraction failed.
+    poster_url: str | None
 
     model_config = ConfigDict(from_attributes=True)
 

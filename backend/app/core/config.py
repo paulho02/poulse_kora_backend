@@ -228,7 +228,7 @@ class Settings(BaseSettings):
     # streaming from Postgres).
     POST_MEDIA_MAX_FILES: int = 5
     POST_MEDIA_MAX_TOTAL_BYTES: int = 40 * 1024 * 1024  # 40 MB combined per post
-    POST_IMAGE_MAX_BYTES: int = 8 * 1024 * 1024  # upload cap, pre-re-encode
+    POST_IMAGE_MAX_BYTES: int = 12 * 1024 * 1024  # upload cap, pre-re-encode
     POST_IMAGE_MAX_DIMENSION_PX: int = 2048  # longest side after re-encode
     POST_IMAGE_ALLOWED_CONTENT_TYPES: list[str] = [
         "image/jpeg",
@@ -248,6 +248,31 @@ class Settings(BaseSettings):
     POST_VIDEO_MAX_DIMENSION_PX: int = 1280
     POST_VIDEO_TARGET_CRF: int = 26
     POST_VIDEO_MAX_BITRATE: str = "4M"
+    # --- fixed aspect ratios ---
+    # Every attachment ends up at exactly one of two shapes. Consumers scroll a
+    # single-column feed, so free-form ratios meant every post resized the column
+    # differently and a client could not reserve space before the bytes arrived;
+    # two known shapes make the layout predictable and let the feed size a media
+    # block from `PostMediaRead.width/height` alone.
+    #
+    # The two paths reach that differently, and deliberately so: an **image** is
+    # cropped by the user in the client (which owns the only UI that can show them
+    # what they are losing) and merely *validated* here, while a **video** cannot be
+    # re-encoded in a Flutter client at all, so the client sends only an
+    # orientation and the center crop is applied here - free, inside the full
+    # transcode _transcode_video already runs.
+    POST_MEDIA_LANDSCAPE_RATIO: float = 4 / 3
+    POST_MEDIA_PORTRAIT_RATIO: float = 4 / 5
+    # Rounding slack for the image check. A client crops to a whole-pixel box, so
+    # e.g. 1440x1080 is exact but 1439x1080 is not - 2% absorbs that without
+    # admitting a visibly different shape (4:3 vs 5:4 differ by ~7%).
+    POST_MEDIA_RATIO_TOLERANCE: float = 0.02
+    # Longest side of the still frame stored beside every video (PostMedia.poster).
+    # It is a placeholder shown until playback starts, never a full-size image, so
+    # it is kept small - it is fetched by every feed card that has a video on it.
+    POST_VIDEO_POSTER_MAX_DIMENSION_PX: int = 720
+    POST_VIDEO_POSTER_QUALITY: int = 6  # ffmpeg -q:v, 2 (best) .. 31 (worst)
+
     # Sanity cap on total blocks per post (text + media combined, see PostBlock) -
     # guards against a pathological submission (thousands of tiny blocks), not a
     # real authoring limit.

@@ -20,10 +20,16 @@ class PostMedia(Base):
 
     Bytes are stored in-DB (`data`), the same stopgap as `User.profile_picture` -
     see the POST_MEDIA_* settings in app/core/config.py for why, and the size/type
-    caps enforced on upload. `content_type` and `duration_seconds` are never taken
-    from the client as-is: app/core/media_validation.py re-derives content_type from
-    what Pillow/ffprobe actually parsed the bytes as, and measures duration_seconds
-    itself via ffprobe - both close the "don't trust a client-supplied header" gap.
+    caps enforced on upload. `content_type`, `duration_seconds` and `width`/`height`
+    are never taken from the client as-is: app/core/media_validation.py re-derives
+    content_type from what Pillow/ffprobe actually parsed the bytes as, and measures
+    the rest itself - all closing the "don't trust a client-supplied header" gap.
+
+    Everything uploaded from now on is one of two fixed aspect ratios
+    (POST_MEDIA_LANDSCAPE_RATIO / POST_MEDIA_PORTRAIT_RATIO), but the ratio columns
+    are still nullable: rows written before those existed have no measurements and
+    are not backfilled, so a client must treat missing `width`/`height` as "unknown
+    shape, letterbox it" rather than assuming either ratio.
     """
 
     __tablename__ = "post_media"
@@ -34,10 +40,33 @@ class PostMedia(Base):
 
     media_type: Mapped[str] = mapped_column(String(10))  # "image" | "video"
     content_type: Mapped[str]
-    data: Mapped[bytes]
+    # `deferred`, unlike every other column here: a feed response serializes many
+    # posts and needs only each attachment's *metadata*, while these two hold the
+    # whole image/video. Left undeferred, one `GET /posts/feed` dragged every
+    # attached clip's bytes (up to POST_VIDEO_MAX_BYTES each) out of Postgres and
+    # through the ORM only to throw them away. The two routes that actually serve
+    # bytes undefer explicitly (see get_post_media / get_post_media_poster) - a
+    # plain attribute access on a deferred column would emit a lazy load, which
+    # raises under asyncio rather than silently working.
+    data: Mapped[bytes] = mapped_column(deferred=True)
     size_bytes: Mapped[int]
     # Video only. ffprobe-measured (see media_validation.py), not client-reported.
     duration_seconds: Mapped[float | None]
+    # Pixel size of `data`. Nullable only for rows predating this column - see the
+    # class docstring. Exposed so a client can reserve the right box for a media
+    # block *before* the bytes arrive, instead of laying out a fixed-height
+    # placeholder and reflowing once it can measure the image itself.
+    width: Mapped[int | None]
+    height: Mapped[int | None]
+
+    # Video only: a still frame from the clip, at the same aspect ratio, shown in
+    # place of a black rectangle until playback starts. Nullable both for rows
+    # predating it and because extraction is deliberately non-fatal (a video that
+    # transcodes but yields no frame is still a good video).
+    poster: Mapped[bytes | None] = mapped_column(deferred=True)
+    # Doubles as the "is there a poster?" flag (see `poster_url`) precisely because
+    # it is *not* deferred - asking `poster is None` would defeat the deferral.
+    poster_content_type: Mapped[str | None]
 
     created: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -53,3 +82,14 @@ class PostMedia(Base):
         would repeat every image/video on every response).
         """
         return f"{settings.API_PATH}/posts/{self.post_id}/media/{self.id}"
+
+    @property
+    def poster_url(self) -> str | None:
+        """URL for `poster`'s bytes, or None when there is no poster frame. Served
+        by its own route rather than inlined for the same reason as `url`, and it
+        matters more here: a feed card shows a video's poster without ever touching
+        the clip, so this is the *only* thing a scrolling list fetches for a video.
+        """
+        if self.poster_content_type is None:
+            return None
+        return f"{settings.API_PATH}/posts/{self.post_id}/media/{self.id}/poster"

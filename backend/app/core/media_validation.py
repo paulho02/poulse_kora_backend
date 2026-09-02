@@ -10,27 +10,32 @@ storing. That matters because this app supports anonymous posts: a photo or vide
 straight off someone's phone routinely carries GPS in exactly this metadata, which
 would deanonymize an "anonymous" poster otherwise.
 
-Video is probed and re-muxed (`ffmpeg -map_metadata -1 -c copy`, no transcode)
-rather than fully re-validated the way images are - there is no cheap equivalent of
-Pillow's `Image.verify()` for video without either shelling out to ffprobe (already
-done here, for the stream/duration check) or pulling in a full decoder. A remux
-failure is treated as an invalid upload rather than falling back to a real
-transcode, which would be a real CPU/latency cost per upload - see POST_VIDEO_* in
-app/core/config.py for the caps this trades off against.
+Video is fully transcoded rather than remuxed - see `_transcode_video` for why - and
+that transcode is also where the two other things a consumer needs come from: the
+**center crop to a fixed aspect ratio** (see POST_MEDIA_*_RATIO in
+app/core/config.py) and the **poster frame** stored alongside the clip so a feed can
+show a real preview instead of a black rectangle before playback starts.
+
+Images take the opposite route on both counts: the *client* crops them (only it can
+show the author what the crop is throwing away) and this module merely rejects a
+shape that is not one of the two allowed ones. Nothing here ever crops an image
+silently - a wrong shape is an error, not something to guess at.
 """
 
 import asyncio
 import io
 import json
+import math
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import UploadFile
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.core.config import settings
 from app.core.errors import api_error
+from app.core.logger import logger
 
 # Blocks decompression-bomb-style images (tiny byte size, huge declared pixel
 # dimensions): Pillow refuses to even open something that would decode past this
@@ -50,6 +55,8 @@ _IMAGE_SAVE_FORMAT_CONTENT_TYPE = {
     "WEBP": "image/webp",
 }
 
+ORIENTATIONS = ("landscape", "portrait")
+
 
 @dataclass
 class ProcessedMedia:
@@ -58,17 +65,65 @@ class ProcessedMedia:
     data: bytes
     size_bytes: int
     duration_seconds: float | None
+    # Dimensions of the stored bytes, so a client can reserve the right box before
+    # it has fetched them. Always populated - the ratio is fixed by construction
+    # (validated for images, cropped to it for video), but the pixel size is not.
+    width: int
+    height: int
+    # Video only: a still frame, JPEG, at the same aspect ratio as the clip.
+    poster: bytes | None = None
+    poster_content_type: str | None = None
 
 
-async def process_upload(file: UploadFile) -> ProcessedMedia:
+def allowed_ratios() -> tuple[float, float]:
+    return (settings.POST_MEDIA_LANDSCAPE_RATIO, settings.POST_MEDIA_PORTRAIT_RATIO)
+
+
+def ratio_for_orientation(orientation: str) -> float:
+    return (
+        settings.POST_MEDIA_LANDSCAPE_RATIO
+        if orientation == "landscape"
+        else settings.POST_MEDIA_PORTRAIT_RATIO
+    )
+
+
+def nearest_orientation(ratio: float) -> str:
+    """Which of the two allowed shapes `ratio` is closest to.
+
+    Compared in log space, so "how far off" means the same thing in both
+    directions - a linear distance would quietly favour the portrait ratio, whose
+    numeric value is the smaller of the two.
+    """
+    landscape, portrait = allowed_ratios()
+    to_landscape = abs(math.log(ratio / landscape))
+    to_portrait = abs(math.log(ratio / portrait))
+    return "landscape" if to_landscape <= to_portrait else "portrait"
+
+
+def matches_allowed_ratio(width: int, height: int) -> bool:
+    if width <= 0 or height <= 0:
+        return False
+    ratio = width / height
+    tolerance = settings.POST_MEDIA_RATIO_TOLERANCE
+    return any(abs(ratio / allowed - 1) <= tolerance for allowed in allowed_ratios())
+
+
+async def process_upload(
+    file: UploadFile, orientation: str | None = None
+) -> ProcessedMedia:
     """Validate, re-encode and return one uploaded file - or raise a structured
     `api_error`. `file.content_type` is only used to pick image vs. video handling;
     each path independently confirms the bytes actually are what was claimed.
+
+    `orientation` ("landscape"/"portrait") is the shape the author chose for a
+    **video** and is the only thing the client gets a say in here; it is ignored for
+    images, which arrive already cropped. `None` falls back to whichever allowed
+    shape the source is closest to.
     """
     if file.content_type in settings.POST_IMAGE_ALLOWED_CONTENT_TYPES:
         return await _process_image(file)
     if file.content_type in settings.POST_VIDEO_ALLOWED_CONTENT_TYPES:
-        return await _process_video(file)
+        return await _process_video(file, orientation)
     raise api_error(400, "post_media_invalid_type")
 
 
@@ -87,15 +142,31 @@ async def _process_image(file: UploadFile) -> ProcessedMedia:
     img = Image.open(io.BytesIO(data))
     img.load()
 
-    # Captured before convert()/thumbnail(), both of which return a new Image with
-    # format=None.
-    save_format = (
-        img.format if img.format in _IMAGE_SAVE_FORMAT_CONTENT_TYPE else "JPEG"
-    )
+    # Captured before exif_transpose()/convert()/thumbnail(), all of which return a
+    # new Image with format=None.
+    source_format = img.format
+
+    # Applies (and consumes) the EXIF orientation tag, so width/height below are the
+    # dimensions a viewer actually sees. Required, not cosmetic: this module strips
+    # EXIF on save, so a phone photo whose "portrait" is really a landscape sensor
+    # frame plus a rotate-90 tag would otherwise be stored sideways *and* measured
+    # against the wrong ratio.
+    img = ImageOps.exif_transpose(img) or img
+
+    if not matches_allowed_ratio(img.width, img.height):
+        raise api_error(400, "post_media_invalid_aspect_ratio")
 
     has_alpha = img.mode in ("RGBA", "LA") or (
         img.mode == "P" and "transparency" in img.info
     )
+    # JPEG unless transparency actually needs preserving. The client's cropper
+    # renders through a canvas and can only hand back PNG, and a 1440x1080 photo is
+    # ~10x larger as PNG than as JPEG - which would be paid for in Postgres row
+    # size and on every single fetch, since these bytes are stored in-DB.
+    save_format = "JPEG"
+    if has_alpha and source_format in ("PNG", "WEBP"):
+        save_format = source_format
+
     if save_format == "JPEG":
         if img.mode != "RGB":
             img = img.convert("RGB")
@@ -121,10 +192,12 @@ async def _process_image(file: UploadFile) -> ProcessedMedia:
         data=out,
         size_bytes=len(out),
         duration_seconds=None,
+        width=img.width,
+        height=img.height,
     )
 
 
-async def _process_video(file: UploadFile) -> ProcessedMedia:
+async def _process_video(file: UploadFile, orientation: str | None) -> ProcessedMedia:
     data = await file.read()
     if len(data) > settings.POST_VIDEO_MAX_BYTES:
         raise api_error(400, "post_media_too_large")
@@ -133,15 +206,29 @@ async def _process_video(file: UploadFile) -> ProcessedMedia:
         src_path = Path(tmp_dir) / "in"
         src_path.write_bytes(data)
 
-        duration = await _probe_duration(src_path)
-        if duration is None:
+        probe = await _probe_video(src_path)
+        if probe is None:
             raise api_error(400, "post_media_invalid_type")
+        duration, src_width, src_height = probe
         if duration > settings.POST_VIDEO_MAX_DURATION_SECONDS:
             raise api_error(400, "post_media_video_too_long")
 
+        if orientation not in ORIENTATIONS:
+            orientation = nearest_orientation(src_width / src_height)
+        target_ratio = ratio_for_orientation(orientation)
+
         out_path = Path(tmp_dir) / "out.mp4"
-        await _transcode_video(src_path, out_path)
+        await _transcode_video(src_path, out_path, target_ratio)
         out_data = out_path.read_bytes()
+
+        # Measured, not computed: the crop and scale filters both round to even
+        # pixel counts, so the exact output size is ffmpeg's business, not ours.
+        out_probe = await _probe_video(out_path)
+        if out_probe is None:
+            raise api_error(400, "post_media_invalid_type")
+        _, width, height = out_probe
+
+        poster = await _extract_poster(out_path, duration)
 
     return ProcessedMedia(
         media_type="video",
@@ -152,6 +239,10 @@ async def _process_video(file: UploadFile) -> ProcessedMedia:
         data=out_data,
         size_bytes=len(out_data),
         duration_seconds=duration,
+        width=width,
+        height=height,
+        poster=poster,
+        poster_content_type="image/jpeg" if poster else None,
     )
 
 
@@ -172,9 +263,15 @@ async def _run_subprocess(
     return proc.returncode, stdout, stderr
 
 
-async def _probe_duration(path: Path) -> float | None:
-    """Confirms `path` decodes as a real video (has a video stream) and returns its
-    duration in seconds, or None if it doesn't look like a video at all.
+async def _probe_video(path: Path) -> tuple[float, int, int] | None:
+    """Confirms `path` decodes as a real video (has a video stream) and returns
+    `(duration_seconds, width, height)`, or None if it doesn't look like a video at
+    all.
+
+    Width/height come from the stream's *display* dimensions: ffprobe is asked for
+    the rotation side data too, and a clip carrying a 90/270 degree rotation is
+    reported by its unrotated frame size, which would otherwise be measured (and
+    cropped) as landscape when every player shows it as portrait.
     """
     returncode, stdout, _ = await _run_subprocess(
         "ffprobe",
@@ -183,7 +280,7 @@ async def _probe_duration(path: Path) -> float | None:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=codec_type:format=duration",
+        "stream=codec_type,width,height:stream_side_data=rotation:format=duration",
         "-of",
         "json",
         str(path),
@@ -194,17 +291,31 @@ async def _probe_duration(path: Path) -> float | None:
         info = json.loads(stdout)
     except json.JSONDecodeError:
         return None
-    if not info.get("streams"):
+    streams = info.get("streams") or []
+    if not streams:
         return None  # no video stream found
+    stream = streams[0]
     try:
-        return float(info["format"]["duration"])
+        duration = float(info["format"]["duration"])
+        width = int(stream["width"])
+        height = int(stream["height"])
     except (KeyError, TypeError, ValueError):
         return None
+    if width <= 0 or height <= 0:
+        return None
+
+    for side_data in stream.get("side_data_list") or []:
+        rotation = side_data.get("rotation")
+        if rotation is not None and abs(int(rotation)) % 180 == 90:
+            width, height = height, width
+            break
+
+    return duration, width, height
 
 
-async def _transcode_video(src: Path, dst: Path) -> None:
-    """Re-encode `src` into `dst` as H.264/AAC mp4, normalized for playback
-    everywhere.
+async def _transcode_video(src: Path, dst: Path, target_ratio: float) -> None:
+    """Re-encode `src` into `dst` as H.264/AAC mp4, center-cropped to
+    `target_ratio` and normalized for playback everywhere.
 
     A full transcode, deliberately, rather than the cheaper `-c copy` remux this
     used to do. Phone cameras default to **HEVC/H.265** (iPhone "High
@@ -214,19 +325,29 @@ async def _transcode_video(src: Path, dst: Path) -> None:
     simply unplayable on web. Copying the streams through preserved exactly that
     problem; H.264 is the one video codec every target actually plays.
 
-    Three things fall out of doing it this way:
+    Four things fall out of doing it this way:
 
+    - The aspect-ratio crop is free. Images are cropped by the author in the
+      client, which cannot re-encode video at all - so a video's crop happens
+      here, in a pass that was already running. `crop` is written as an
+      expression over ffmpeg's own `iw`/`ih` rather than numbers computed from a
+      probe, so the filter stays correct whatever the source turns out to be, and
+      it defaults to a centered crop.
     - `-movflags +faststart` moves the `moov` index to the front, so progressive
       HTTP playback works on the first read instead of forcing the player to
       range-seek to the tail of the file first.
     - Scaling to POST_VIDEO_MAX_DIMENSION_PX and capping the bitrate keeps stored
       rows a sane size, which matters more than usual here because the bytes live
-      in Postgres (see POST_VIDEO_* in app/core/config.py).
+      in Postgres (see POST_VIDEO_* in app/core/config.py). The bounding box is
+      written as `min(iw, max_dim)` rather than the constant, so `decrease` can
+      only ever shrink: a plain `scale=max_dim:max_dim` happily *upscales* an
+      already-small clip, spending bitrate and DB bytes on invented pixels.
     - Re-encoding drops *all* source metadata inherently; `-map_metadata -1` stays
       as an explicit belt-and-braces against container atoms (GPS included) being
       carried over, which is what the anonymity rule needs.
     """
     max_dim = settings.POST_VIDEO_MAX_DIMENSION_PX
+    ratio = f"{target_ratio:.6f}"
     returncode, _, stderr = await _run_subprocess(
         "ffmpeg",
         "-y",
@@ -234,10 +355,12 @@ async def _transcode_video(src: Path, dst: Path) -> None:
         str(src),
         "-map_metadata",
         "-1",
-        # Fit inside a max_dim box without distorting; force_divisible_by=2
-        # because H.264 requires even dimensions.
+        # Center-crop to the target shape (min() keeps the crop inside the frame
+        # whichever way the source is off), then fit the result inside a max_dim
+        # box. force_divisible_by=2 because H.264 requires even dimensions.
         "-vf",
-        f"scale=w={max_dim}:h={max_dim}"
+        f"crop=w='min(iw,ih*{ratio})':h='min(ih,iw/{ratio})',"
+        f"scale=w='min(iw,{max_dim})':h='min(ih,{max_dim})'"
         ":force_original_aspect_ratio=decrease:force_divisible_by=2",
         "-c:v",
         "libx264",
@@ -266,3 +389,52 @@ async def _transcode_video(src: Path, dst: Path) -> None:
     )
     if returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
         raise api_error(400, "post_media_invalid_type")
+
+
+async def _extract_poster(path: Path, duration: float) -> bytes | None:
+    """One still frame from the already-transcoded clip, as a small JPEG.
+
+    This is what makes an unplayed video look like a photo rather than a black
+    rectangle - the client shows it under the play button and, on a feed card,
+    instead of the clip entirely (see PostMedia.poster_url). Taken from the
+    *output* file so it is cropped and scaled exactly like the video it stands in
+    for, and from a moment slightly into the clip rather than frame 0, which is
+    very often a black fade-in frame and would defeat the whole point.
+
+    Non-fatal: a video that transcoded fine but yielded no frame here is still a
+    perfectly good video, so this returns None and lets the client fall back to
+    its neutral tile rather than rejecting the upload.
+    """
+    seek = max(0.0, min(1.0, duration / 4))
+    max_dim = settings.POST_VIDEO_POSTER_MAX_DIMENSION_PX
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out = Path(tmp_dir) / "poster.jpg"
+        try:
+            returncode, _, stderr = await _run_subprocess(
+                "ffmpeg",
+                "-y",
+                # Before -i: seeks by keyframe without decoding everything up to
+                # `seek` first.
+                "-ss",
+                f"{seek:.3f}",
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale=w='min(iw,{max_dim})':h='min(ih,{max_dim})'"
+                ":force_original_aspect_ratio=decrease",
+                "-q:v",
+                str(settings.POST_VIDEO_POSTER_QUALITY),
+                str(out),
+            )
+        except Exception:
+            logger.warning("poster extraction failed to run", exc_info=True)
+            return None
+        if returncode != 0 or not out.exists() or out.stat().st_size == 0:
+            logger.warning(
+                "poster extraction produced no frame: %s",
+                stderr.decode("utf-8", "replace")[-500:],
+            )
+            return None
+        return out.read_bytes()

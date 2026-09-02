@@ -141,6 +141,37 @@ after cloning).
   existing `reveal_author` branch, so an anonymous post withholds the picture along with the id and
   username. Note the URL is derived from the user id and so is *unchanged* when a picture is
   replaced — clients must evict their own cache on upload rather than diffing the string.
+- **Post media** (`app/core/media_validation.py`, `app/models/post_media.py`): images and
+  videos attached to a post, stored in-DB as bytes like profile pictures and for the same
+  stopgap reason. `process_upload` is the choke point — nothing reaches Postgres or spends a
+  token before it. Three things are load-bearing:
+  - **Two fixed aspect ratios**, `POST_MEDIA_LANDSCAPE_RATIO` (4:3) and
+    `POST_MEDIA_PORTRAIT_RATIO` (4:5), and the two media kinds reach them by opposite
+    routes. An **image** is cropped in the Flutter client — the only place that can show
+    an author what the crop discards — and merely *validated* here, so a wrong shape is
+    `400 post_media_invalid_aspect_ratio`, never a silent server-side crop. A **video**
+    cannot be re-encoded in a Flutter client at all, so the client sends only a
+    `PostBlockIn.orientation` and the center crop happens in the transcode that was
+    already running (falling back to `nearest_orientation` when omitted). Consequence:
+    `PostMedia.width/height` are nullable and rows predating this are *not* backfilled and
+    may be any shape — a client must treat missing dimensions as "unknown, letterbox it".
+  - **Every video carries a poster frame** (`PostMedia.poster`, served at
+    `GET /posts/{id}/media/{id}/poster` behind the same view gate as the clip, since a
+    poster is a frame *of* it). Taken from the transcoded output, so it is cropped and
+    scaled identically, and from a moment slightly in rather than frame 0, which is
+    routinely a black fade-in. Extraction is deliberately **non-fatal** — a clip that
+    transcodes but yields no frame is still a good clip, so `poster_url` is nullable and
+    the client falls back to a neutral tile.
+  - `PostMedia.data` and `.poster` are **deferred columns**. A feed response serializes
+    many posts and wants only metadata; undeferred, one `GET /posts/feed` dragged every
+    attached clip's bytes through the ORM to throw them away. The two byte-serving routes
+    undefer explicitly, and must pass `populate_existing=True` — `_get_post_with_relations`
+    has already put the row in the identity map with the column still deferred, and
+    `session.get` returns that cached instance without applying options, so the attribute
+    access would emit a lazy load and raise under asyncio.
+  EXIF is *applied* (`ImageOps.exif_transpose`) before it is stripped: a phone "portrait"
+  photo is often a landscape sensor frame plus a rotate-90 tag, which would otherwise be
+  stored sideways and measured against the wrong ratio.
 - **Rate limiting** (`backend/app/core/rate_limit.py`, `app/deps/rate_limit.py`): feed writes
   (create post, forward, drop) share **one per-user budget** — `INTERACTION_RATE_LIMIT` hits per
   sliding `INTERACTION_RATE_WINDOW_SECONDS` window, enforced by a Lua sliding-window log in Redis

@@ -22,16 +22,37 @@ from app.models.user import User
 from tests.utils import get_jwt_header, grant_subscription, review, subscribe
 
 
-def _make_test_jpeg(width: int = 64, height: int = 64, *, with_exif: bool = False) -> bytes:
+def _make_test_jpeg(
+    width: int = 64,
+    height: int = 48,
+    *,
+    with_exif: bool = False,
+    orientation_tag: int | None = None,
+) -> bytes:
+    """A valid upload by default: 64x48 is 4:3, one of the two shapes
+    POST_MEDIA_*_RATIO admits. Anything else here is deliberately the wrong shape.
+    """
     img = Image.new("RGB", (width, height), color=(200, 50, 50))
     buf = io.BytesIO()
-    if with_exif:
+    if with_exif or orientation_tag is not None:
         exif = Image.Exif()
-        exif[0x0112] = 1  # Orientation - a plain, easy-to-set representative tag;
-        # the real-world motivating case (see media_validation.py) is JPEG GPS EXIF.
+        exif[0x0112] = orientation_tag or 1  # Orientation - a plain, easy-to-set
+        # representative tag; the real-world motivating case (see
+        # media_validation.py) is JPEG GPS EXIF.
         img.save(buf, format="JPEG", exif=exif)
     else:
         img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _make_test_png(width: int = 64, height: int = 48, *, alpha: bool = False) -> bytes:
+    img = Image.new(
+        "RGBA" if alpha else "RGB",
+        (width, height),
+        color=(200, 50, 50, 128) if alpha else (200, 50, 50),
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -99,8 +120,11 @@ def _text_block(text: str) -> dict:
     return {"type": "text", "text": text}
 
 
-def _media_block(file_index: int) -> dict:
-    return {"type": "media", "file_index": file_index}
+def _media_block(file_index: int, orientation: str | None = None) -> dict:
+    block = {"type": "media", "file_index": file_index}
+    if orientation is not None:
+        block["orientation"] = orientation
+    return block
 
 
 def _blocks_json(*blocks: dict) -> str:
@@ -539,6 +563,272 @@ class TestCreatePostMedia:
         # Even dimensions, which H.264 requires.
         assert video["width"] % 2 == 0 and video["height"] % 2 == 0
 
+    async def test_image_reports_its_dimensions(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """`width`/`height` are what lets a client reserve the right box for a
+        media block before the bytes arrive - see PostMediaRead."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("photo.jpg", _make_test_jpeg(400, 300), "image/jpeg"))],
+        )
+        assert resp.status_code == 201, resp.text
+        media = _media_blocks(resp.json()["post"])[0]
+        assert (media["width"], media["height"]) == (400, 300)
+        assert media["poster_url"] is None  # images are their own preview
+
+    async def test_portrait_image_accepted(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("photo.jpg", _make_test_jpeg(80, 100), "image/jpeg"))],
+        )
+        assert resp.status_code == 201, resp.text
+
+    async def test_image_with_disallowed_aspect_ratio_rejected(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis, create_user, create_channel
+    ):
+        """Images are cropped in the client, which owns the only UI that can show
+        the author what the crop discards - so an odd shape arriving here means
+        that step was skipped, and is an error rather than something to guess at.
+        """
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        balance_before = await service.token_balance(redis, str(user.id))
+        posts_before = await db.scalar(select(func.count()).select_from(Post))
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("square.jpg", _make_test_jpeg(64, 64), "image/jpeg"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_invalid_aspect_ratio"
+        # Validation runs before the charge, like every other media rejection.
+        assert await service.token_balance(redis, str(user.id)) == balance_before
+        assert await db.scalar(select(func.count()).select_from(Post)) == posts_before
+
+    async def test_exif_rotation_is_applied_not_just_stripped(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """A phone "portrait" photo is often a landscape sensor frame plus a
+        rotate-90 EXIF tag. Since this backend strips EXIF, not applying the
+        rotation first would store the picture sideways *and* measure it against
+        the wrong ratio - so the stored bytes must come back with the axes swapped.
+        """
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        # 100x80 stored + "rotate 90 CW" => 80x100 as displayed, which is 4:5.
+        photo = _make_test_jpeg(100, 80, orientation_tag=6)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("rotated.jpg", photo, "image/jpeg"))],
+        )
+        assert resp.status_code == 201, resp.text
+        media = _media_blocks(resp.json()["post"])[0]
+        assert (media["width"], media["height"]) == (80, 100)
+
+        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        assert Image.open(io.BytesIO(fetched.content)).size == (80, 100)
+
+    async def test_opaque_png_is_stored_as_jpeg_but_transparency_survives(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """The client's cropper renders through a canvas and can only hand back
+        PNG, which is ~10x the bytes of a JPEG for a photo - paid for in every
+        row and every fetch, since media lives in Postgres. So an opaque PNG is
+        re-encoded, and only actual transparency keeps the heavier format.
+        """
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX * 2)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0), _media_block(1)),
+            },
+            files=[
+                ("files", ("opaque.png", _make_test_png(), "image/png")),
+                ("files", ("alpha.png", _make_test_png(alpha=True), "image/png")),
+            ],
+        )
+        assert resp.status_code == 201, resp.text
+        opaque, alpha = _media_blocks(resp.json()["post"])
+        assert opaque["content_type"] == "image/jpeg"
+        assert alpha["content_type"] == "image/png"
+
+    async def test_video_is_cropped_to_the_chosen_orientation(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """A Flutter client cannot re-encode video, so unlike an image it sends
+        only an orientation and the center crop happens server-side, inside the
+        transcode that was running anyway. A landscape source asked for portrait
+        must come back portrait.
+        """
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        clip = _make_test_video(duration=1.0, size="640x360")
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0, orientation="portrait")),
+            },
+            files=[("files", ("clip.mp4", clip, "video/mp4"))],
+        )
+        assert resp.status_code == 201, resp.text
+        media = _media_blocks(resp.json()["post"])[0]
+        ratio = media["width"] / media["height"]
+        assert ratio == pytest.approx(settings.POST_MEDIA_PORTRAIT_RATIO, rel=0.03)
+
+        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        video = _probe_video(fetched.content)["video"]
+        assert (video["width"], video["height"]) == (media["width"], media["height"])
+
+    async def test_video_without_orientation_falls_back_to_nearest_shape(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        clip = _make_test_video(duration=1.0, size="640x360")  # 16:9, clearly landscape
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("clip.mp4", clip, "video/mp4"))],
+        )
+        assert resp.status_code == 201, resp.text
+        media = _media_blocks(resp.json()["post"])[0]
+        ratio = media["width"] / media["height"]
+        assert ratio == pytest.approx(settings.POST_MEDIA_LANDSCAPE_RATIO, rel=0.03)
+
+    async def test_video_poster_is_served_at_the_clips_aspect_ratio(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """The poster is what makes an unplayed video look like a photo instead of
+        a black rectangle, so it has to be a real frame *of that clip* - same
+        shape, fetchable on its own without touching the video bytes."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        clip = _make_test_video(duration=2.0, size="640x360")
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0, orientation="landscape")),
+            },
+            files=[("files", ("clip.mp4", clip, "video/mp4"))],
+        )
+        assert resp.status_code == 201, resp.text
+        media = _media_blocks(resp.json()["post"])[0]
+        assert media["poster_url"] is not None
+
+        fetched = await client.get(media["poster_url"], headers=get_jwt_header(user))
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.headers["content-type"] == "image/jpeg"
+        poster = Image.open(io.BytesIO(fetched.content))
+        assert poster.format == "JPEG"
+        assert poster.width / poster.height == pytest.approx(
+            media["width"] / media["height"], rel=0.03
+        )
+
+    async def test_video_poster_is_gated_like_the_post_itself(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """A poster is a frame of the video, so a looser gate than the post's own
+        would leak the content of a post the viewer can't open."""
+        author: User = await create_user()
+        stranger: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(author.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(author),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("clip.mp4", _make_test_video(duration=1.0), "video/mp4"))],
+        )
+        assert resp.status_code == 201, resp.text
+        poster_url = _media_blocks(resp.json()["post"])[0]["poster_url"]
+
+        denied = await client.get(poster_url, headers=get_jwt_header(stranger))
+        assert denied.status_code == 404, denied.text
+
+    async def test_small_video_is_not_upscaled(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """`scale` with a constant bounding box happily enlarges a small clip,
+        spending bitrate and in-DB bytes on invented pixels."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": _blocks_json(_media_block(0, orientation="landscape")),
+            },
+            files=[
+                (
+                    "files",
+                    ("clip.mp4", _make_test_video(duration=1.0, size="160x120"), "video/mp4"),
+                )
+            ],
+        )
+        assert resp.status_code == 201, resp.text
+        media = _media_blocks(resp.json()["post"])[0]
+        assert media["width"] <= 160 and media["height"] <= 120
+
     async def test_too_many_files_rejected_before_any_charge_or_post(
         self, client: AsyncClient, db: AsyncSession, redis: Redis, create_user, create_channel
     ):
@@ -660,8 +950,8 @@ class TestCreatePostMedia:
         await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
         # Each individually under POST_IMAGE_MAX_BYTES, but combined over the cap.
         files = [
-            ("files", ("a.jpg", _make_test_jpeg(200, 200), "image/jpeg")),
-            ("files", ("b.jpg", _make_test_jpeg(200, 200), "image/jpeg")),
+            ("files", ("a.jpg", _make_test_jpeg(400, 300), "image/jpeg")),
+            ("files", ("b.jpg", _make_test_jpeg(400, 300), "image/jpeg")),
         ]
 
         resp = await client.post(
