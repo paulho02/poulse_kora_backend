@@ -24,6 +24,12 @@ ARG PYTHON_VER
 
 WORKDIR /app
 
+# ffmpeg/ffprobe: used by app/core/media_validation.py to probe and re-mux uploaded
+# post videos (strips container metadata, e.g. GPS, and measures duration) - not
+# needed by the builder stage above, only at runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=base /app /app
 COPY --from=base /usr/local/lib/python${PYTHON_VER}/site-packages /usr/local/lib/python${PYTHON_VER}/site-packages
 COPY --from=base /usr/local/bin /usr/local/bin

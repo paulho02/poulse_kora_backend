@@ -13,6 +13,8 @@ from app.factory import create_app
 from app.models.channel import Channel
 from app.models.item import Item
 from app.models.post import Post
+from app.models.post_block import PostBlock
+from app.models.post_media import PostMedia
 from app.models.user import User
 from app.redis import redis_client
 from tests.utils import generate_random_string
@@ -140,8 +142,16 @@ def create_post(db: AsyncSession, create_user: Callable, create_channel: Callabl
         author=None,
         text="text",
         is_anonymous=False,
-        has_image=False,
+        media: list[dict] | None = None,
     ):
+        """`text`, if non-empty, becomes a single leading text block - matching
+        every real post's shape (text block(s) then media, see PostBlock).
+        `media`, if given, is a list of kwargs for PostMedia (media_type,
+        content_type, data, size_bytes, duration_seconds); each becomes a media
+        block after the text block, inserted directly and bypassing upload
+        validation, since tests exercising post-visibility (rather than the
+        upload path itself) don't need real image/video bytes.
+        """
         if not channel:
             channel = await create_channel()
         if not author:
@@ -149,12 +159,38 @@ def create_post(db: AsyncSession, create_user: Callable, create_channel: Callabl
         post = Post(
             channel_id=channel.id,
             author_id=author.id,
-            text=text,
             is_anonymous=is_anonymous,
-            has_image=has_image,
         )
         db.add(post)
+        await db.flush()
+
+        position = 0
+        if text:
+            db.add(
+                PostBlock(
+                    post_id=post.id, position=position, block_type="text", text=text
+                )
+            )
+            position += 1
+        for item in media or []:
+            m = PostMedia(post_id=post.id, **item)
+            db.add(m)
+            await db.flush()
+            db.add(
+                PostBlock(
+                    post_id=post.id,
+                    position=position,
+                    block_type="media",
+                    media_id=m.id,
+                )
+            )
+            position += 1
+
         await db.commit()
+        # Pre-load so callers can read post.media/post.blocks synchronously
+        # afterwards, without triggering a lazy-load outside the async session
+        # context.
+        await db.refresh(post, attribute_names=["media", "blocks"])
         return post
 
     return inner

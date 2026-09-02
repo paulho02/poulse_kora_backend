@@ -75,7 +75,10 @@ class TestErrorEnvelope:
         channel = await create_channel()
         resp = await client.post(
             f"{settings.API_PATH}/posts",
-            json={"channel_id": channel.id, "text": "costs tokens"},
+            data={
+                "channel_id": channel.id,
+                "blocks": '[{"type": "text", "text": "costs tokens"}]',
+            },
             headers=get_jwt_header(user),
         )
         assert resp.status_code == 402

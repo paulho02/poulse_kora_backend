@@ -5,6 +5,8 @@ router). Both routes run on `CurrentUser` (active only) rather than
 the account is verified.
 """
 
+import logging
+
 from fastapi import APIRouter
 
 from app.core import email_verification as ev
@@ -17,6 +19,8 @@ from app.schemas.email_verification import (
     EmailVerificationConfirm,
     EmailVerificationStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth/email-verification", tags=["auth"])
 
@@ -33,9 +37,18 @@ async def resend_email_verification_code(user: CurrentUser, redis: CurrentRedis)
         raise exc
 
     code = await ev.issue_code(redis, str(user.id))
-    await ev.start_resend_cooldown(redis, str(user.id))
     subject, body = ev.email_content(code)
-    await send_email(user.email, subject, body)
+    try:
+        await send_email(user.email, subject, body)
+    except Exception:
+        # Don't start the cooldown for a send that never went out - otherwise a
+        # transient SMTP hiccup locks the user out of a real retry for a full
+        # cooldown window with nothing ever delivered.
+        logger.exception(
+            "Failed to send verification email to %s on resend", user.email
+        )
+        raise api_error(502, "email_send_failed") from None
+    await ev.start_resend_cooldown(redis, str(user.id))
     return EmailVerificationStatus(is_verified=False)
 
 

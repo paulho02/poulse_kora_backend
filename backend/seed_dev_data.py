@@ -27,6 +27,7 @@ from app.deps.users import get_user_manager
 from app.feed.service import rebuild_from_pg
 from app.models.channel import Channel
 from app.models.post import Post
+from app.models.post_block import PostBlock
 from app.models.user import User
 from app.redis import redis_client
 
@@ -137,14 +138,15 @@ async def _top_up_channel(session, channel: Channel, bots: list[User]) -> int:
     to_add = pool[existing_count:TARGET_POSTS_PER_CHANNEL]
 
     for text, is_anonymous in to_add:
+        post = Post(
+            channel_id=channel.id,
+            author_id=random.choice(bots).id,
+            is_anonymous=is_anonymous,
+        )
+        session.add(post)
+        await session.flush()  # need post.id for the PostBlock FK below
         session.add(
-            Post(
-                channel_id=channel.id,
-                author_id=random.choice(bots).id,
-                text=text,
-                is_anonymous=is_anonymous,
-                has_image=False,
-            )
+            PostBlock(post_id=post.id, position=0, block_type="text", text=text)
         )
     return len(to_add)
 

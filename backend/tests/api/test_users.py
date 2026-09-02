@@ -1,10 +1,13 @@
 from collections.abc import Callable
+from unittest.mock import AsyncMock
 
 from httpx import AsyncClient
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import email_verification as ev
 from app.core.config import settings
+from app.deps import users as users_module
 from app.feed import service
 from app.models.user import User
 from tests.utils import generate_random_string, get_jwt_header
@@ -103,6 +106,31 @@ class TestRegister:
             },
         )
         assert resp.status_code == 201, resp.text
+
+    async def test_verification_email_failure_does_not_fail_registration(
+        self, client: AsyncClient, redis: Redis, monkeypatch
+    ):
+        """A transient SMTP failure while sending the first verification code must
+        not turn into a 500 on `/auth/register` - the account is already created
+        by that point, so the user would be stuck (a retry just hits
+        `register_user_already_exists`). It also must not start the resend
+        cooldown, since no email actually went out."""
+        assert settings.REQUIRE_EMAIL_VERIFICATION is True
+        monkeypatch.setattr(
+            users_module, "send_email", AsyncMock(side_effect=OSError("smtp down"))
+        )
+        email = f"{generate_random_string(20)}@{generate_random_string(10)}.com"
+        resp = await client.post(
+            settings.API_PATH + "/auth/register",
+            json={
+                "email": email,
+                "password": "Sup3rSecret!23",
+                "username": generate_random_string(15),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        user_id = resp.json()["id"]
+        assert await ev.resend_cooldown_remaining(redis, user_id) == 0
 
 
 class TestLogin:

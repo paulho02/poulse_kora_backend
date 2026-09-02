@@ -76,7 +76,15 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
     ) -> None:
         """Grant the starting token balance so a brand-new account can publish a
         first post immediately, without having to review anything first, and (when
-        REQUIRE_EMAIL_VERIFICATION is on) send the first verification code."""
+        REQUIRE_EMAIL_VERIFICATION is on) send the first verification code.
+
+        The send is best-effort: the account is already created by this point, so
+        a transient SMTP failure must not blow up `POST /auth/register` with a
+        500 (the user would then be stuck - re-registering just gets
+        `user_already_exists`). The cooldown is only started once the send
+        actually succeeds, so a failed first attempt doesn't lock the user out of
+        an immediate retry via `/auth/email-verification/resend`.
+        """
         await earn_token(self._redis, str(user.id), settings.FEED_STARTING_TOKENS)
         # `not user.is_verified` skips the code for Google signups, which arrive here
         # already verified (oauth_callback with is_verified_by_default) - Google has
@@ -84,9 +92,15 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         # something we already know.
         if settings.REQUIRE_EMAIL_VERIFICATION and not user.is_verified:
             code = await ev.issue_code(self._redis, str(user.id))
-            await ev.start_resend_cooldown(self._redis, str(user.id))
             subject, body = ev.email_content(code)
-            await send_email(user.email, subject, body)
+            try:
+                await send_email(user.email, subject, body)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Failed to send verification email to %s on register", user.email
+                )
+            else:
+                await ev.start_resend_cooldown(self._redis, str(user.id))
 
     async def authenticate(self, credentials):
         """Tell a Google account apart from a wrong password.
@@ -173,9 +187,13 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         """Mail a fresh verification code after an email change.
 
         `_update` has just revoked `is_verified`, so the client is about to be
-        redirected to the verify-email screen. That screen does not request a code
-        on its own - it only offers a manual "resend" - so without this the user
-        lands on a screen announcing a code that was never sent.
+        redirected to the verify-email screen. That screen does send a code the
+        moment it opens, but only via `/auth/email-verification/resend`, which
+        no-ops under an active cooldown - there is none yet for this address, so
+        without this the client's own send would be the first one anyway. Sending
+        it here instead just avoids a redundant round trip and keeps the code
+        landing in the user's inbox the instant the email changes, not once the
+        screen happens to mount.
 
         `update_dict` is empty when this fires from `oauth_associate_callback`
         (app/api/google_auth.py), which is why the guard is on the key rather than
