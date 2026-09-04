@@ -1,7 +1,9 @@
+import io
 from collections.abc import Callable
 from unittest.mock import AsyncMock
 
 from httpx import AsyncClient
+from PIL import Image
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,7 +12,7 @@ from app.core.config import settings
 from app.deps import users as users_module
 from app.feed import service
 from app.models.user import User
-from tests.utils import generate_random_string, get_jwt_header
+from tests.utils import generate_random_string, get_jwt_header, make_test_png
 
 
 class TestRegister:
@@ -252,31 +254,112 @@ class TestUpdateMe:
 
 
 class TestProfilePicture:
-    """PUT/DELETE /users/me/profile-picture, GET /users/{id}/profile-picture
-    (app/api/users.py)."""
+    """PUT/DELETE /users/me/profile-picture (app/api/users.py).
+
+    There is no longer a GET route: the image lives in the media bucket and
+    `profile_picture_url` is a presigned link straight to it (see
+    app/core/storage.py), so the bytes never pass through this backend.
+    """
 
     async def test_upload_persists_and_is_fetchable(
-        self, client: AsyncClient, create_user
+        self, client: AsyncClient, media_client: AsyncClient, create_user
     ):
         user = await create_user()
         resp = await client.put(
             settings.API_PATH + "/users/me/profile-picture",
-            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            files={"file": ("avatar.png", make_test_png(), "image/png")},
             headers=get_jwt_header(user),
         )
         assert resp.status_code == 200, resp.text
         url = resp.json()["profile_picture_url"]
-        assert url == f"{settings.API_PATH}/users/{user.id}/profile-picture"
+        assert url.startswith(str(settings.STORAGE_PUBLIC_ENDPOINT_URL))
 
         resp = await client.get(
             settings.API_PATH + "/users/me", headers=get_jwt_header(user)
         )
         assert resp.json()["profile_picture_url"] == url
 
-        resp = await client.get(url, headers=get_jwt_header(user))
+        # No bearer token: the signature in the URL is the whole authorization.
+        fetched = await media_client.get(url)
+        assert fetched.status_code == 200, fetched.text
+        stored = Image.open(io.BytesIO(fetched.content))
+        assert stored.size == (64, 64)
+        # An opaque source is re-encoded to JPEG, and the *stored* type is what the
+        # bucket serves - derived here, never the client's claim.
+        assert stored.format == "JPEG"
+        assert fetched.headers["content-type"] == "image/jpeg"
+
+    async def test_replacing_a_picture_changes_the_url(
+        self, client: AsyncClient, media_client: AsyncClient, create_user
+    ):
+        """Every upload writes a new object key. That is what invalidates client
+        caches - the old code reused one URL per user, so a replaced picture kept
+        showing the old face until the app was restarted."""
+        user = await create_user()
+        first = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", make_test_png(64, 64), "image/png")},
+            headers=get_jwt_header(user),
+        )
+        first_url = first.json()["profile_picture_url"]
+
+        second = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", make_test_png(32, 32), "image/png")},
+            headers=get_jwt_header(user),
+        )
+        second_url = second.json()["profile_picture_url"]
+        assert second_url != first_url
+        replaced = await media_client.get(second_url)
+        assert Image.open(io.BytesIO(replaced.content)).size == (32, 32)
+        # The superseded object is deleted, so the old URL stops resolving even
+        # while its signature is still within its validity window.
+        assert (await media_client.get(first_url)).status_code == 404
+
+    async def test_upload_rejects_bytes_that_are_not_an_image(
+        self, client: AsyncClient, create_user
+    ):
+        """A truthful-looking header over arbitrary bytes used to be enough to park
+        anything in storage under `image/png`. The decoder is the check now, not the
+        claim."""
+        user = await create_user()
+        resp = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", b"not-really-a-png", "image/png")},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"] == "profile_picture_invalid_type"
+
+    async def test_upload_strips_metadata(
+        self, client: AsyncClient, media_client: AsyncClient, create_user
+    ):
+        """An avatar is not anonymous the way a post can be, so this is not the
+        deanonymization guard post media needs - it is a location leak the user never
+        opted into, on a URL that is now shareable."""
+        user = await create_user()
+        resp = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", make_test_png(with_exif=True), "image/png")},
+            headers=get_jwt_header(user),
+        )
         assert resp.status_code == 200, resp.text
-        assert resp.content == b"fake-png-bytes"
-        assert resp.headers["content-type"] == "image/png"
+        fetched = await media_client.get(resp.json()["profile_picture_url"])
+        assert Image.open(io.BytesIO(fetched.content)).getexif() == {}
+
+    async def test_upload_downscales_an_oversized_image(
+        self, client: AsyncClient, media_client: AsyncClient, create_user, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "PROFILE_PICTURE_MAX_DIMENSION_PX", 32)
+        user = await create_user()
+        resp = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", make_test_png(200, 200), "image/png")},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        fetched = await media_client.get(resp.json()["profile_picture_url"])
+        assert Image.open(io.BytesIO(fetched.content)).size == (32, 32)
 
     async def test_upload_rejects_disallowed_content_type(
         self, client: AsyncClient, create_user
@@ -303,38 +386,36 @@ class TestProfilePicture:
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"] == "profile_picture_too_large"
 
-    async def test_delete_clears_picture(self, client: AsyncClient, create_user):
+    async def test_delete_clears_picture_and_removes_the_object(
+        self, client: AsyncClient, media_client: AsyncClient, create_user
+    ):
         user = await create_user()
-        await client.put(
+        uploaded = await client.put(
             settings.API_PATH + "/users/me/profile-picture",
-            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            files={"file": ("avatar.png", make_test_png(), "image/png")},
             headers=get_jwt_header(user),
         )
+        url = uploaded.json()["profile_picture_url"]
+
         resp = await client.delete(
             settings.API_PATH + "/users/me/profile-picture",
             headers=get_jwt_header(user),
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["profile_picture_url"] is None
+        assert (await media_client.get(url)).status_code == 404
 
-        resp = await client.get(
-            f"{settings.API_PATH}/users/{user.id}/profile-picture",
-            headers=get_jwt_header(user),
-        )
-        assert resp.status_code == 404
-        assert resp.json()["detail"]["error"] == "profile_picture_not_found"
-
-    async def test_fetch_missing_picture_is_404(self, client: AsyncClient, create_user):
+    async def test_no_picture_means_no_url(self, client: AsyncClient, create_user):
         user = await create_user()
         resp = await client.get(
-            f"{settings.API_PATH}/users/{user.id}/profile-picture",
-            headers=get_jwt_header(user),
+            settings.API_PATH + "/users/me", headers=get_jwt_header(user)
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["profile_picture_url"] is None
 
     async def test_upload_not_logged_in(self, client: AsyncClient):
         resp = await client.put(
             settings.API_PATH + "/users/me/profile-picture",
-            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            files={"file": ("avatar.png", make_test_png(), "image/png")},
         )
         assert resp.status_code == 401

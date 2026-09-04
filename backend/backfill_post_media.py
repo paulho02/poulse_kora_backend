@@ -16,15 +16,21 @@ poster is the point - a poster over a clip the browser cannot play would just
 trade one broken preview for another, and a poster is cropped like the clip it
 stands in for, so the two have to be produced together.
 
-Selects on `poster_content_type IS NULL` (the undeferred "is there a poster?"
-flag), so it is idempotent: a repaired row is skipped on the next run, and a row
-whose frame extraction genuinely yields nothing stays selected and is retried -
-which is the right default, since that failure is usually about the clip, not
-about this script.
+Selects on `poster_object_key IS NULL` (the "is there a poster?" flag), so it is
+idempotent: a repaired row is skipped on the next run, and a row whose frame
+extraction genuinely yields nothing stays selected and is retried - which is the
+right default, since that failure is usually about the clip, not about this
+script.
 
 One row at a time, committed per row: these bytes are large, and a run that dies
 half way through should keep what it has already fixed. A row that fails is
 logged and skipped - one unreadable clip must not strand the rest.
+
+The repaired clip is written to the bucket under a **new** key and the old object
+deleted only after the row is committed. A crash in between therefore leaves an
+orphan in the bucket rather than a row pointing at an object that is no longer
+there - and it also means the presigned URL changes, which is what makes clients
+holding the old (unplayable) clip pick up the new one.
 
 Usage (inside the backend container):
     docker compose exec backend python backfill_post_media.py
@@ -35,23 +41,21 @@ import asyncio
 import sys
 
 from sqlalchemy import select
-from sqlalchemy.orm import undefer
 
 from app.core.media_validation import process_video_bytes
+from app.core.storage import post_media_key, storage
 from app.db import async_session_maker
 from app.models.post_media import PostMedia
 
 
 async def backfill(dry_run: bool = False) -> None:
     async with async_session_maker() as session:
-        # Ids first, bytes later: selecting the rows themselves would pull every
-        # clip into memory at once, and `data` is deferred precisely to stop that.
         media_ids = (
             await session.scalars(
                 select(PostMedia.id)
                 .filter(
                     PostMedia.media_type == "video",
-                    PostMedia.poster_content_type.is_(None),
+                    PostMedia.poster_object_key.is_(None),
                 )
                 .order_by(PostMedia.id)
             )
@@ -64,32 +68,46 @@ async def backfill(dry_run: bool = False) -> None:
     repaired = failed = 0
     for media_id in media_ids:
         async with async_session_maker() as session:
-            media = await session.get(
-                PostMedia, media_id, options=[undefer(PostMedia.data)]
-            )
+            media = await session.get(PostMedia, media_id)
             if media is None:
                 continue
             before = media.size_bytes
+            previous_key = media.object_key
             try:
+                source = await storage.get_object(previous_key)
                 # No orientation passed: nothing recorded what the author chose
                 # back then, so `nearest_orientation` picks whichever allowed
                 # shape the clip is already closest to - the least destructive
                 # reading of a crop that was never made.
-                processed = await process_video_bytes(media.data)
+                processed = await process_video_bytes(source)
+
+                key = post_media_key(processed.content_type)
+                await storage.put_object(
+                    key, processed.data, content_type=processed.content_type
+                )
+                poster_key = None
+                if processed.poster and processed.poster_content_type:
+                    poster_key = post_media_key(processed.poster_content_type)
+                    await storage.put_object(
+                        poster_key,
+                        processed.poster,
+                        content_type=processed.poster_content_type,
+                    )
             except Exception as exc:  # noqa: BLE001 - one bad clip must not stop the run
                 failed += 1
                 print(f"  media {media_id}: FAILED ({exc})")
                 continue
 
-            media.data = processed.data
+            media.object_key = key
             media.size_bytes = processed.size_bytes
             media.content_type = processed.content_type
             media.duration_seconds = processed.duration_seconds
             media.width = processed.width
             media.height = processed.height
-            media.poster = processed.poster
-            media.poster_content_type = processed.poster_content_type
+            media.poster_object_key = poster_key
             await session.commit()
+
+            await storage.delete_object(previous_key)
 
             repaired += 1
             poster = (
@@ -103,6 +121,7 @@ async def backfill(dry_run: bool = False) -> None:
             )
 
     print(f"Done: {repaired} repaired, {failed} failed.")
+    await storage.aclose()
 
 
 if __name__ == "__main__":

@@ -19,9 +19,9 @@ The frontend of this project uses React Admin. Follow the quick tutorial to unde
 This is the heart of the backend and the thing to understand first. Skim this section
 before touching anything under `app/feed/`.
 
-### Why two data stores
+### Why three data stores
 
-The feed is distributed across **Postgres** and **Redis** by design:
+The feed is distributed across **Postgres**, **Redis** and an **object bucket** by design:
 
 - **Postgres is the source of truth.** It holds the actual objects: users (with
   denormalized `reviewed/forwarded/dropped` counters), channels, posts, post reviews
@@ -31,9 +31,17 @@ The feed is distributed across **Postgres** and **Redis** by design:
   the feed cheap to read and to fan out. Computing each user's feed on demand in Postgres
   (join subscriptions × posts × reviews, filter, order, paginate) is exactly the query
   that doesn't scale; precomputing it in Redis (fan-out-on-write) avoids that.
+- **The bucket holds bytes, never relationships.** Profile pictures, post images, videos
+  and video poster frames live in S3-compatible object storage (MinIO locally, a Railway
+  Bucket in production); Postgres keeps the object key and the metadata a feed needs to
+  lay a media block out. Clients fetch objects **directly from the bucket** using
+  short-lived presigned URLs the API mints once the usual authorization check has passed,
+  so media bytes never travel through this backend and a video player's `Range` requests
+  are answered by something that actually streams. See `app/core/storage.py`.
 
 Everything in Redis is either derivable from Postgres (and rebuildable — see
-`rebuild_redis.py`) or durable via Redis AOF. Postgres never depends on Redis.
+`rebuild_redis.py`) or durable via Redis AOF. Postgres never depends on Redis, and the
+bucket never depends on either.
 
 ### Redis key catalogue
 
@@ -221,7 +229,30 @@ docker compose exec postgres createdb apptest -U postgres
 Now you can navigate to the following URLs:
 
 - Backend OpenAPI docs: http://localhost:8000/docs/
+- MinIO console (local media bucket): http://localhost:9001 — log in with
+  `STORAGE_ACCESS_KEY_ID` / `STORAGE_SECRET_ACCESS_KEY` from `.env`
 - Frontend: http://localhost:3000
+
+The media bucket itself is created on backend startup (`STORAGE_AUTO_CREATE_BUCKET=true`
+in `env-template`), so there is nothing to set up by hand. If you run the client
+somewhere other than the host browser, point `STORAGE_PUBLIC_ENDPOINT_URL` at a hostname
+that client can actually reach (`http://10.0.2.2:9000` for the Android emulator, your LAN
+IP for a physical device) — presigned URLs are signed for that host, so it cannot be
+patched up afterwards. Your LAN IP satisfies all of them at once, which makes it the
+easiest single setting.
+
+**Two things bite here, and they look the same from the app.** The bucket is a second
+origin now, so it needs its own reachability *and* its own firewall hole — publishing
+`9000` in docker-compose is not sufficient on Windows. When either is wrong the failure is
+quiet in a way that misleads: the API works, the feed loads, and images just show their
+placeholder, because a failed image is meant to degrade to one. Only video surfaces an
+error. If media is missing on a device while the rest of the app is fine, check the media
+host end to end before anything else:
+
+```bash
+# from the machine running the client (or `adb shell` on the device)
+curl -sI "<any presigned URL the API returned>"
+```
 
 ### Step 2: Setup pre-commit hooks and database
 

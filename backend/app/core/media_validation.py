@@ -1,14 +1,24 @@
-"""Post-media upload validation, re-encoding and metadata stripping.
+"""Upload validation, re-encoding and metadata stripping for everything users upload.
 
-Every uploaded file is fully processed here (`process_upload`) before
-app/api/posts.py ever spends a token or writes to Postgres. Two things this closes
-that the profile-picture route (app/api/users.py) does not: it never trusts the
-client's declared `content_type` at face value (only as a coarse image/video split -
-the real check is what Pillow/ffprobe actually make of the bytes), and it strips
-embedded location metadata - JPEG EXIF GPS tags, mp4/mov container atoms - before
-storing. That matters because this app supports anonymous posts: a photo or video
-straight off someone's phone routinely carries GPS in exactly this metadata, which
-would deanonymize an "anonymous" poster otherwise.
+**Nothing reaches object storage without passing through here**: post attachments
+via `process_upload` (before app/api/posts.py spends a token or writes a row) and
+profile pictures via `process_profile_picture`. Two rules hold for both, and they
+are the reason this module exists:
+
+- The client's declared `content_type` is never trusted at face value - only as a
+  coarse image/video split. The real check is what Pillow/ffprobe actually make of
+  the bytes, and the `content_type` that gets stored is derived from that.
+- Embedded metadata - JPEG EXIF GPS tags, mp4/mov container atoms - is stripped
+  before storing. For post media that is a hard requirement: this app supports
+  anonymous posts, and a photo or video straight off someone's phone routinely
+  carries GPS in exactly that metadata, which would deanonymize an "anonymous"
+  poster. For an avatar it is a plain privacy default rather than a deanonymization
+  guard, but the leak is real either way, and more so now that both are served from
+  an object store as presigned URLs anyone holding the link can fetch.
+
+Avatars were the exception until the move to object storage: the route checked a
+declared type and a size cap and stored the bytes verbatim. That is what
+`process_profile_picture` closes.
 
 Video is fully transcoded rather than remuxed - see `_transcode_video` for why - and
 that transcode is also where the two other things a consumer needs come from: the
@@ -127,6 +137,70 @@ async def process_upload(
     raise api_error(400, "post_media_invalid_type")
 
 
+async def process_profile_picture(file: UploadFile) -> tuple[bytes, str]:
+    """Validate and re-encode a profile picture, returning `(bytes, content_type)`.
+
+    Avatars used to be the one upload that skipped this module entirely: the route
+    checked the *declared* `content_type` and a size cap, then stored the client's
+    bytes verbatim under the client's label. That was survivable while the bytes sat
+    in Postgres behind an authenticated route, and much less so now that they sit in
+    an object store and are handed out as presigned URLs anyone holding the link can
+    fetch. Three things it closes, all of which post media already had:
+
+    - **The stored `Content-Type` becomes true by construction** rather than a
+      client claim, so nothing can be parked in the bucket under a type it isn't
+      and left for a browser's content sniffing to reinterpret.
+    - **EXIF is stripped** (nothing is passed to `save`), which for a photo
+      straight off a phone means GPS coordinates. An avatar is not anonymous the
+      way a post can be, so this is not the deanonymization risk `_process_image`
+      guards - it is simply a location leak the user never opted into, on a URL
+      that is now shareable.
+    - **Pixel dimensions are bounded**, so `PROFILE_PICTURE_MAX_BYTES` stops being
+      the only thing standing between a decompression bomb and the decoder.
+
+    Deliberately *not* shared with `_process_image`: that one enforces the two fixed
+    post ratios, and an avatar has no such rule - it is already cropped square by
+    the client, and a wrong shape here should be displayed, not rejected.
+    """
+    if file.content_type not in settings.PROFILE_PICTURE_ALLOWED_CONTENT_TYPES:
+        raise api_error(400, "profile_picture_invalid_type")
+
+    data = await file.read()
+    # Before decoding, so an oversized upload is refused without being parsed.
+    if len(data) > settings.PROFILE_PICTURE_MAX_BYTES:
+        raise api_error(400, "profile_picture_too_large")
+
+    try:
+        probe = Image.open(io.BytesIO(data))
+        probe.verify()
+        img = Image.open(io.BytesIO(data))  # verify() leaves its parser unusable
+        img.load()
+    except Exception:
+        raise api_error(400, "profile_picture_invalid_type") from None
+
+    source_format = img.format
+    img = ImageOps.exif_transpose(img) or img
+
+    has_alpha = img.mode in ("RGBA", "LA") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+    save_format = "PNG" if has_alpha and source_format in ("PNG", "WEBP") else "JPEG"
+    target_mode = "RGBA" if save_format == "PNG" else "RGB"
+    if img.mode != target_mode:
+        img = img.convert(target_mode)
+
+    max_dim = settings.PROFILE_PICTURE_MAX_DIMENSION_PX
+    if img.width > max_dim or img.height > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+
+    buffer = io.BytesIO()
+    # No `exif=`/`icc_profile=` forwarded - that omission is the metadata strip.
+    img.save(
+        buffer, format=save_format, **({"quality": 90} if save_format == "JPEG" else {})
+    )
+    return buffer.getvalue(), _IMAGE_SAVE_FORMAT_CONTENT_TYPE[save_format]
+
+
 async def _process_image(file: UploadFile) -> ProcessedMedia:
     data = await file.read()
     if len(data) > settings.POST_IMAGE_MAX_BYTES:
@@ -161,8 +235,8 @@ async def _process_image(file: UploadFile) -> ProcessedMedia:
     )
     # JPEG unless transparency actually needs preserving. The client's cropper
     # renders through a canvas and can only hand back PNG, and a 1440x1080 photo is
-    # ~10x larger as PNG than as JPEG - which would be paid for in Postgres row
-    # size and on every single fetch, since these bytes are stored in-DB.
+    # ~10x larger as PNG than as JPEG - paid for in stored bytes and, more to the
+    # point, in the bandwidth of every viewer who fetches it.
     save_format = "JPEG"
     if has_alpha and source_format in ("PNG", "WEBP"):
         save_format = source_format

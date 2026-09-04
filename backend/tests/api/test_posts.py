@@ -199,6 +199,7 @@ class TestPostsFeed:
     async def test_feed_shows_authors_profile_picture(
         self,
         client: AsyncClient,
+        media_client: AsyncClient,
         redis: Redis,
         create_user,
         create_channel,
@@ -209,7 +210,7 @@ class TestPostsFeed:
         author: User = await create_user()
         await client.put(
             settings.API_PATH + "/users/me/profile-picture",
-            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            files={"file": ("avatar.png", _make_test_png(), "image/png")},
             headers=get_jwt_header(author),
         )
         post: Post = await create_post(channel=channel, author=author)
@@ -220,10 +221,17 @@ class TestPostsFeed:
         )
         assert resp.status_code == 200, resp.text
         [data] = [p for p in resp.json() if p["id"] == post.id]
-        assert (
-            data["author"]["profile_picture_url"]
-            == f"{settings.API_PATH}/users/{author.id}/profile-picture"
-        )
+        url = data["author"]["profile_picture_url"]
+        assert url is not None
+        # Presigned bucket URL, not a route back into this API - and it resolves
+        # without the viewer's bearer token.
+        assert url.startswith(str(settings.STORAGE_PUBLIC_ENDPOINT_URL))
+        fetched = await media_client.get(url)
+        assert fetched.status_code == 200, fetched.text
+        # Re-encoded on upload, so compare what it decodes to, not raw bytes.
+        # 64x48 is _make_test_png's default; an avatar has no shape rule, so the
+        # source shape is preserved rather than squared off.
+        assert Image.open(io.BytesIO(fetched.content)).size == (64, 48)
 
     async def test_feed_anonymous_post_hides_authors_profile_picture(
         self,
@@ -238,7 +246,7 @@ class TestPostsFeed:
         author: User = await create_user()
         await client.put(
             settings.API_PATH + "/users/me/profile-picture",
-            files={"file": ("avatar.png", b"fake-png-bytes", "image/png")},
+            files={"file": ("avatar.png", _make_test_png(), "image/png")},
             headers=get_jwt_header(author),
         )
         post: Post = await create_post(channel=channel, author=author, is_anonymous=True)
@@ -422,7 +430,7 @@ class TestCreatePost:
 
 class TestCreatePostMedia:
     async def test_image_round_trips_with_reencoded_content_type(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         user: User = await create_user()
         channel: Channel = await create_channel()
@@ -442,13 +450,13 @@ class TestCreatePostMedia:
         assert media["media_type"] == "image"
         assert media["content_type"] == "image/jpeg"
 
-        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        fetched = await media_client.get(media["url"])
         assert fetched.status_code == 200, fetched.text
         assert fetched.headers["content-type"] == "image/jpeg"
         assert Image.open(io.BytesIO(fetched.content)).format == "JPEG"
 
     async def test_image_exif_is_stripped(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         user: User = await create_user()
         channel: Channel = await create_channel()
@@ -468,12 +476,12 @@ class TestCreatePostMedia:
         assert resp.status_code == 201, resp.text
         url = _media_blocks(resp.json()["post"])[0]["url"]
 
-        fetched = await client.get(url, headers=get_jwt_header(user))
+        fetched = await media_client.get(url)
         stored = Image.open(io.BytesIO(fetched.content))
         assert stored.getexif() == {}
 
     async def test_video_round_trips_with_measured_duration_and_stripped_metadata(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         user: User = await create_user()
         channel: Channel = await create_channel()
@@ -495,7 +503,7 @@ class TestCreatePostMedia:
         assert media["media_type"] == "video"
         assert media["duration_seconds"] == pytest.approx(1.0, abs=0.5)
 
-        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        fetched = await media_client.get(media["url"])
         assert fetched.status_code == 200, fetched.text
         # The transcode strips the location tag; ffmpeg still writes a handful of
         # structural container tags (major_brand, encoder, ...) that carry no
@@ -503,7 +511,7 @@ class TestCreatePostMedia:
         assert "location" not in _probe_format_tags(fetched.content)
 
     async def test_hevc_upload_is_transcoded_to_h264(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         """The regression that made video unplayable in every browser: phones
         default to HEVC, which no Chromium-based browser can decode, and the
@@ -530,15 +538,15 @@ class TestCreatePostMedia:
         media = _media_blocks(resp.json()["post"])[0]
         assert media["content_type"] == "video/mp4"
 
-        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        fetched = await media_client.get(media["url"])
         assert fetched.status_code == 200, fetched.text
         assert _probe_video(fetched.content)["video"]["codec_name"] == "h264"
 
     async def test_oversized_video_is_scaled_down(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         """Output is bounded by POST_VIDEO_MAX_DIMENSION_PX - which is what keeps
-        in-DB rows a sane size for high-bitrate phone footage."""
+        stored objects a sane size for high-bitrate phone footage."""
         user: User = await create_user()
         channel: Channel = await create_channel()
         await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
@@ -556,7 +564,7 @@ class TestCreatePostMedia:
         assert resp.status_code == 201, resp.text
         url = _media_blocks(resp.json()["post"])[0]["url"]
 
-        fetched = await client.get(url, headers=get_jwt_header(user))
+        fetched = await media_client.get(url)
         video = _probe_video(fetched.content)["video"]
         assert video["width"] == settings.POST_VIDEO_MAX_DIMENSION_PX
         assert video["height"] <= settings.POST_VIDEO_MAX_DIMENSION_PX
@@ -633,7 +641,7 @@ class TestCreatePostMedia:
         assert await db.scalar(select(func.count()).select_from(Post)) == posts_before
 
     async def test_exif_rotation_is_applied_not_just_stripped(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         """A phone "portrait" photo is often a landscape sensor frame plus a
         rotate-90 EXIF tag. Since this backend strips EXIF, not applying the
@@ -659,7 +667,7 @@ class TestCreatePostMedia:
         media = _media_blocks(resp.json()["post"])[0]
         assert (media["width"], media["height"]) == (80, 100)
 
-        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        fetched = await media_client.get(media["url"])
         assert Image.open(io.BytesIO(fetched.content)).size == (80, 100)
 
     async def test_opaque_png_is_stored_as_jpeg_but_transparency_survives(
@@ -692,7 +700,7 @@ class TestCreatePostMedia:
         assert alpha["content_type"] == "image/png"
 
     async def test_video_is_cropped_to_the_chosen_orientation(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         """A Flutter client cannot re-encode video, so unlike an image it sends
         only an orientation and the center crop happens server-side, inside the
@@ -718,7 +726,7 @@ class TestCreatePostMedia:
         ratio = media["width"] / media["height"]
         assert ratio == pytest.approx(settings.POST_MEDIA_PORTRAIT_RATIO, rel=0.03)
 
-        fetched = await client.get(media["url"], headers=get_jwt_header(user))
+        fetched = await media_client.get(media["url"])
         video = _probe_video(fetched.content)["video"]
         assert (video["width"], video["height"]) == (media["width"], media["height"])
 
@@ -745,7 +753,7 @@ class TestCreatePostMedia:
         assert ratio == pytest.approx(settings.POST_MEDIA_LANDSCAPE_RATIO, rel=0.03)
 
     async def test_video_poster_is_served_at_the_clips_aspect_ratio(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         """The poster is what makes an unplayed video look like a photo instead of
         a black rectangle, so it has to be a real frame *of that clip* - same
@@ -768,7 +776,7 @@ class TestCreatePostMedia:
         media = _media_blocks(resp.json()["post"])[0]
         assert media["poster_url"] is not None
 
-        fetched = await client.get(media["poster_url"], headers=get_jwt_header(user))
+        fetched = await media_client.get(media["poster_url"])
         assert fetched.status_code == 200, fetched.text
         assert fetched.headers["content-type"] == "image/jpeg"
         poster = Image.open(io.BytesIO(fetched.content))
@@ -781,7 +789,11 @@ class TestCreatePostMedia:
         self, client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         """A poster is a frame of the video, so a looser gate than the post's own
-        would leak the content of a post the viewer can't open."""
+        would leak the content of a post the viewer can't open.
+
+        With presigned URLs the gate is enforced one step earlier than it used to
+        be: a viewer who cannot open the post is never handed the poster's URL in
+        the first place, so there is nothing for them to fetch."""
         author: User = await create_user()
         stranger: User = await create_user()
         channel: Channel = await create_channel()
@@ -797,16 +809,19 @@ class TestCreatePostMedia:
             files=[("files", ("clip.mp4", _make_test_video(duration=1.0), "video/mp4"))],
         )
         assert resp.status_code == 201, resp.text
-        poster_url = _media_blocks(resp.json()["post"])[0]["poster_url"]
+        post_id = resp.json()["post"]["id"]
+        assert _media_blocks(resp.json()["post"])[0]["poster_url"] is not None
 
-        denied = await client.get(poster_url, headers=get_jwt_header(stranger))
+        denied = await client.get(
+            settings.API_PATH + f"/posts/{post_id}", headers=get_jwt_header(stranger)
+        )
         assert denied.status_code == 404, denied.text
 
     async def test_small_video_is_not_upscaled(
         self, client: AsyncClient, redis: Redis, create_user, create_channel
     ):
         """`scale` with a constant bounding box happily enlarges a small clip,
-        spending bitrate and in-DB bytes on invented pixels."""
+        spending bitrate and stored bytes on invented pixels."""
         user: User = await create_user()
         channel: Channel = await create_channel()
         await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
@@ -1321,10 +1336,17 @@ class TestGetPost:
         assert resp.status_code == 200, resp.text
 
 
-class TestGetPostMedia:
-    """Authorization for GET /posts/{post_id}/media/{media_id} mirrors TestGetPost
-    above exactly - it reuses the same `_can_view_post` gate (see app/api/posts.py)
-    rather than the profile-picture route's "any authenticated user"."""
+class TestPostMediaUrls:
+    """Access control for post media, which now lives in the bucket rather than in
+    Postgres (see app/core/storage.py).
+
+    The gate did not move, but *when* it runs did: instead of checking
+    `_can_view_post` on every byte fetch, the backend checks it once and only then
+    mints a presigned URL. So what these assert is that a viewer who may not see
+    the post is never handed a URL at all, and that a URL that was handed out
+    really does resolve to the bytes - without the bearer token, since the client
+    fetches it straight from the bucket.
+    """
 
     _MEDIA_DATA = b"fake-jpeg-bytes-0123456789"
     _MEDIA_KWARGS = {
@@ -1335,20 +1357,56 @@ class TestGetPostMedia:
         "duration_seconds": None,
     }
 
-    async def test_404_for_non_subscriber(
+    @staticmethod
+    def _media_url(post_json: dict) -> str:
+        return _media_blocks(post_json)[0]["url"]
+
+    async def test_no_url_for_non_subscriber(
         self, client: AsyncClient, create_user, create_post
     ):
         user: User = await create_user()
         post: Post = await create_post(media=[self._MEDIA_KWARGS])
-        media_id = post.media[0].id
         resp = await client.get(
-            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
-            headers=get_jwt_header(user),
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
         )
+        # The post itself is invisible, so there is no response to carry a URL.
         assert resp.status_code == 404
 
-    async def test_visible_to_author_even_if_anonymous(
-        self, client: AsyncClient, db: AsyncSession, create_user, create_channel, create_post
+    async def test_url_serves_bytes_without_a_bearer_token(
+        self,
+        client: AsyncClient,
+        media_client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        url = self._media_url(resp.json())
+
+        # Absolute, pointing at the bucket - not a path back into this API.
+        assert url.startswith(str(settings.STORAGE_PUBLIC_ENDPOINT_URL))
+        fetched = await media_client.get(url)
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.content == self._MEDIA_DATA
+        assert fetched.headers["content-type"] == "image/jpeg"
+
+    async def test_url_visible_to_author_even_if_anonymous(
+        self,
+        client: AsyncClient,
+        media_client: AsyncClient,
+        db: AsyncSession,
+        create_user,
+        create_channel,
+        create_post,
     ):
         author: User = await create_user()
         channel: Channel = await create_channel()
@@ -1356,79 +1414,100 @@ class TestGetPostMedia:
         post: Post = await create_post(
             channel=channel, author=author, is_anonymous=True, media=[self._MEDIA_KWARGS]
         )
-        media_id = post.media[0].id
 
         resp = await client.get(
-            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
-            headers=get_jwt_header(author),
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(author)
         )
         assert resp.status_code == 200, resp.text
-        assert resp.content == self._MEDIA_KWARGS["data"]
+        fetched = await media_client.get(self._media_url(resp.json()))
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.content == self._MEDIA_DATA
 
-    async def test_visible_when_in_users_queue(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    async def test_object_key_does_not_leak_the_author(
+        self, db: AsyncSession, create_user, create_channel, create_post
     ):
+        """An anonymous post's media URL is shown to every recipient, so a key
+        derived from the author would undo the anonymity the post is asking for."""
+        author: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(
+            channel=channel, author=author, is_anonymous=True, media=[self._MEDIA_KWARGS]
+        )
+        key = post.media[0].object_key
+        assert str(author.id) not in key
+        assert str(post.id) not in key.rsplit("/", 1)[-1].split(".")[0]
+
+    async def test_tampered_signature_is_rejected(
+        self,
+        client: AsyncClient,
+        media_client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        """The signature, not obscurity, is what protects the object - a guessed or
+        edited URL gets nothing."""
         user: User = await create_user()
         channel: Channel = await create_channel()
         post: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
-        media_id = post.media[0].id
         await service.place_post(redis, str(user.id), post.id)
 
         resp = await client.get(
-            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
-            headers=get_jwt_header(user),
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
         )
-        assert resp.status_code == 200, resp.text
+        url = self._media_url(resp.json())
 
-    async def test_404_for_media_id_belonging_to_a_different_post(
+        assert (await media_client.get(url.split("?")[0])).status_code == 403
+        tampered = url[:-1] + ("0" if url[-1] != "0" else "1")
+        assert (await media_client.get(tampered)).status_code == 403
+
+    async def test_url_is_stable_between_requests(
         self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
     ):
-        user: User = await create_user()
-        channel: Channel = await create_channel()
-        post_a: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
-        post_b: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
-        await service.place_post(redis, str(user.id), post_a.id)
-        other_media_id = post_b.media[0].id
-
-        resp = await client.get(
-            settings.API_PATH + f"/posts/{post_a.id}/media/{other_media_id}",
-            headers=get_jwt_header(user),
-        )
-        assert resp.status_code == 404
-        assert resp.json()["detail"]["error"] == "post_media_not_found"
-
-    async def test_range_request_returns_206_with_content_range(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
-    ):
+        """Signatures are quantized to MEDIA_URL_REFRESH_SECONDS (see
+        app/core/storage.py), so the same object yields the same string. The client
+        caches media by URL, so a per-request signature would silently re-download
+        every image in the feed on every refresh."""
         user: User = await create_user()
         channel: Channel = await create_channel()
         post: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
-        media_id = post.media[0].id
         await service.place_post(redis, str(user.id), post.id)
 
-        resp = await client.get(
-            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
-            headers={**get_jwt_header(user), "Range": "bytes=0-4"},
-        )
-        assert resp.status_code == 206, resp.text
-        assert resp.content == self._MEDIA_KWARGS["data"][:5]
-        assert resp.headers["content-range"] == f"bytes 0-4/{self._MEDIA_KWARGS['size_bytes']}"
+        headers = get_jwt_header(user)
+        first = await client.get(settings.API_PATH + f"/posts/{post.id}", headers=headers)
+        second = await client.get(settings.API_PATH + f"/posts/{post.id}", headers=headers)
+        assert self._media_url(first.json()) == self._media_url(second.json())
 
-    async def test_no_range_header_returns_200_with_accept_ranges(
-        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    async def test_bucket_serves_range_requests(
+        self,
+        client: AsyncClient,
+        media_client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
     ):
+        """Range support is what lets video_player's native ExoPlayer/AVPlayer scrub
+        at all. It used to be hand-rolled over an in-memory buffer
+        (app/core/http_range.py, now deleted); the bucket does it properly."""
         user: User = await create_user()
         channel: Channel = await create_channel()
         post: Post = await create_post(channel=channel, media=[self._MEDIA_KWARGS])
-        media_id = post.media[0].id
         await service.place_post(redis, str(user.id), post.id)
 
         resp = await client.get(
-            settings.API_PATH + f"/posts/{post.id}/media/{media_id}",
-            headers=get_jwt_header(user),
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
         )
-        assert resp.status_code == 200, resp.text
-        assert resp.headers["accept-ranges"] == "bytes"
+        fetched = await media_client.get(
+            self._media_url(resp.json()), headers={"Range": "bytes=0-4"}
+        )
+        assert fetched.status_code == 206, fetched.text
+        assert fetched.content == self._MEDIA_DATA[:5]
+        assert (
+            fetched.headers["content-range"]
+            == f"bytes 0-4/{len(self._MEDIA_DATA)}"
+        )
 
 
 class TestReviewPost:

@@ -204,11 +204,93 @@ class Settings(BaseSettings):
     # / universal link the app can catch instead.
     SUBSCRIPTION_CHECKOUT_REDIRECT_URL: str = "http://localhost:8000/"
 
+    # --- object storage (S3-compatible) ---
+    # Where every uploaded image, video and poster frame lives. One protocol, two
+    # deployments: a MinIO container locally/in CI, a Railway Bucket (Tigris) in
+    # production - see app/core/storage.py and RAILWAY.md.
+    STORAGE_ENDPOINT_URL: str = "http://minio:9000"
+    # The endpoint *clients* connect to, when it differs from the one the backend
+    # uses. It usually does in local dev: the backend reaches MinIO as `minio:9000`
+    # on the compose network, while a phone or browser has to reach it as
+    # `localhost:9000` (or `10.0.2.2:9000` from the Android emulator). This is not
+    # cosmetic - the host is a *signed* header, so a URL signed against one name and
+    # rewritten to another is rejected. Unset means "same as STORAGE_ENDPOINT_URL",
+    # which is the correct setting on Railway.
+    TEST_STORAGE_PUBLIC_ENDPOINT_URL: str | None = None
+    STORAGE_PUBLIC_ENDPOINT_URL: str | None = None
+
+    @field_validator("STORAGE_PUBLIC_ENDPOINT_URL", mode="before")
+    @classmethod
+    def build_test_storage_public_endpoint(
+        cls, v: str | None, info: dict[str, Any]
+    ) -> str | None:
+        """Under pytest the "client" fetching a presigned URL is the test process,
+        which runs *inside* the backend container - so it reaches MinIO as
+        `minio:9000`, not as the `localhost:9000` a phone or browser would use.
+        Without this swap every media assertion would fail on a connection error
+        that has nothing to do with the code under test.
+        """
+        if "pytest" in sys.modules:
+            return info.data.get("TEST_STORAGE_PUBLIC_ENDPOINT_URL") or v
+        return v
+    # Declared before STORAGE_BUCKET so the validator below can see it: pydantic
+    # fills `info.data` in field-definition order.
+    TEST_STORAGE_BUCKET: str | None = None
+    STORAGE_BUCKET: str = "poulse-kora-media"
+
+    @field_validator("STORAGE_BUCKET", mode="before")
+    @classmethod
+    def build_test_storage_bucket(cls, v: str | None, info: dict[str, Any]) -> str:
+        """Swaps in TEST_STORAGE_BUCKET while pytest is running, mirroring what
+        DATABASE_URL/REDIS_URL already do - so a test run can never write objects
+        into (or delete objects out of) the bucket the dev app is using.
+        """
+        if "pytest" in sys.modules:
+            test_bucket = info.data.get("TEST_STORAGE_BUCKET")
+            if not test_bucket:
+                raise ValueError(
+                    "pytest detected, but TEST_STORAGE_BUCKET is not set in environment"
+                )
+            return str(test_bucket)
+        return v
+
+    STORAGE_REGION: str = "us-east-1"  # Railway/Tigris wants "auto"
+    STORAGE_ACCESS_KEY_ID: str = ""
+    STORAGE_SECRET_ACCESS_KEY: str = ""
+    # "path" -> http://host/<bucket>/<key>, "virtual" -> https://<bucket>.host/<key>.
+    # MinIO on localhost can only do path-style (there is no wildcard DNS for
+    # `<bucket>.localhost`); Railway/Tigris serves virtual-hosted URLs.
+    STORAGE_ADDRESSING_STYLE: str = "path"
+    # Local dev and CI only: create the bucket on boot (and before a migration that
+    # needs it) if it is missing. On Railway the platform provisions the bucket and
+    # the credentials are scoped to it, so this stays off there.
+    STORAGE_AUTO_CREATE_BUCKET: bool = False
+
+    # --- presigned media URLs ---
+    # How long a handed-out media URL stays valid. This is the window in which a URL
+    # that leaked (forwarded screenshot, shared link) still works, so it is a real
+    # security parameter, not just a cache knob - the authorization check now happens
+    # once, when the URL is minted, not on every byte fetch.
+    MEDIA_URL_TTL_SECONDS: int = 60 * 60  # 1 hour
+    # How often the *string* changes. Signatures are quantized to this boundary so
+    # the same object yields a byte-identical URL within the window, which is what
+    # lets the client cache media by URL instead of re-downloading the whole feed's
+    # images on every refresh (see app/core/storage.py). Must be comfortably smaller
+    # than the TTL: a URL is only guaranteed `TTL - REFRESH` of life when handed out.
+    MEDIA_URL_REFRESH_SECONDS: int = 15 * 60
+
     # --- profile pictures ---
-    # Stored directly as bytes on `User.profile_picture` - there is no file storage
-    # yet, so the database is the only place to put them for now. Displayed beside a
-    # post's author (app/api/posts.py: _serialize_post), never for an anonymous post.
+    # Stored in the bucket above, keyed by `User.profile_picture_key`. Displayed
+    # beside a post's author (app/api/posts.py: _serialize_post), never for an
+    # anonymous post.
+    # Bounds the *upload*; the stored image is re-encoded and downscaled to
+    # PROFILE_PICTURE_MAX_DIMENSION_PX (app/core/media_validation.py:
+    # process_profile_picture), so it is normally far smaller than this.
     PROFILE_PICTURE_MAX_BYTES: int = 2 * 1024 * 1024  # 2 MB
+    # Longest side after re-encode. The client's cropper already hands back a
+    # 512px square, so this is a ceiling on anything that reaches the route by
+    # another path rather than a resize the app normally triggers.
+    PROFILE_PICTURE_MAX_DIMENSION_PX: int = 512
     PROFILE_PICTURE_ALLOWED_CONTENT_TYPES: list[str] = [
         "image/jpeg",
         "image/png",
@@ -216,16 +298,16 @@ class Settings(BaseSettings):
     ]
 
     # --- post media (images & videos) ---
-    # Stored directly in the database, same in-DB stopgap as profile pictures (see
-    # PostMedia in app/models/post_media.py) - deliberate simplicity call, not a
-    # pattern to copy for large-scale storage. Images are re-encoded server-side
-    # (EXIF/GPS stripped, downscaled to POST_IMAGE_MAX_DIMENSION_PX) via
-    # app/core/media_validation.py, so POST_IMAGE_MAX_BYTES bounds the *upload*, not
-    # the stored size. Video is probed and re-muxed (metadata stripped, not
-    # transcoded) via ffmpeg/ffprobe in the same module - POST_VIDEO_MAX_BYTES bounds
-    # both storage and worst-case per-request memory, since a serve loads the whole
-    # row (see app/core/http_range.py, which slices an in-memory buffer rather than
-    # streaming from Postgres).
+    # Stored in the bucket (see PostMedia in app/models/post_media.py); the database
+    # keeps only the object key and the metadata a feed needs to lay the block out.
+    # Images are re-encoded server-side (EXIF/GPS stripped, downscaled to
+    # POST_IMAGE_MAX_DIMENSION_PX) via app/core/media_validation.py, so
+    # POST_IMAGE_MAX_BYTES bounds the *upload*, not the stored size. Video is fully
+    # transcoded via ffmpeg/ffprobe in the same module - POST_VIDEO_MAX_BYTES bounds
+    # both the upload and worst-case per-request memory, since validation holds the
+    # whole clip in memory before it is streamed to the bucket. Byte *serving* no
+    # longer costs this process anything: clients fetch objects directly, and range
+    # requests (which is how a video player scrubs) are the bucket's problem.
     POST_MEDIA_MAX_FILES: int = 5
     POST_MEDIA_MAX_TOTAL_BYTES: int = 40 * 1024 * 1024  # 40 MB combined per post
     POST_IMAGE_MAX_BYTES: int = 12 * 1024 * 1024  # upload cap, pre-re-encode
@@ -243,8 +325,9 @@ class Settings(BaseSettings):
     # which no Chromium-based browser can decode, so an as-uploaded clip is
     # simply unplayable on web). These bound the *output*: the longest edge is
     # scaled down to fit POST_VIDEO_MAX_DIMENSION_PX and the bitrate is capped,
-    # which also keeps stored rows a sane size given in-DB storage (a 6s 1080p
-    # phone clip arrives at ~15 MB and leaves at ~1-2 MB).
+    # which keeps stored objects (and the bandwidth every viewer pays to fetch
+    # one) a sane size - a 6s 1080p phone clip arrives at ~15 MB and leaves at
+    # ~1-2 MB.
     POST_VIDEO_MAX_DIMENSION_PX: int = 1280
     POST_VIDEO_TARGET_CRF: int = 26
     POST_VIDEO_MAX_BITRATE: str = "4M"
@@ -267,7 +350,8 @@ class Settings(BaseSettings):
     # e.g. 1440x1080 is exact but 1439x1080 is not - 2% absorbs that without
     # admitting a visibly different shape (4:3 vs 5:4 differ by ~7%).
     POST_MEDIA_RATIO_TOLERANCE: float = 0.02
-    # Longest side of the still frame stored beside every video (PostMedia.poster).
+    # Longest side of the still frame stored beside every video
+    # (PostMedia.poster_object_key).
     # It is a placeholder shown until playback starts, never a full-size image, so
     # it is kept small - it is fetched by every feed card that has a video on it.
     POST_VIDEO_POSTER_MAX_DIMENSION_PX: int = 720

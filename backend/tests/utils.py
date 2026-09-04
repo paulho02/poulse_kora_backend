@@ -1,6 +1,9 @@
+import io
 import secrets
 import string
 from typing import Any
+
+from PIL import Image
 
 from fastapi_users.jwt import generate_jwt
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,3 +54,28 @@ async def review(db: AsyncSession, user: User, post: Post, kind: str) -> PostRev
         user.dropped_count += 1
     await db.commit()
     return post_review
+
+
+def make_test_png(
+    width: int = 64,
+    height: int = 64,
+    *,
+    color: tuple[int, int, int] = (200, 50, 50),
+    with_exif: bool = False,
+) -> bytes:
+    """A real, decodable PNG - which profile-picture uploads now require.
+
+    Placeholder bytes used to be good enough here, because the route stored
+    whatever it was handed under whatever type the client claimed. It validates
+    and re-encodes now (app/core/media_validation.py: process_profile_picture),
+    so a test that wants an upload to succeed has to send an actual image.
+    """
+    img = Image.new("RGB", (width, height), color=color)
+    buf = io.BytesIO()
+    if with_exif:
+        exif = Image.Exif()
+        exif[0x0112] = 1  # Orientation, standing in for the GPS tags that matter.
+        img.save(buf, format="PNG", exif=exif)
+    else:
+        img.save(buf, format="PNG")
+    return buf.getvalue()

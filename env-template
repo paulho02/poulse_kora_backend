@@ -8,6 +8,50 @@ TEST_REDIS_URL=redis://:CHANGE_ME@redis:6379/1
 SECRET_KEY=CHANGE_ME
 BACKEND_CORS_ORIGINS='["http://localhost:3000","http://127.0.0.1:3000"]'
 
+# --- object storage (media bucket) ---
+# Local dev/CI use the MinIO container in docker-compose.yml; production uses a
+# Railway Bucket. The backend speaks the same S3+SigV4 protocol to both, so only
+# these variables change - see RAILWAY.md for the production values.
+#
+# STORAGE_ENDPOINT_URL is how the *backend* reaches the bucket (compose network).
+# STORAGE_PUBLIC_ENDPOINT_URL is how the *client* reaches it, and it is what
+# presigned URLs are signed for - the host is part of the signature, so these must
+# each name the host that will actually be dialled. Change the public one to match
+# how you run the client:
+#   Flutter web / iOS simulator ....... http://localhost:9000
+#   Android emulator .................. http://10.0.2.2:9000
+#   physical device on your LAN ....... http://<your-machine-ip>:9000
+# Your machine's LAN IP is the one value that satisfies all three at once, so it
+# is usually the least annoying setting while developing against a real phone.
+# On Windows it also needs an inbound firewall rule for port 9000 — publishing
+# the port in docker-compose is not enough, and the symptom is specific and
+# misleading: the app works, the feed loads, images quietly fall back to their
+# placeholder (by design) and only video visibly fails, because only video
+# reports an error. The rule mirrors whatever you already added for the backend
+# on 8000, e.g. in an elevated PowerShell:
+#   New-NetFirewallRule -DisplayName localMinioDev -Direction Inbound \
+#     -Action Allow -Protocol TCP -LocalPort 9000 -Profile Private
+STORAGE_ENDPOINT_URL=http://minio:9000
+STORAGE_PUBLIC_ENDPOINT_URL=http://localhost:9000
+# pytest runs inside the backend container, so "the client" there reaches MinIO
+# on the compose network rather than on the host.
+TEST_STORAGE_PUBLIC_ENDPOINT_URL=http://minio:9000
+STORAGE_BUCKET=poulse-kora-media
+# Separate bucket for pytest, mirroring TEST_DATABASE_URL/TEST_REDIS_URL - a test
+# run must never write into (or delete out of) the bucket the dev app is using.
+TEST_STORAGE_BUCKET=poulse-kora-media-test
+STORAGE_REGION=us-east-1
+# MinIO root credentials; also consumed by the minio service in docker-compose.yml.
+# Password must be at least 8 characters. Local-only values - Railway injects real
+# scoped credentials.
+STORAGE_ACCESS_KEY_ID=minioadmin
+STORAGE_SECRET_ACCESS_KEY=CHANGE_ME_minio
+# path-style, because <bucket>.localhost does not resolve. Railway needs "virtual".
+STORAGE_ADDRESSING_STYLE=path
+# Create the bucket on boot if missing. Local/CI only; on Railway the platform
+# provisions it and the credentials are not allowed to create buckets.
+STORAGE_AUTO_CREATE_BUCKET=true
+
 # --- supporter subscription (Mollie) ---
 # SUBSCRIPTIONS_ENABLED defaults to false — leave unset until Mollie is actually
 # configured. MOLLIE_API_KEY: get a test-mode key (`test_...`) from
@@ -46,6 +90,14 @@ GOOGLE_CLIENT_IDS='["CHANGE_ME.apps.googleusercontent.com"]'
 #   once real users need to receive the email-verification code
 #   (REQUIRE_EMAIL_VERIFICATION defaults to true) — left unset, verification codes
 #   are only logged server-side and no one can complete verification.
+# STORAGE_*: point at the Railway Bucket instead of the local MinIO container -
+#   STORAGE_ENDPOINT_URL=${{Bucket.ENDPOINT}} (https://storage.railway.app),
+#   STORAGE_BUCKET=${{Bucket.BUCKET}}, STORAGE_REGION=${{Bucket.REGION}} ("auto"),
+#   STORAGE_ACCESS_KEY_ID=${{Bucket.ACCESS_KEY_ID}},
+#   STORAGE_SECRET_ACCESS_KEY=${{Bucket.SECRET_ACCESS_KEY}},
+#   STORAGE_ADDRESSING_STYLE=virtual, STORAGE_AUTO_CREATE_BUCKET unset (false),
+#   STORAGE_PUBLIC_ENDPOINT_URL unset (the endpoint is already public there).
+#   TEST_STORAGE_BUCKET is dev/CI-only, like the other TEST_ variables.
 # GOOGLE_OAUTH_ENABLED / GOOGLE_CLIENT_IDS: set both once the Google Cloud OAuth
 #   clients exist. The web client's "Authorized JavaScript origins" must list every
 #   origin the Flutter web app is served from (http://localhost:3000 for dev, plus

@@ -1,6 +1,7 @@
 # Deploying to Railway
 
-Postgres and Redis are assumed already provisioned as Railway services in the project. This
+Postgres, Redis and a **Bucket** are assumed already provisioned as Railway services in the
+project (Bucket: New → Bucket; it is private by default, which is what this backend wants). This
 covers the backend service. The Flutter web client lives in the sibling `poulse_kora_app` repo —
 see that repo's own deploy notes for the web service.
 
@@ -32,6 +33,16 @@ Set these as Variables on the backend service (Settings → Variables):
 | `REQUIRE_STRONG_PASSWORD` | recommended | `true` — defaults to `false`, which is fine for local dev only. Anything internet-reachable should turn this on. |
 | `REQUIRE_EMAIL_VERIFICATION` | already `true` by default | Keep it, but it's a no-op (codes only get logged, never delivered) until SMTP is configured — see below. |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | required if `REQUIRE_EMAIL_VERIFICATION=true` | Any relay works (Gmail SMTP, SES, Mailgun, Postmark, ...). |
+| `STORAGE_ENDPOINT_URL` | yes | `${{Bucket.ENDPOINT}}` (`https://storage.railway.app`) |
+| `STORAGE_BUCKET` | yes | `${{Bucket.BUCKET}}` |
+| `STORAGE_REGION` | yes | `${{Bucket.REGION}}` — `auto` |
+| `STORAGE_ACCESS_KEY_ID` | yes | `${{Bucket.ACCESS_KEY_ID}}` |
+| `STORAGE_SECRET_ACCESS_KEY` | yes | `${{Bucket.SECRET_ACCESS_KEY}}` |
+| `STORAGE_ADDRESSING_STYLE` | yes | `virtual` — Railway serves `https://<bucket>.storage.railway.app/<key>`. The `path` default exists only because `<bucket>.localhost` does not resolve against the local MinIO container. |
+| `STORAGE_PUBLIC_ENDPOINT_URL` | no | Leave unset. It exists for local dev, where the backend and the client reach MinIO under different hostnames; on Railway the endpoint is already the public one. |
+| `STORAGE_AUTO_CREATE_BUCKET` | no | Leave unset (`false`). The platform provisions the bucket and the credentials are scoped to it. |
+| `MEDIA_URL_TTL_SECONDS` / `MEDIA_URL_REFRESH_SECONDS` | no | Defaults (1 h / 15 min) are fine. The first is how long a leaked media URL keeps working, the second how often the URL string changes — see the media section below before touching either. |
+| `TEST_STORAGE_BUCKET` / `TEST_STORAGE_PUBLIC_ENDPOINT_URL` | not needed | Dev/CI-only, used only when `pytest` is running. |
 | `SENTRY_DSN` | optional | Recommended once real users are on it. |
 | `TEST_DATABASE_URL` / `TEST_REDIS_URL` | not needed | Dev/CI-only, used only when `pytest` is running. |
 
@@ -40,6 +51,12 @@ so whatever scheme Railway's Postgres reference variable uses works unchanged.
 
 ## 3. First deploy checklist
 
+- **Set the `STORAGE_*` variables before the deploy that carries migration `b3f7a1c92e64`.** That
+  migration copies every profile picture and every post's media out of Postgres and into the bucket
+  before dropping the byte columns, so it is the first thing that needs bucket credentials. It is
+  deliberately all-in-one: if the bucket is unreachable or misconfigured the upload raises, the
+  transaction rolls back, nothing is dropped, and the deploy fails with the media still in
+  Postgres — so a bad configuration costs a failed deploy, never data.
 - Migrations run automatically on every boot (`entrypoint.sh` → `alembic upgrade head`) — nothing
   manual needed here, including for schema changes on future deploys.
 - **`rebuild_redis.py` does *not* run automatically, and shouldn't.** Normal traffic (register,
@@ -95,6 +112,17 @@ or whenever the Flutter app's domain changes (e.g. adding a custom domain).
   with real user data.
 - **`.env` stays out of git** (already gitignored) — never commit real credentials; use Railway
   Variables exclusively for deployed environments.
+- **Media URLs are capabilities, not just links.** The bucket is private and nothing in it is
+  publicly readable, but `PostMediaRead.url` / `poster_url` / `profile_picture_url` are presigned:
+  whoever holds one can fetch the object without logging in, until it expires. The authorization
+  check runs when the URL is minted, not when it is used, so `MEDIA_URL_TTL_SECONDS` is the window
+  in which a forwarded URL still works. One hour is the default; shorten it if that matters more
+  than client-side caching, but see `MEDIA_URL_REFRESH_SECONDS` in `app/core/storage.py` first —
+  the two are coupled, and a URL is only guaranteed `TTL - REFRESH` of life when handed out.
+- **CORS on the bucket** matters only for the Flutter *web* client, which fetches presigned URLs
+  cross-origin from the browser. Native builds are unaffected. If web images/videos fail with a
+  CORS error while the same URL works in `curl`, that is the bucket's CORS configuration, not the
+  signature.
 
 ## Verifying a deploy
 
@@ -103,3 +131,6 @@ or whenever the Flutter app's domain changes (e.g. adding a custom domain).
 - `GET https://<backend-domain>/docs/` — OpenAPI UI, confirms static/app serving works.
 - Tail the deploy logs for the `alembic upgrade head` output on boot to confirm migrations applied
   cleanly.
+- Upload a profile picture from the app and confirm the returned `profile_picture_url` points at
+  `https://<bucket>.storage.railway.app/...` and loads. A `SignatureDoesNotMatch` here almost always
+  means `STORAGE_ADDRESSING_STYLE` is still `path` — the host is part of the signature.

@@ -1,16 +1,17 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import selectinload, undefer
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.errors import api_error
-from app.core.http_range import build_range_response
+from app.core.logger import logger
 from app.core.media_validation import ProcessedMedia, process_upload
 from app.core.relay_rules import is_review_gate_unlocked
+from app.core.storage import StorageError, post_media_key, storage
 from app.deps.db import CurrentAsyncSession
 from app.deps.rate_limit import limit_interactions
 from app.deps.redis import CurrentRedis
@@ -38,6 +39,13 @@ from app.schemas.post_review import PostReviewCreate, PostReviewResult, Reviewed
 router = APIRouter(prefix="/posts")
 
 _blocks_adapter = TypeAdapter(list[PostBlockIn])
+
+# Stored on every media object and echoed back by the bucket on a presigned GET.
+# Safe to make aggressive: an object key is a fresh UUID per upload and nothing
+# ever rewrites one, so a cached response can never go stale - the object is
+# either the one the URL names or gone. `private` because the URL is a
+# capability, and shared caches have no business keeping a copy of it.
+_MEDIA_CACHE_CONTROL = "private, max-age=86400, immutable"
 
 
 async def post_create_form(
@@ -112,6 +120,52 @@ async def _can_view_post(
             )
         )
     ) is not None
+
+
+async def _store_media(
+    processed_by_index: dict[int, ProcessedMedia],
+) -> dict[int, tuple[str, str | None]]:
+    """Upload every processed attachment (and its poster frame) to the media
+    bucket, returning `(object_key, poster_object_key)` per file index.
+
+    All-or-nothing as far as the caller is concerned: the first failure deletes
+    whatever this call has already written and raises, so a post never half-lands
+    with some objects live and others missing. Nothing has touched Postgres yet at
+    this point, so there is no row to unwind alongside it.
+    """
+    written: list[str] = []
+    keys: dict[int, tuple[str, str | None]] = {}
+    try:
+        for index, item in processed_by_index.items():
+            key = post_media_key(item.content_type)
+            await storage.put_object(
+                key,
+                item.data,
+                content_type=item.content_type,
+                cache_control=_MEDIA_CACHE_CONTROL,
+            )
+            written.append(key)
+
+            poster_key = None
+            if item.poster and item.poster_content_type:
+                poster_key = post_media_key(item.poster_content_type)
+                await storage.put_object(
+                    poster_key,
+                    item.poster,
+                    content_type=item.poster_content_type,
+                    cache_control=_MEDIA_CACHE_CONTROL,
+                )
+                written.append(poster_key)
+            keys[index] = (key, poster_key)
+    except StorageError:
+        logger.exception(
+            "post media upload failed, discarding %d already-written object(s)",
+            len(written),
+        )
+        for key in written:
+            await storage.delete_object(key)
+        raise api_error(503, "media_storage_unavailable") from None
+    return keys
 
 
 async def _get_post_with_relations(session: CurrentAsyncSession, post_id: int) -> Post | None:
@@ -274,6 +328,14 @@ async def create_post(
         )
     ) is not None
 
+    # Bytes go to the bucket before anything is committed, so a storage failure
+    # aborts the post rather than committing rows that point at objects which do
+    # not exist. The reverse ordering is not available to us - the transaction can
+    # still roll back afterwards, and then these objects are orphaned. Orphaned
+    # bytes nobody references are the cheap failure; a media block that 404s in
+    # every recipient's feed is not.
+    stored_by_index = await _store_media(processed_by_index)
+
     post = Post(
         channel_id=post_in.channel_id,
         author_id=user.id,
@@ -285,17 +347,17 @@ async def create_post(
     for position, block in enumerate(blocks):
         if block.type == "media":
             item = processed_by_index[block.file_index]
+            object_key, poster_object_key = stored_by_index[block.file_index]
             media = PostMedia(
                 post_id=post.id,
                 media_type=item.media_type,
                 content_type=item.content_type,
-                data=item.data,
+                object_key=object_key,
                 size_bytes=item.size_bytes,
                 duration_seconds=item.duration_seconds,
                 width=item.width,
                 height=item.height,
-                poster=item.poster,
-                poster_content_type=item.poster_content_type,
+                poster_object_key=poster_object_key,
             )
             session.add(media)
             await session.flush()  # need media.id for the block's FK
@@ -433,89 +495,6 @@ async def get_post(
     if not post or not await _can_view_post(session, redis, user, post):
         raise api_error(404, "post_not_found")
     return _serialize_post(post, user)
-
-
-@router.get("/{post_id}/media/{media_id}")
-async def get_post_media(
-    post_id: int,
-    media_id: int,
-    request: Request,
-    session: CurrentAsyncSession,
-    user: CurrentVerifiedUser,
-    redis: CurrentRedis,
-):
-    """Raw bytes for one image/video attached to a post, referenced by
-    `PostMediaRead.url`. Deliberately kept in this module (not app/api/users.py's
-    style of a standalone route) so it can reuse `_can_view_post` unchanged - a
-    post's media must be exactly as restricted as the post itself (queue
-    membership / already-reviewed / author / superuser), which is a stricter gate
-    than the profile-picture route's "any authenticated user".
-
-    Supports `Range` requests (see app/core/http_range.py) - required for
-    video_player's native ExoPlayer/AVPlayer to play/scrub video at all.
-    """
-    post = await _get_post_with_relations(session, post_id)
-    if not post or not await _can_view_post(session, redis, user, post):
-        raise api_error(404, "post_not_found")
-
-    # `data` is deferred on the model (see PostMedia) so feed listings don't drag
-    # every clip's bytes through the ORM - this route is one of the two places that
-    # actually wants them, so it asks for them up front. Without the undefer the
-    # attribute access below would emit a lazy load, which raises under asyncio.
-    media = await session.get(
-        PostMedia,
-        media_id,
-        options=[undefer(PostMedia.data)],
-        # `_get_post_with_relations` above already put this row in the identity
-        # map with `data` still deferred, and `session.get` hands back a cached
-        # instance *without* applying the options - so without this the access
-        # below would emit a lazy load and raise under asyncio.
-        populate_existing=True,
-    )
-    if not media or media.post_id != post_id:
-        raise api_error(404, "post_media_not_found")
-
-    return build_range_response(request, media.data, media.content_type)
-
-
-@router.get("/{post_id}/media/{media_id}/poster")
-async def get_post_media_poster(
-    post_id: int,
-    media_id: int,
-    session: CurrentAsyncSession,
-    user: CurrentVerifiedUser,
-    redis: CurrentRedis,
-):
-    """The still frame stored beside a video (`PostMediaRead.poster_url`), so a
-    client can show a real preview of an unplayed clip rather than a black
-    rectangle.
-
-    Same view gate as the clip itself - a poster is a frame *of* the video, so
-    anything looser would leak the content of a post the viewer cannot open. No
-    `Range` handling, unlike the media route: this is a small JPEG fetched in one
-    go, not something a player scrubs through.
-    """
-    post = await _get_post_with_relations(session, post_id)
-    if not post or not await _can_view_post(session, redis, user, post):
-        raise api_error(404, "post_not_found")
-
-    media = await session.get(
-        PostMedia,
-        media_id,
-        options=[undefer(PostMedia.poster)],
-        populate_existing=True,  # see get_post_media
-    )
-    if not media or media.post_id != post_id or media.poster is None:
-        raise api_error(404, "post_media_not_found")
-
-    return Response(
-        content=media.poster,
-        media_type=media.poster_content_type or "image/jpeg",
-        # Immutable by construction: a poster is written once, with its media row,
-        # and there is no route that replaces it. The URL carries the media id, so
-        # a new upload is a new URL - nothing a client caches can go stale.
-        headers={"Cache-Control": "private, max-age=86400, immutable"},
-    )
 
 
 @router.post(

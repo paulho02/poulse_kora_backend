@@ -22,6 +22,32 @@ services:
       timeout: 2s
       retries: 3
 
+  # Local stand-in for the production bucket (a Railway Bucket, Tigris underneath).
+  # The point is protocol fidelity, not feature parity: the backend speaks plain
+  # S3 + SigV4 to both, so moving to Railway is a change of STORAGE_* variables and
+  # nothing else (see app/core/storage.py, RAILWAY.md).
+  #
+  # Pinned to the last community release MinIO published (the project stopped
+  # shipping community binaries/images in late 2025). That is fine for something
+  # that only ever listens on a dev machine's loopback and in CI, and it is not
+  # what production runs - but it is the reason to pin rather than track a tag.
+  # MINIO_API_CORS_ALLOW_ORIGIN matters for the Flutter *web* client: a presigned
+  # URL is fetched cross-origin by the browser, so without CORS the fetch fails
+  # even though the signature is perfectly valid.
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_ACCESS_KEY}
+      MINIO_API_CORS_ALLOW_ORIGIN: "*"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
   backend:
     build:
       context: backend
@@ -32,6 +58,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   # frontend service disabled: the React Admin frontend is unused for now.
@@ -50,4 +78,5 @@ services:
 volumes:
   app-db-data:
   redis-data:
+  minio-data:
   root-home:

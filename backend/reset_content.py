@@ -6,6 +6,11 @@ sets, seen sets, token balances, the operation stream and its retry queue) and
 rebuilds it from the now-empty Postgres state — same reconciliation
 `rebuild_from_pg` does after a Redis loss, just starting from a clean slate.
 
+Media objects belonging to the deleted posts are removed from the bucket too
+(app/core/storage.py) — nothing else references them, and leaving them would make
+the bucket grow monotonically across resets. Profile pictures are untouched, like
+the rest of the user row.
+
 Kept as-is:
 - Channels (reference data, not content — users would otherwise have nothing
   left to subscribe to).
@@ -23,8 +28,9 @@ Usage (inside the backend container):
 import argparse
 import asyncio
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 
+from app.core.storage import storage
 from app.db import async_session_maker
 from app.feed import keys, service
 from app.models.channel_subscription import ChannelSubscription
@@ -66,6 +72,18 @@ async def main():
 
     async with async_session_maker() as session:
         reviews_deleted = (await session.execute(delete(PostReview))).rowcount
+        # Read the object keys before the rows go: afterwards there is nothing
+        # left that knows which objects in the bucket were ever referenced.
+        media_keys = [
+            key
+            for row in (
+                await session.execute(
+                    select(PostMedia.object_key, PostMedia.poster_object_key)
+                )
+            ).all()
+            for key in row
+            if key
+        ]
         # No DB-level ON DELETE CASCADE from post_blocks/post_media to posts (same
         # as post_reviews) - must delete child rows before the FK-referenced
         # parent. post_blocks first: it FKs to both posts and post_media.
@@ -89,13 +107,20 @@ async def main():
         await service.ensure_group(redis_client)
         redis_stats = await service.rebuild_from_pg(redis_client, session)
 
+    # After the rows, never before: a failure here leaves unreferenced objects in
+    # the bucket, while the reverse order could delete media still on a live row.
+    for key in media_keys:
+        await storage.delete_object(key)
+    await storage.aclose()
+
     print(
         f"Deleted {reviews_deleted} reviews, {posts_deleted} posts, "
         f"{subs_deleted} channel subscriptions. Reset activity counters for all users.\n"
         f"Redis cleared: {queues_cleared} queues, {channels_cleared} channel sets, "
         f"{seen_cleared} seen sets, {tokens_cleared} token balances, plus "
         f"free_queue/operation stream/retry queue/price snapshot.\n"
-        f"Redis rebuilt: {redis_stats['users']} users re-seeded with starting tokens."
+        f"Redis rebuilt: {redis_stats['users']} users re-seeded with starting tokens.\n"
+        f"Deleted {len(media_keys)} media object(s) from the bucket."
     )
 
 

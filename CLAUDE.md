@@ -61,6 +61,10 @@ docker compose exec backend python bulk_create_posts.py <channel> <amount>
 # dimensions and the H.264 transcode existed - those render as a black
 # rectangle in the client. Idempotent; --dry-run just counts.
 docker compose exec backend python backfill_post_media.py [--dry-run]
+
+# MinIO console for the local media bucket, to eyeball what actually landed.
+# Log in with STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY from .env.
+http://localhost:9001
 ```
 
 Backend OpenAPI docs: `http://localhost:8000/docs/`.
@@ -134,22 +138,50 @@ after cloning).
   between the two, since Google ID tokens live about an hour. `User.oauth_accounts` is
   `lazy="selectin"`, deliberately not the `joined` fastapi-users' docs show: a joined *collection*
   eager load obliges every `select(User)` in the codebase to call `.unique()` or raise at runtime.
-- **Profile pictures** (`app/api/users.py`): stored **as bytes in Postgres** (`User.profile_picture`
-  + `profile_picture_content_type`) because there is no file storage yet — a deliberate stopgap, not
-  a pattern to copy. Set via `PUT /users/me/profile-picture` (multipart, validated against
-  `PROFILE_PICTURE_MAX_BYTES` / `PROFILE_PICTURE_ALLOWED_CONTENT_TYPES`), cleared via `DELETE`.
-  What `UserRead`/`PostAuthor` expose is **`profile_picture_url`, never the bytes** — a feed lists
-  many posts, often several by one author, so embedding base64 would repeat the whole image on every
-  one; the URL points at `GET /users/{id}/profile-picture`, which the client fetches and caches once
-  per author. That route **requires auth**, so clients cannot treat it as a plain image URL.
-  The anonymity rule needs no new code: `_serialize_post` populates the field only inside its
-  existing `reveal_author` branch, so an anonymous post withholds the picture along with the id and
-  username. Note the URL is derived from the user id and so is *unchanged* when a picture is
-  replaced — clients must evict their own cache on upload rather than diffing the string.
+- **Object storage** (`app/core/storage.py`, `app/core/sigv4.py`): every uploaded image, video and
+  poster frame lives in an S3-compatible bucket — a **MinIO container** in docker-compose locally
+  and in CI, a **Railway Bucket** (Tigris) in production. Nothing in the code knows which; the
+  `STORAGE_*` settings are the whole difference (see RAILWAY.md, `env-template`). Four things are
+  load-bearing:
+  - **Clients never hold a bucket credential.** They are handed a **presigned URL**, minted only
+    after the existing authorization check has passed. So the check moved from *every byte fetch* to
+    *once per serialization*: a URL keeps working for up to `MEDIA_URL_TTL_SECONDS` even if access
+    is revoked, and it is shareable by whoever holds it. That is the price of not proxying bytes;
+    keep the TTL modest.
+  - **Object keys carry no identity.** Post-media keys are flat random UUIDs, deliberately *not*
+    derived from the author — an anonymous post's media URL is shown to every recipient, so an
+    author-derived key would undo exactly what the EXIF strip protects.
+  - **Presigning is deterministic within a window.** `presigned_url` quantizes its signing timestamp
+    to a `MEDIA_URL_REFRESH_SECONDS` boundary, so the same object yields a byte-identical string
+    until the window rolls over. The Flutter client caches media keyed by URL; a per-request
+    signature would silently re-download the whole feed on every refresh. This is also the reason
+    SigV4 is implemented here rather than via boto3 — botocore stamps the signing time from the wall
+    clock and gives no way to pin it.
+  - **The bucket endpoint must be reachable by the client**, even though the bucket is private. The
+    host is a *signed* header, so a URL signed for `minio:9000` cannot be rewritten to
+    `localhost:9000` afterwards — hence `STORAGE_PUBLIC_ENDPOINT_URL` alongside
+    `STORAGE_ENDPOINT_URL`, and the published port in `docker-compose.override.yml`. A Flutter
+    **web** client additionally needs CORS on the bucket (`MINIO_API_CORS_ALLOW_ORIGIN` locally).
+- **Profile pictures** (`app/api/users.py`): stored in the bucket, keyed by `User.profile_picture_key`.
+  Set via `PUT /users/me/profile-picture` (multipart), cleared via `DELETE`. The bytes go through
+  `media_validation.process_profile_picture` like every other upload — decoded, EXIF-stripped,
+  downscaled to `PROFILE_PICTURE_MAX_DIMENSION_PX` and re-encoded, so the stored `Content-Type` is
+  derived rather than believed. That was the one upload path that trusted the client, which was
+  survivable while the bytes sat in Postgres behind an authenticated route and is not now that the
+  object is served straight from the bucket to whoever holds the presigned URL. There is **no GET route** — what
+  `UserRead`/`PostAuthor` expose is `profile_picture_url`, a presigned link straight to the bucket,
+  so the bytes never pass through this process. The anonymity rule needs no new code:
+  `_serialize_post` populates the field only inside its existing `reveal_author` branch, so an
+  anonymous post withholds the picture along with the id and username. Unlike the old in-DB version,
+  **every upload writes a new key**, so a replaced picture produces a new URL and invalidates client
+  caches by itself; the superseded object is deleted after the row commits.
 - **Post media** (`app/core/media_validation.py`, `app/models/post_media.py`): images and
-  videos attached to a post, stored in-DB as bytes like profile pictures and for the same
-  stopgap reason. `process_upload` is the choke point — nothing reaches Postgres or spends a
-  token before it. Three things are load-bearing:
+  videos attached to a post, stored in the bucket (`PostMedia.object_key` /
+  `.poster_object_key`) — the row keeps only the metadata a feed needs to lay the block out.
+  `process_upload` is the choke point — nothing reaches storage or spends a token before it.
+  Uploads happen *before* the transaction commits, so a storage failure aborts the post; the
+  residual failure mode is an orphaned object on rollback, which is the cheap one. Three
+  things are load-bearing:
   - **Two fixed aspect ratios**, `POST_MEDIA_LANDSCAPE_RATIO` (4:3) and
     `POST_MEDIA_PORTRAIT_RATIO` (4:5), and the two media kinds reach them by opposite
     routes. An **image** is cropped in the Flutter client — the only place that can show
@@ -163,20 +195,20 @@ after cloning).
     way: `python backfill_post_media.py` re-runs the whole pipeline (transcode, crop,
     measure, poster) over clips already in Postgres, which is the fix for an old video
     rendering as a black rectangle.
-  - **Every video carries a poster frame** (`PostMedia.poster`, served at
-    `GET /posts/{id}/media/{id}/poster` behind the same view gate as the clip, since a
-    poster is a frame *of* it). Taken from the transcoded output, so it is cropped and
-    scaled identically, and from a moment slightly in rather than frame 0, which is
-    routinely a black fade-in. Extraction is deliberately **non-fatal** — a clip that
-    transcodes but yields no frame is still a good clip, so `poster_url` is nullable and
-    the client falls back to a neutral tile.
-  - `PostMedia.data` and `.poster` are **deferred columns**. A feed response serializes
-    many posts and wants only metadata; undeferred, one `GET /posts/feed` dragged every
-    attached clip's bytes through the ORM to throw them away. The two byte-serving routes
-    undefer explicitly, and must pass `populate_existing=True` — `_get_post_with_relations`
-    has already put the row in the identity map with the column still deferred, and
-    `session.get` returns that cached instance without applying options, so the attribute
-    access would emit a lazy load and raise under asyncio.
+  - **Every video carries a poster frame** (`PostMedia.poster_object_key`), its own object so
+    a feed card can show a preview without ever touching the clip. Behind the same view gate
+    as the clip, since a poster is a frame *of* it — enforced one step earlier now: a viewer
+    who cannot open the post is never handed either URL. Taken from the transcoded output, so
+    it is cropped and scaled identically, and from a moment slightly in rather than frame 0,
+    which is routinely a black fade-in. Extraction is deliberately **non-fatal** — a clip
+    that transcodes but yields no frame is still a good clip, so `poster_url` is nullable
+    and the client falls back to a neutral tile.
+  - **The byte-serving routes are gone**, and with them `app/core/http_range.py`. `Range`
+    requests — the only way `video_player`'s native ExoPlayer/AVPlayer can scrub — are
+    answered by the bucket, which actually streams, instead of by slicing a fully-loaded
+    in-memory buffer. The deferred-column/`populate_existing` machinery that kept a feed
+    query from dragging whole videos through the ORM went with them: nothing large is in
+    Postgres to drag.
   EXIF is *applied* (`ImageOps.exif_transpose`) before it is stripped: a phone "portrait"
   photo is often a landscape sensor frame plus a rotate-90 tag, which would otherwise be
   stored sideways and measured against the wrong ratio.

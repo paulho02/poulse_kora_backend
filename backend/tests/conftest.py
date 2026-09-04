@@ -15,6 +15,7 @@ from app.models.item import Item
 from app.models.post import Post
 from app.models.post_block import PostBlock
 from app.models.post_media import PostMedia
+from app.core.storage import post_media_key, storage
 from app.models.user import User
 from app.redis import redis_client
 from tests.utils import generate_random_string
@@ -35,6 +36,34 @@ async_session_maker = async_sessionmaker(
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def init_storage():
+    """Create the test bucket (TEST_STORAGE_BUCKET, see app/core/config.py) and shut
+    the storage client down at the end of the run.
+
+    Needed because the tests drive the app through an ASGI transport, which never
+    runs the lifespan that would otherwise create it. Objects written by a run are
+    left behind: they are unreferenced once the test DB rolls back, and cleaning
+    them up would only trade a harmless dev-bucket footprint for a slower, flakier
+    teardown.
+    """
+    await storage.ensure_bucket()
+    yield
+    await storage.aclose()
+
+
+@pytest.fixture(scope="session")
+async def media_client():
+    """A real network client, for fetching the presigned URLs the API hands out.
+
+    The `client` fixture speaks ASGI directly to the app and so cannot reach the
+    bucket at all - and that is the point of the change these tests cover: media
+    bytes no longer come from this backend.
+    """
+    async with AsyncClient() as ac:
+        yield ac
 
 
 @pytest.fixture(scope="session")
@@ -147,10 +176,15 @@ def create_post(db: AsyncSession, create_user: Callable, create_channel: Callabl
         """`text`, if non-empty, becomes a single leading text block - matching
         every real post's shape (text block(s) then media, see PostBlock).
         `media`, if given, is a list of kwargs for PostMedia (media_type,
-        content_type, data, size_bytes, duration_seconds); each becomes a media
-        block after the text block, inserted directly and bypassing upload
-        validation, since tests exercising post-visibility (rather than the
-        upload path itself) don't need real image/video bytes.
+        content_type, size_bytes, duration_seconds); each becomes a media block
+        after the text block, inserted directly and bypassing upload validation,
+        since tests exercising post-visibility (rather than the upload path
+        itself) don't need real image/video bytes.
+
+        A `data` key is not a column - it is bytes to actually put in the bucket,
+        replaced here by the `object_key` they landed under. Real bytes matter
+        because a media URL is now a presigned link the test fetches from the
+        bucket itself, so there has to be something behind it.
         """
         if not channel:
             channel = await create_channel()
@@ -173,6 +207,14 @@ def create_post(db: AsyncSession, create_user: Callable, create_channel: Callabl
             )
             position += 1
         for item in media or []:
+            item = dict(item)
+            data = item.pop("data", None)
+            if data is not None:
+                key = post_media_key(item.get("content_type", "image/jpeg"))
+                await storage.put_object(
+                    key, data, content_type=item.get("content_type", "image/jpeg")
+                )
+                item["object_key"] = key
             m = PostMedia(post_id=post.id, **item)
             db.add(m)
             await db.flush()

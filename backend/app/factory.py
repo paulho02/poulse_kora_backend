@@ -18,6 +18,7 @@ from starlette.responses import FileResponse, JSONResponse
 from app.api import api_router
 from app.core.config import settings
 from app.core.errors import detail_text, slugify_detail
+from app.core.storage import storage
 from app.deps.users import fastapi_users, jwt_authentication
 from app.feed import service
 from app.feed.worker import run_consumer
@@ -42,7 +43,12 @@ async def lifespan(app: FastAPI):
     identity to join — every process just recomputes and overwrites the same shared
     snapshot key on its own timer, which is harmless since the computation is
     deterministic given the same Redis state.
+
+    Also creates the media bucket when STORAGE_AUTO_CREATE_BUCKET is on (local dev
+    and CI only — on Railway the platform provisions it), and closes the storage
+    client's connection pool on the way out.
     """
+    await storage.ensure_bucket()
     consumer_name = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     task = asyncio.create_task(run_consumer(redis_client, consumer_name))
     price_task = asyncio.create_task(service.run_price_refresher(redis_client))
@@ -61,6 +67,7 @@ async def lifespan(app: FastAPI):
             await price_task
         except asyncio.CancelledError:
             pass
+        await storage.aclose()
 
 
 def create_app():

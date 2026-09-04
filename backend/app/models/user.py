@@ -6,7 +6,7 @@ from sqlalchemy import DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.functions import func
 
-from app.core.config import settings
+from app.core.storage import storage
 from app.db import Base
 from app.models.oauth_account import GOOGLE_OAUTH_NAME
 
@@ -33,12 +33,13 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     bio: Mapped[str | None]
     dark_mode: Mapped[bool] = mapped_column(default=False, server_default="false")
 
-    # Stored directly in the database - there is no file storage yet (see
-    # PROFILE_PICTURE_* in app/core/config.py for the size/type limits enforced on
-    # upload, app/api/users.py for the upload/fetch routes). `profile_picture_url`
-    # below is what actually gets exposed on UserRead/PostAuthor, never these bytes.
-    profile_picture: Mapped[bytes | None]
-    profile_picture_content_type: Mapped[str | None]
+    # Object key in the media bucket, not the image itself (see app/core/storage.py;
+    # PROFILE_PICTURE_* in app/core/config.py holds the size/type limits enforced on
+    # upload, app/api/users.py the upload/delete routes). A *new* key is written on
+    # every upload rather than one stable path per user, which is what makes a
+    # replaced picture produce a new URL and so invalidate every client cache
+    # holding the old one.
+    profile_picture_key: Mapped[str | None]
 
     # Flipped once, after the mobile app's one-time onboarding flow (intro slides,
     # mandatory channel picks, disclaimer) is confirmed. A plain one-way flag: unlike
@@ -127,17 +128,19 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
 
     @property
     def profile_picture_url(self) -> str | None:
-        """URL to fetch this user's profile picture bytes (`GET
-        /users/{id}/profile-picture`), or None if none is set.
+        """A short-lived presigned URL for this user's profile picture, or None if
+        none is set.
 
-        A URL rather than embedding the bytes/base64 directly on UserRead/PostAuthor:
-        a feed lists many posts, often several by the same author, and repeating the
-        full image on every one would bloat every feed response. A URL lets the
-        client fetch (and cache) the image once per author instead.
+        A URL rather than the bytes on UserRead/PostAuthor: a feed lists many posts,
+        often several by the same author, and repeating the full image on every one
+        would bloat every feed response. It now points straight at the bucket rather
+        than back at this backend, so the image never travels through this process
+        at all - see app/core/storage.py for how the signature both authorizes the
+        fetch and stays byte-stable long enough for the client to cache it.
         """
-        if self.profile_picture is None:
+        if self.profile_picture_key is None:
             return None
-        return f"{settings.API_PATH}/users/{self.id}/profile-picture"
+        return storage.presigned_url(self.profile_picture_key)
 
     def __repr__(self):
         return f"User(id={self.id!r}, name={self.email!r})"
