@@ -8,6 +8,8 @@ interleave with another consumer/request:
   the delivery in the post's ``seen`` set, and drop them from ``free_queue`` once full.
 - ``claim``: remove a post from a user's queue (the review concurrency guard) and
   re-add them to ``free_queue`` when a slot frees up.
+- ``retire``: decrement a channel's outstanding-op counter without letting it go
+  negative.
 
 Scripts are registered against a client (cheap, local — just stores the body/SHA)
 and memoized per client so tests using the DB-1 client get their own handles.
@@ -94,12 +96,33 @@ return 0
 """
 
 
+# KEYS[1]=feed:ops:outstanding  ARGV[1]=channel_id
+# Decrement the channel's outstanding-op count, but never below zero. Returns the new
+# count.
+#
+# The floor is why this is a script rather than a bare HINCRBY. The counter is a pricing
+# hint maintained across three processes, and the feed deliberately tolerates an op
+# being processed twice (see reschedule_due_retries' XADD-before-ZREM, and XAUTOCLAIM
+# reclaiming an entry whose handler already finished) — so double-retires happen. Left
+# unguarded they would drive a channel's count permanently negative, and a channel stuck
+# at "no backlog" would price itself at the floor forever, needing that many mints just
+# to climb back to zero. Clamping on read would hide the symptom and keep the debt.
+_RETIRE = """
+local n = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
+if n <= 0 then
+  return 0
+end
+return redis.call('HINCRBY', KEYS[1], ARGV[1], -1)
+"""
+
+
 @dataclass(frozen=True)
 class FeedScripts:
     spend: AsyncScript
     place: AsyncScript
     claim: AsyncScript
     ensure_free: AsyncScript
+    retire: AsyncScript
 
 
 _cache: dict[Redis, FeedScripts] = {}
@@ -114,6 +137,7 @@ def get_scripts(client: Redis) -> FeedScripts:
             place=client.register_script(_PLACE),
             claim=client.register_script(_CLAIM),
             ensure_free=client.register_script(_ENSURE_FREE),
+            retire=client.register_script(_RETIRE),
         )
         _cache[client] = scripts
     return scripts

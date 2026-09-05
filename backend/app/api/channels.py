@@ -22,13 +22,16 @@ async def _subscribed_channel_ids(session: CurrentAsyncSession, user_id) -> set[
     return set(result.scalars().all())
 
 
-def _to_read(channel: Channel, subscribed_ids: set[int]) -> ChannelRead:
+def _to_read(
+    channel: Channel, subscribed_ids: set[int], post_price: int
+) -> ChannelRead:
     return ChannelRead(
         id=channel.id,
         name=channel.name,
         color=channel.color,
         description=channel.description,
         is_subscribed=channel.id in subscribed_ids,
+        post_price=post_price,
     )
 
 
@@ -36,8 +39,16 @@ def _to_read(channel: Channel, subscribed_ids: set[int]) -> ChannelRead:
 async def list_channels(
     session: CurrentAsyncSession,
     user: CurrentVerifiedUser,
+    redis: CurrentRedis,
     q: str | None = None,
 ):
+    """List channels, each with what it currently costs to post there.
+
+    Prices come back for the whole page in one `service.channel_prices` call (a few
+    round trips regardless of page size) rather than per channel — this endpoint is what
+    backs the price display a user leaves switched on while they review and wait to
+    afford a post, so it is read far more often than it changes.
+    """
     query = select(Channel).order_by(Channel.name)
     if q:
         query = query.filter(
@@ -45,7 +56,8 @@ async def list_channels(
         )
     channels = (await session.execute(query)).scalars().all()
     subscribed_ids = await _subscribed_channel_ids(session, user.id)
-    return [_to_read(c, subscribed_ids) for c in channels]
+    prices = await service.channel_prices(redis, [c.id for c in channels])
+    return [_to_read(c, subscribed_ids, prices[c.id]) for c in channels]
 
 
 @router.post("/{channel_id}/subscribe", response_model=ChannelRead)
@@ -80,7 +92,8 @@ async def subscribe_channel(
     await service.sync_subscribe(redis, str(user.id), channel_id)
 
     subscribed_ids = await _subscribed_channel_ids(session, user.id)
-    return _to_read(channel, subscribed_ids)
+    prices = await service.channel_prices(redis, [channel_id])
+    return _to_read(channel, subscribed_ids, prices[channel_id])
 
 
 @router.post("/{channel_id}/unsubscribe", response_model=ChannelRead)
@@ -109,4 +122,5 @@ async def unsubscribe_channel(
     await service.sync_unsubscribe(redis, str(user.id), channel_id)
 
     subscribed_ids = await _subscribed_channel_ids(session, user.id)
-    return _to_read(channel, subscribed_ids)
+    prices = await service.channel_prices(redis, [channel_id])
+    return _to_read(channel, subscribed_ids, prices[channel_id])

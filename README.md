@@ -54,11 +54,17 @@ bucket never depends on either.
 | `feed:ops` | stream | Fan-out jobs (fields `post_id`/`channel_id`), consumed by a group. |
 | `feed:workers` | consumer group | The group over `feed:ops`; every worker joins it under a distinct consumer name. |
 | `ops:retry` | sorted set | Undeliverable ops parked until due (score = ready-at unix ts). |
+| `active_users` | sorted set | `user_id` → unix ts of their last feed fetch; a trailing window of it is "who's online". |
+| `feed:price` | string (JSON) | The shared base price for the current window, plus the global totals per-channel prices scale against. |
+| `feed:price:channel:{id}` | string (JSON) | One channel's price, frozen for the same window as `feed:price`. Lazily filled. |
+| `feed:ops:outstanding` | hash | `channel_id` → ops minted but not yet delivered or abandoned (parked ones included). |
+| `subs:total` | int | Total subscriptions across all channels; the denominator per-channel load is measured against. |
 
 Multi-step state changes that must be atomic are done with small Lua scripts
 (`app/feed/scripts.py`): `spend` (check-and-decrement tokens), `place` (push into a queue
 + drop from `free_queue` when full), `claim` (remove from a queue + re-add to `free_queue`
-when a slot frees), `ensure_free` (add to `free_queue` iff the queue has room).
+when a slot frees), `ensure_free` (add to `free_queue` iff the queue has room), `retire`
+(decrement a channel's outstanding-op count without letting it go negative).
 
 ### Lifecycle of a post
 
@@ -82,12 +88,27 @@ sequenceDiagram
     U->>R: if "forward": enqueue a new op (propagate further)
 ```
 
-**1. Create** (`POST /posts`, `app/api/posts.py:create_post`). Price is computed from the
-current outstanding op count (`XLEN feed:ops`) —
-`clamp(FEED_PRICE_MIN + len // FEED_PRICE_STEP_ITEMS, FEED_PRICE_MIN, FEED_PRICE_MAX)` — so
-posting gets more expensive as the system gets busier. Superusers post free; everyone else
-spends tokens atomically (HTTP 402 if broke). The post is written to Postgres, then an op is
-`XADD`ed to `feed:ops` for the workers.
+**1. Create** (`POST /posts`, `app/api/posts.py:create_post`). Price is nudged by 1 every
+`FEED_PRICE_REFRESH_SECONDS` toward whichever side of a *relative* target the outstanding op
+count (`XLEN feed:ops`) sits on — the target is `FEED_PRICE_BUFFER_RATIO` of currently active
+users (floored at `FEED_PRICE_TARGET_MIN_ITEMS`), and moves within `FEED_PRICE_DEADBAND_RATIO`
+of it are ignored (see `app/feed/pricing.py`). So posting gets more expensive as the system
+gets busier *relative to how many people are around*, without a fixed item count that would
+mean something different at 5 active users vs 100,000.
+
+That base price is then scaled **per channel**, within ±`FEED_PRICE_CHANNEL_BAND`, by how
+much of the backlog that channel is carrying relative to its share of the audience
+(`feed:ops:outstanding` over `SCARD channel:{id}`, against the same ratio globally — see
+`pricing.channel_factor`). There is still only *one* controller: a channel gets a stateless
+multiplier on the shared price, never its own price loop, so there is no per-channel state to
+tune or to run away. Note this deliberately doesn't need per-channel presence tracking —
+undeliverable work stays outstanding, so a channel whose audience went quiet prices itself up
+on its own. Prices are cached per channel for exactly the window the base price is guaranteed
+for (`feed:price:channel:{id}`), so the number `GET /channels` quotes is the number
+`POST /posts` charges.
+
+Superusers post free; everyone else spends tokens atomically (HTTP 402 if broke). The post is
+written to Postgres, then an op is `XADD`ed to `feed:ops` for the workers.
 
 **2. Fan-out** (`app/feed/worker.py`). Each worker process joins the `feed:workers` consumer
 group under its own name and loops: reclaim abandoned ops (`XAUTOCLAIM`) → reschedule due
@@ -182,8 +203,12 @@ restore. See the "Seed dev data" section for the commands.
 | `FEED_QUEUE_MAX_SLOTS` | 20 | Per-user review-queue capacity; a full user leaves `free_queue`. |
 | `FEED_FANOUT` | 3 | Recipients (K) each op delivers to. |
 | `FEED_FANOUT_SAMPLE_MULTIPLIER` | 4 | Selection samples `K × this` subscribers before filtering to free ones. |
-| `FEED_PRICE_MIN` / `FEED_PRICE_MAX` | 1 / 5 | Bounds of the dynamic posting price. |
-| `FEED_PRICE_STEP_ITEMS` | 20 | Price rises by 1 per this many outstanding ops. |
+| `FEED_PRICE_MIN` / `FEED_PRICE_MAX` | 1 / 30 | Bounds of the dynamic posting price. |
+| `FEED_PRICE_BUFFER_RATIO` | 0.1 | Target outstanding-op count, as a fraction of active users. |
+| `FEED_PRICE_TARGET_MIN_ITEMS` | 20 | Floor for the target above, so a low active-user count doesn't collapse it to 0-1. |
+| `FEED_PRICE_DEADBAND_RATIO` | 0.1 | Band around the target (as a fraction of it) within which price is left unchanged. |
+| `FEED_PRICE_CHANNEL_BAND` | 0.25 | How far one channel's price may stray from the global one (0.25 ⇒ 75%–125%). |
+| `ACTIVE_USER_WINDOW_SECONDS` | 60 | How long since a user's last feed fetch before they no longer count as active. |
 | `FEED_RETRY_INTERVAL_SECONDS` | 20 | How long an undeliverable op waits before retry. |
 | `FEED_STREAM_CLAIM_MIN_IDLE_MS` | 30000 | Idle time before a pending op may be reclaimed by another worker. |
 | `FEED_STREAM_RECLAIM_COUNT` | 10 | Max abandoned ops pulled back per reclaim sweep. |

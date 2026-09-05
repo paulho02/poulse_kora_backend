@@ -46,6 +46,64 @@ class TestListChannels:
         assert unique_name in names
 
 
+class TestChannelPostPrice:
+    async def test_list_quotes_a_price_per_channel(
+        self, client: AsyncClient, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+
+        resp = await client.get(
+            settings.API_PATH + "/channels", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        by_id = {c["id"]: c for c in resp.json()}
+        price = by_id[channel.id]["post_price"]
+        assert settings.FEED_PRICE_MIN <= price <= settings.FEED_PRICE_MAX
+
+    async def test_quoted_price_is_what_creating_a_post_charges(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """The whole reason per-channel prices are cached per window: someone can watch
+        the price on the channel list while they review to afford it, and the number
+        they were shown has to be the number they are charged."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+
+        listing = await client.get(
+            settings.API_PATH + "/channels", headers=get_jwt_header(user)
+        )
+        quoted = {c["id"]: c["post_price"] for c in listing.json()}[channel.id]
+
+        # Congestion moves underneath them while they read the list.
+        await redis.hset(keys.OPS_OUTSTANDING, str(channel.id), 10_000)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "blocks": '[{"type": "text", "text": "priced"}]',
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["price"] == quoted
+
+    async def test_subscribe_response_carries_the_price(
+        self, client: AsyncClient, create_user, create_channel
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+
+        resp = await client.post(
+            settings.API_PATH + f"/channels/{channel.id}/subscribe",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["post_price"] >= settings.FEED_PRICE_MIN
+
+
 class TestSubscribeChannel:
     async def test_subscribe_is_idempotent(
         self, client: AsyncClient, create_user, create_channel

@@ -32,7 +32,8 @@ async def main():
         f"Rebuilt Redis state: {stats['subscriptions']} subscriptions across "
         f"channel sets, {stats['users']} users seeded (free_queue + tokens), "
         f"{stats['seen_seeded']} reviews seeded into seen sets, "
-        f"{stats['backfilled']} posts backfilled into queues."
+        f"{stats['backfilled']} posts backfilled into queues, "
+        f"{stats['outstanding_ops']} outstanding ops recounted for pricing."
     )
 
 

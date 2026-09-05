@@ -1245,7 +1245,7 @@ class TestPostEconomy:
         )
         data1 = resp1.json()
 
-        for i in range(settings.FEED_PRICE_STEP_ITEMS * 3):
+        for i in range(settings.FEED_PRICE_TARGET_MIN_ITEMS * 3):
             await service.enqueue_operation(redis, post_id=i, channel_id=1)
 
         resp2 = await client.get(

@@ -45,6 +45,41 @@ class TestProcessOperation:
         assert await process_operation(redis, post_id=1, channel_id=999) == 0
         assert await redis.zcard(keys.OPS_RETRY) == 1
 
+    async def test_delivery_retires_the_op(self, redis: Redis):
+        channel_id = 71
+        await service.sync_subscribe(redis, str(uuid.uuid4()), channel_id)
+        await service.enqueue_operation(redis, post_id=1, channel_id=channel_id)
+
+        await process_operation(redis, post_id=1, channel_id=channel_id)
+        counts = await service.channel_outstanding_ops(redis, [channel_id])
+        assert counts[channel_id] == 0
+
+    async def test_parked_op_stays_outstanding(self, redis: Redis):
+        """A post that can't reach anyone is exactly what should make a channel look
+        congested, so parking must not discount it — only a terminal outcome does."""
+        channel_id = 72
+        await service.enqueue_operation(redis, post_id=1, channel_id=channel_id)
+
+        assert await process_operation(redis, post_id=1, channel_id=channel_id) == 0
+        assert await redis.zcard(keys.OPS_RETRY) == 1
+        counts = await service.channel_outstanding_ops(redis, [channel_id])
+        assert counts[channel_id] == 1
+
+    async def test_exhausted_channel_retires_the_op(self, redis: Redis):
+        """Abandoned is terminal too: the op will never be delivered, so it stops
+        counting against the channel's price."""
+        channel_id = 73
+        user = str(uuid.uuid4())
+        await service.sync_subscribe(redis, user, channel_id)
+        await service.enqueue_operation(redis, post_id=1, channel_id=channel_id)
+        # The sole subscriber has already seen it ⇒ nobody left to deliver to.
+        await redis.sadd(keys.seen(1), user)
+
+        assert await process_operation(redis, post_id=1, channel_id=channel_id) == 0
+        assert await redis.zcard(keys.OPS_RETRY) == 0
+        counts = await service.channel_outstanding_ops(redis, [channel_id])
+        assert counts[channel_id] == 0
+
 
 class TestConsumeOnce:
     async def test_processes_enqueued_operation(self, redis: Redis):

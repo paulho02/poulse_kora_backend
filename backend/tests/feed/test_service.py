@@ -53,6 +53,115 @@ class TestTokens:
         assert await service.token_balance(redis, uid) == 1
 
 
+class TestPresence:
+    async def test_marked_user_counts_as_active(self, redis: Redis):
+        uid = str(uuid.uuid4())
+        await service.mark_active(redis, uid)
+        assert await service.active_user_count(redis) == 1
+
+    async def test_stale_mark_falls_outside_the_window(self, redis: Redis):
+        uid = str(uuid.uuid4())
+        stale = time.time() - settings.ACTIVE_USER_WINDOW_SECONDS - 1
+        await service.mark_active(redis, uid, now=stale)
+        assert await service.active_user_count(redis) == 0
+        # Also swept from the sorted set itself, not just excluded by the count.
+        assert await redis.zcard(keys.ACTIVE_USERS) == 0
+
+    async def test_remark_resets_the_window(self, redis: Redis):
+        uid = str(uuid.uuid4())
+        stale = time.time() - settings.ACTIVE_USER_WINDOW_SECONDS - 1
+        await service.mark_active(redis, uid, now=stale)
+        await service.mark_active(redis, uid)
+        assert await service.active_user_count(redis) == 1
+
+
+class TestOutstandingOps:
+    async def test_minting_counts_and_retiring_uncounts(self, redis: Redis):
+        await service.enqueue_operation(redis, post_id=1, channel_id=41)
+        await service.enqueue_operation(redis, post_id=2, channel_id=41)
+        assert (await service.channel_outstanding_ops(redis, [41]))[41] == 2
+
+        await service.retire_operation(redis, 41)
+        assert (await service.channel_outstanding_ops(redis, [41]))[41] == 1
+
+    async def test_unknown_channel_reads_zero(self, redis: Redis):
+        assert (await service.channel_outstanding_ops(redis, [4242]))[4242] == 0
+
+    async def test_retire_floors_at_zero(self, redis: Redis):
+        """The feed tolerates an op being processed twice (a reclaimed entry, a
+        duplicated retry), so double-retires happen. Left unguarded the count would go
+        negative and the channel would sit at the price floor until that many fresh
+        posts had paid the debt off."""
+        await service.enqueue_operation(redis, post_id=1, channel_id=42)
+        for _ in range(5):
+            await service.retire_operation(redis, 42)
+        assert (await service.channel_outstanding_ops(redis, [42]))[42] == 0
+
+        await service.enqueue_operation(redis, post_id=2, channel_id=42)
+        assert (await service.channel_outstanding_ops(redis, [42]))[42] == 1
+
+    async def test_total_sums_every_channel(self, redis: Redis):
+        await service.enqueue_operation(redis, post_id=1, channel_id=43)
+        await service.enqueue_operation(redis, post_id=2, channel_id=43)
+        await service.enqueue_operation(redis, post_id=3, channel_id=44)
+        assert await service.outstanding_ops_total(redis) == 3
+
+    async def test_retry_readd_does_not_count_again(self, redis: Redis):
+        """A parked op was counted when it was minted and stays counted the whole time
+        it is parked — re-adding it to the stream is not new work."""
+        await service.enqueue_operation(redis, post_id=1, channel_id=45)
+        await service.schedule_retry(redis, post_id=1, channel_id=45, delay=-1)
+
+        assert await service.reschedule_due_retries(redis) == 1
+        assert (await service.channel_outstanding_ops(redis, [45]))[45] == 1
+
+    async def test_expired_retry_retires_the_op(self, redis: Redis):
+        await service.enqueue_operation(redis, post_id=1, channel_id=46)
+        await service.schedule_retry(
+            redis, post_id=1, channel_id=46, delay=-1, expires_at=time.time() - 1
+        )
+
+        assert await service.reschedule_due_retries(redis) == 0
+        assert (await service.channel_outstanding_ops(redis, [46]))[46] == 0
+
+    async def test_reseed_recounts_from_the_stream_and_retry_set(self, redis: Redis):
+        await service.enqueue_operation(redis, post_id=1, channel_id=47)
+        await service.enqueue_operation(redis, post_id=2, channel_id=47)
+        await service.schedule_retry(redis, post_id=3, channel_id=48)
+        # Drift the counters away from the truth, as a crash or a flush would.
+        await redis.hset(keys.OPS_OUTSTANDING, "47", 99)
+        await redis.hset(keys.OPS_OUTSTANDING, "999", 5)
+
+        total = await service.reseed_outstanding_ops(redis)
+
+        counts = await service.channel_outstanding_ops(redis, [47, 48, 999])
+        assert counts == {47: 2, 48: 1, 999: 0}
+        assert total == 3
+
+
+class TestSubscriptionTotal:
+    async def test_tracks_subscribe_and_unsubscribe(self, redis: Redis):
+        a, b = str(uuid.uuid4()), str(uuid.uuid4())
+        await service.sync_subscribe(redis, a, 51)
+        await service.sync_subscribe(redis, b, 51)
+        assert await service.subscription_total(redis) == 2
+
+        await service.sync_unsubscribe(redis, a, 51)
+        assert await service.subscription_total(redis) == 1
+
+    async def test_repeat_calls_do_not_double_count(self, redis: Redis):
+        """Both endpoints are idempotent, so the counter must move with the set, not
+        with the number of requests."""
+        user = str(uuid.uuid4())
+        await service.sync_subscribe(redis, user, 52)
+        await service.sync_subscribe(redis, user, 52)
+        assert await service.subscription_total(redis) == 1
+
+        await service.sync_unsubscribe(redis, user, 52)
+        await service.sync_unsubscribe(redis, user, 52)
+        assert await service.subscription_total(redis) == 0
+
+
 class TestRecipientSelection:
     async def test_selects_only_free_subscribers(self, redis: Redis):
         channel_id = 42

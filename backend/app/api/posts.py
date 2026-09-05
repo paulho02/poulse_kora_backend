@@ -194,7 +194,11 @@ async def get_posts_feed(
     The queue is maintained in Redis by the distribution worker; here we just read
     the post_ids and hydrate them. `place_post` dedupes on insert, so a post appears
     at most once in the queue even when fan-out and backfill both deliver it.
+
+    Also marks the user as active (see service.mark_active) — this is the sole
+    signal for the active-user estimate the admission-price formula reads.
     """
+    await service.mark_active(redis, str(user.id))
     post_ids = await service.render_queue_ids(redis, str(user.id), limit, skip)
     if not post_ids:
         return []
@@ -253,10 +257,10 @@ async def create_post(
     any resulting error raised - before the channel-existence check's price is
     charged, so a bad upload never costs tokens.
 
-    The price charged is the current shared snapshot (see
-    service.get_price_snapshot), not a fresh live computation — the same number a
-    concurrent `GET /posts/economy` would have quoted, rather than one that could have
-    drifted in the seconds between the two calls.
+    The price charged is this *channel's* price for the current window (see
+    service.channel_prices), not a fresh live computation — the same number
+    `GET /channels` quoted for it, rather than one that could have drifted in the
+    seconds or minutes between browsing and posting.
 
     Shares the per-user interaction budget with reviewing (see app/deps/rate_limit.py),
     so a burst of posts and forwards together still can't flood the queue."""
@@ -306,7 +310,9 @@ async def create_post(
             raise api_error(400, "post_media_total_too_large")
         processed_by_index[index] = item
 
-    price = (await service.get_price_snapshot(redis))["price"]
+    price = (await service.channel_prices(redis, [post_in.channel_id]))[
+        post_in.channel_id
+    ]
     if user.is_superuser:
         token_balance = await service.token_balance(redis, str(user.id))
     else:

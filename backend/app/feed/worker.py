@@ -69,6 +69,8 @@ async def process_operation(
         if await service.place_post(redis, user_id, post_id) != service.PLACE_REFUSED:
             delivered += 1
     if delivered:
+        # Terminal outcome: stop counting this op against the channel's price.
+        await service.retire_operation(redis, channel_id)
         return delivered
 
     if await service.has_eligible_recipient(redis, channel_id, post_id, author_id):
@@ -91,6 +93,7 @@ async def process_operation(
         # subscribes. We give that chance up: a post whose channel has already read it
         # is not what a new subscriber needs. Note this is strictly narrower than an
         # *empty* channel, which is still parked — that backlog is worth keeping.
+        await service.retire_operation(redis, channel_id)
         logger.info(
             "feed op exhausted its channel, abandoned: post_id=%s channel_id=%s",
             post_id,

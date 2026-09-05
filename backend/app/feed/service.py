@@ -10,6 +10,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Sequence
 from uuid import uuid4
 
 from redis.asyncio import Redis
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.feed import keys
+from app.feed.pricing import channel_price as compute_channel_price
 from app.feed.pricing import compute_price
 from app.feed.scripts import get_scripts
 from app.models.channel_subscription import ChannelSubscription
@@ -50,19 +52,23 @@ async def ensure_group(redis: Redis) -> None:
             raise
 
 
-async def enqueue_operation(
+async def _add_to_stream(
     redis: Redis,
     post_id: int,
     channel_id: int,
     expires_at: float | None = None,
     author_id: str | None = None,
 ) -> None:
-    """Append a fan-out operation for `post_id` to the operation stream.
+    """Append a fan-out operation to the stream, and *only* that.
+
+    Split from `enqueue_operation` because re-adding a parked op is not new work: the
+    channel's outstanding count was incremented when the op was first minted and has
+    stayed up through the whole park/retry cycle, so counting it again here would
+    inflate a stalled channel's price once per retry.
 
     `expires_at` is carried only by ops coming back from `ops:retry`; it preserves the
     original retry deadline across the stream round-trip so re-parking cannot reset it
-    (see `schedule_retry`). Freshly published/forwarded posts pass None and get a
-    deadline on their first park.
+    (see `schedule_retry`).
 
     `author_id` lets the worker skip the post's own author without looking anything up —
     the whole cost of FEED_EXCLUDE_OWN_POSTS is this one extra stream field. Optional on
@@ -78,6 +84,38 @@ async def enqueue_operation(
     await redis.xadd(keys.STREAM, fields)
 
 
+async def enqueue_operation(
+    redis: Redis,
+    post_id: int,
+    channel_id: int,
+    author_id: str | None = None,
+) -> None:
+    """Mint a *new* fan-out operation for `post_id` (a publish or a forward).
+
+    Also counts it against the channel (see keys.OPS_OUTSTANDING), which is what makes
+    per-channel pricing possible: this is where work enters the system, and
+    `retire_operation` is the only place it leaves. Ops re-added from `ops:retry` go
+    through `_add_to_stream` instead, which skips the count.
+    """
+    await _add_to_stream(redis, post_id, channel_id, author_id=author_id)
+    await redis.hincrby(keys.OPS_OUTSTANDING, str(channel_id), 1)
+
+
+async def retire_operation(redis: Redis, channel_id: int) -> int:
+    """Drop one outstanding op from the channel's count. Returns the new count.
+
+    Called at a *terminal* outcome only — the post reached a recipient, or was abandoned
+    — never when an op is merely parked for retry, which leaves it outstanding by
+    design. Floors at zero rather than going negative; see the `retire` script for why
+    that matters.
+    """
+    return int(
+        await get_scripts(redis).retire(
+            keys=[keys.OPS_OUTSTANDING], args=[str(channel_id)]
+        )
+    )
+
+
 async def operation_queue_len(redis: Redis) -> int:
     """Outstanding operations in the stream (drives admission pricing).
 
@@ -89,9 +127,59 @@ async def operation_queue_len(redis: Redis) -> int:
     return await redis.xlen(keys.STREAM)
 
 
+async def outstanding_ops_total(redis: Redis) -> int:
+    """Outstanding ops across every channel — the numerator's global counterpart.
+
+    Summed from the per-channel hash rather than read off `XLEN`, so both sides of the
+    per-channel ratio are measured the same way: this total includes parked ops, and it
+    is the exact sum of the values `channel_factor` divides by. O(channels), paid once
+    per refresher tick.
+    """
+    values = await redis.hvals(keys.OPS_OUTSTANDING)
+    return sum(max(0, int(v)) for v in values)
+
+
+async def channel_outstanding_ops(
+    redis: Redis, channel_ids: Sequence[int]
+) -> dict[int, int]:
+    """Outstanding op count per channel, in one round trip. Missing ⇒ 0."""
+    if not channel_ids:
+        return {}
+    raw = await redis.hmget(keys.OPS_OUTSTANDING, [str(c) for c in channel_ids])
+    return {
+        cid: max(0, int(v)) if v is not None else 0
+        for cid, v in zip(channel_ids, raw, strict=True)
+    }
+
+
+async def subscription_total(redis: Redis) -> int:
+    """Total channel subscriptions (see keys.SUBS_TOTAL). Clamped at 0.
+
+    A running counter, so it can drift below the truth if Redis loses the key while
+    keeping the channel sets. It only ever scales a price within the channel band, and
+    `rebuild_from_pg` resets it from Postgres.
+    """
+    raw = await redis.get(keys.SUBS_TOTAL)
+    return max(0, int(raw)) if raw is not None else 0
+
+
+async def _read_price_snapshot(redis: Redis) -> dict | None:
+    """Raw read of the published snapshot, or None on a miss. No fallback compute —
+    `refresh_price_snapshot` uses this to read the *previous* price without risking
+    recursion back into itself via `get_price_snapshot`.
+    """
+    raw = await redis.get(keys.PRICE_SNAPSHOT)
+    return json.loads(raw) if raw is not None else None
+
+
 async def refresh_price_snapshot(redis: Redis, now: float | None = None) -> dict:
-    """Unconditionally recompute the admission price from current congestion and
-    publish it as the snapshot every reader/charge shares (see `get_price_snapshot`).
+    """Unconditionally step the admission price from current congestion and publish
+    it as the snapshot every reader/charge shares (see `get_price_snapshot`).
+
+    The price is stateful (see `pricing.compute_price`): each call nudges it by 1
+    from whatever it was published as last, defaulting to FEED_PRICE_MIN when there
+    is no previous snapshot (cold start) — the same starting point a fresh deploy
+    with an empty queue would settle on anyway.
 
     `expires_at` (`computed_at + FEED_PRICE_REFRESH_SECONDS`) is a promise made to
     callers of `get_price_snapshot`/`GET /posts/economy`: the price will not change
@@ -107,11 +195,21 @@ async def refresh_price_snapshot(redis: Redis, now: float | None = None) -> dict
     """
     if now is None:
         now = time.time()
-    price = compute_price(await operation_queue_len(redis), settings)
+    previous = await _read_price_snapshot(redis)
+    prev_price = previous["price"] if previous is not None else settings.FEED_PRICE_MIN
+    ops_len = await operation_queue_len(redis)
+    active_users = await active_user_count(redis, now)
+    price = compute_price(prev_price, ops_len, active_users, settings)
     snapshot = {
         "price": price,
         "computed_at": now,
         "expires_at": now + settings.FEED_PRICE_REFRESH_SECONDS,
+        # Carried on the snapshot so a per-channel price (`channel_prices`) needs only
+        # the channel's own two numbers to derive itself — and so every channel priced
+        # within this window is scaled against the same global ratio, rather than each
+        # re-reading totals that moved in between.
+        "ops_total": await outstanding_ops_total(redis),
+        "subs_total": await subscription_total(redis),
     }
     await redis.set(
         keys.PRICE_SNAPSHOT, json.dumps(snapshot), ex=settings.FEED_PRICE_TTL_SECONDS
@@ -126,9 +224,9 @@ async def get_price_snapshot(redis: Redis) -> dict:
     a flushed Redis, or a stalled refresher — so a client is never refused a price;
     it just briefly reverts to an on-demand value until the timer catches up.
     """
-    raw = await redis.get(keys.PRICE_SNAPSHOT)
-    if raw is not None:
-        return json.loads(raw)
+    snapshot = await _read_price_snapshot(redis)
+    if snapshot is not None:
+        return snapshot
     return await refresh_price_snapshot(redis)
 
 
@@ -151,6 +249,77 @@ async def maybe_refresh_price_snapshot(redis: Redis, now: float | None = None) -
     if now >= current["expires_at"]:
         return await refresh_price_snapshot(redis, now)
     return current
+
+
+async def channel_prices(
+    redis: Redis, channel_ids: Sequence[int], now: float | None = None
+) -> dict[int, int]:
+    """Admission price for each of `channel_ids`, frozen for the current price window.
+
+    Each price is the global snapshot's price scaled by that channel's own congestion
+    (see `pricing.channel_factor`), then cached under `keys.channel_price` stamped with
+    the *snapshot's* `expires_at`. So a channel's price is guaranteed for exactly as
+    long as the base price it came from, and both roll over on the same tick — which is
+    what lets a channel list quote a number that `create_post` will still charge.
+
+    Computed lazily per channel rather than for every channel on the refresher tick: the
+    refresher has no way to enumerate channels without either a Postgres session or a
+    `SCAN` over the keyspace, and only channels somebody actually looks at need a price.
+
+    At most three round trips whatever the page size — the cached reads, then the two
+    counters for whatever missed, then the write-back.
+    """
+    if not channel_ids:
+        return {}
+    if now is None:
+        now = time.time()
+
+    wanted = list(dict.fromkeys(channel_ids))
+    cached = await redis.mget([keys.channel_price(c) for c in wanted])
+
+    prices: dict[int, int] = {}
+    missing: list[int] = []
+    for channel_id, raw in zip(wanted, cached, strict=True):
+        entry = json.loads(raw) if raw is not None else None
+        if entry is not None and now < entry["expires_at"]:
+            prices[channel_id] = entry["price"]
+        else:
+            missing.append(channel_id)
+    if not missing:
+        return prices
+
+    snapshot = await get_price_snapshot(redis)
+    # Absent from a snapshot published before per-channel pricing existed, which can
+    # still be live for up to FEED_PRICE_TTL_SECONDS after the deploy. Zeroes make
+    # `channel_factor` neutral, so those channels price at the flat global rate for one
+    # window instead of raising.
+    ops_total = snapshot.get("ops_total", 0)
+    subs_total = snapshot.get("subs_total", 0)
+    ops_by_channel = await channel_outstanding_ops(redis, missing)
+
+    pipe = redis.pipeline(transaction=False)
+    for channel_id in missing:
+        pipe.scard(keys.channel(channel_id))
+    subscriber_counts = await pipe.execute()
+
+    pipe = redis.pipeline(transaction=False)
+    for channel_id, subscribers in zip(missing, subscriber_counts, strict=True):
+        price = compute_channel_price(
+            snapshot["price"],
+            ops_by_channel[channel_id],
+            subscribers,
+            ops_total,
+            subs_total,
+            settings,
+        )
+        prices[channel_id] = price
+        pipe.set(
+            keys.channel_price(channel_id),
+            json.dumps({"price": price, "expires_at": snapshot["expires_at"]}),
+            ex=settings.FEED_PRICE_TTL_SECONDS,
+        )
+    await pipe.execute()
+    return prices
 
 
 async def run_price_refresher(redis: Redis) -> None:
@@ -239,6 +408,9 @@ async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
             expires_at = now + settings.FEED_RETRY_MAX_AGE_SECONDS
         elif expires_at <= now:
             await redis.zrem(keys.OPS_RETRY, member)
+            # Terminal: this op will never be delivered, so it stops counting against
+            # the channel's price.
+            await retire_operation(redis, op["channel_id"])
             logger.info(
                 "feed op abandoned after %ss of retries: post_id=%s channel_id=%s",
                 settings.FEED_RETRY_MAX_AGE_SECONDS,
@@ -249,7 +421,10 @@ async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
         # XADD before ZREM: if the process dies in between, the op is merely duplicated
         # (already-tolerated, see claim_from_queue/review_post's IntegrityError
         # handling) rather than silently lost.
-        await enqueue_operation(
+        #
+        # `_add_to_stream`, not `enqueue_operation`: this op is already counted against
+        # its channel and has been throughout its time parked here.
+        await _add_to_stream(
             redis,
             op["post_id"],
             op["channel_id"],
@@ -259,6 +434,35 @@ async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
         await redis.zrem(keys.OPS_RETRY, member)
         rescheduled += 1
     return rescheduled
+
+
+# --- presence ----------------------------------------------------------------
+
+async def mark_active(redis: Redis, user_id: str, now: float | None = None) -> None:
+    """Record `user_id` as active right now (see keys.ACTIVE_USERS).
+
+    A plain ZADD: the sliding window lives entirely in how the score is read back
+    (`active_user_count`), so marking active twice just overwrites the score — the
+    window naturally "resets" on every call without any separate TTL bookkeeping.
+    """
+    if now is None:
+        now = time.time()
+    await redis.zadd(keys.ACTIVE_USERS, {user_id: now})
+
+
+async def active_user_count(redis: Redis, now: float | None = None) -> int:
+    """Users marked active within the trailing ACTIVE_USER_WINDOW_SECONDS.
+
+    Stale entries (older than the window) are trimmed opportunistically on read
+    rather than via TTL (Redis cannot expire individual set members) — cheap since
+    it's the same O(log N) sorted-set operation family as the ZCOUNT itself, and
+    keeps the set from growing unbounded with users who never come back.
+    """
+    if now is None:
+        now = time.time()
+    cutoff = now - settings.ACTIVE_USER_WINDOW_SECONDS
+    await redis.zremrangebyscore(keys.ACTIVE_USERS, "-inf", cutoff)
+    return await redis.zcount(keys.ACTIVE_USERS, cutoff, "+inf")
 
 
 # --- tokens ----------------------------------------------------------------
@@ -444,8 +648,15 @@ async def has_eligible_recipient(
 # --- subscription sync -----------------------------------------------------
 
 async def sync_subscribe(redis: Redis, user_id: str, channel_id: int) -> None:
-    """Reflect a subscription: add to the channel set, ensure reachable via free_queue."""
-    await redis.sadd(keys.channel(channel_id), user_id)
+    """Reflect a subscription: add to the channel set, ensure reachable via free_queue.
+
+    The running subscription total (keys.SUBS_TOTAL) moves only when the SADD actually
+    added — subscribing twice must not inflate it, and the endpoint is deliberately
+    idempotent.
+    """
+    added = await redis.sadd(keys.channel(channel_id), user_id)
+    if added:
+        await redis.incr(keys.SUBS_TOTAL)
     await get_scripts(redis).ensure_free(
         keys=[keys.queue(user_id), keys.FREE_QUEUE],
         args=[user_id, settings.FEED_QUEUE_MAX_SLOTS],
@@ -454,7 +665,9 @@ async def sync_subscribe(redis: Redis, user_id: str, channel_id: int) -> None:
 
 async def sync_unsubscribe(redis: Redis, user_id: str, channel_id: int) -> None:
     """Reflect an unsubscription: remove the user from the channel set."""
-    await redis.srem(keys.channel(channel_id), user_id)
+    removed = await redis.srem(keys.channel(channel_id), user_id)
+    if removed:
+        await redis.decr(keys.SUBS_TOTAL)
 
 
 async def backfill_queue(
@@ -538,6 +751,35 @@ async def seed_seen_from_reviews(redis: Redis, session: AsyncSession) -> int:
     return len(rows)
 
 
+async def reseed_outstanding_ops(redis: Redis) -> int:
+    """Recount the per-channel outstanding-op counters from the ops actually in flight
+    (the stream plus `ops:retry`). Returns the total counted.
+
+    These counters are incremented and decremented by three different processes and
+    survive nothing, so unlike the rest of the feed's Redis state they can be *wrong*
+    rather than merely absent — a crash between `XADD` and the increment, a flushed
+    hash, an op processed twice. Recounting is cheap because both structures are already
+    self-trimming to outstanding work, and it is the only way back to the truth.
+
+    An op parked and not yet XDEL'd from the stream is counted twice here. That window is
+    a few instructions wide, and this is a price input, not a delivery decision.
+    """
+    counts: dict[str, int] = {}
+    for _entry_id, fields in await redis.xrange(keys.STREAM):
+        channel_id = fields.get("channel_id")
+        if channel_id is not None:
+            counts[channel_id] = counts.get(channel_id, 0) + 1
+    for member in await redis.zrange(keys.OPS_RETRY, 0, -1):
+        _, _, payload = member.partition(":")
+        channel_id = str(json.loads(payload)["channel_id"])
+        counts[channel_id] = counts.get(channel_id, 0) + 1
+
+    await redis.delete(keys.OPS_OUTSTANDING)
+    if counts:
+        await redis.hset(keys.OPS_OUTSTANDING, mapping=counts)
+    return sum(counts.values())
+
+
 async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]:
     """Repopulate Redis distribution state from Postgres.
 
@@ -550,6 +792,9 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
     - Each subscriber's queue is backfilled with recent posts from their subscribed
       channels, so users who subscribed *before* Redis (empty queues) get content
       without having to re-subscribe.
+    - `subs:total` and the per-channel outstanding-op counters, the two running counters
+      behind per-channel pricing — the only state here that can drift rather than simply
+      be missing, so a rebuild is also their reconciliation.
 
     Idempotent: the backfill skips posts already queued, seen-set writes are SADDs, and
     token balances are set (not incremented). The operation stream and `ops:retry` are
@@ -581,9 +826,15 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
             redis, session, sub.user_id, sub.channel_id
         )
 
+    # Set from Postgres rather than summing what SADD just added: a rebuild over sets
+    # that already held most members would otherwise count only the new ones.
+    await redis.set(keys.SUBS_TOTAL, len(subs))
+    outstanding = await reseed_outstanding_ops(redis)
+
     return {
         "subscriptions": len(subs),
         "users": len(users),
         "backfilled": backfilled,
         "seen_seeded": seen_seeded,
+        "outstanding_ops": outstanding,
     }

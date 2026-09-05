@@ -30,6 +30,42 @@ FREE_QUEUE = "free_queue"
 # each computing its own live value.
 PRICE_SNAPSHOT = "feed:price"
 
+# Sorted set of user_ids by last-activity unix timestamp (see service.mark_active /
+# active_user_count). One key for the whole deployment; membership is a sliding
+# window (score >= now - ACTIVE_USER_WINDOW_SECONDS counts as active), not a set with
+# TTL'd members, since Redis has no per-member expiry.
+ACTIVE_USERS = "active_users"
+
+# Hash of channel_id -> outstanding fan-out ops for that channel, the numerator of the
+# per-channel price factor (see app/feed/pricing.py: channel_factor). Incremented where
+# new work is minted (`enqueue_operation`) and decremented at a terminal outcome
+# (delivered, or abandoned) — retry churn deliberately does not touch it, so a post
+# parked in `ops:retry` still counts as outstanding. That is the whole point: work that
+# cannot find a recipient is exactly what should make a channel look congested.
+#
+# A hash rather than a key per channel so a page of channels costs one HMGET, and the
+# global total is one HVALS on the refresher tick. Approximate by nature (see
+# `retire_operation`) — it prices, it does not gate delivery.
+OPS_OUTSTANDING = "feed:ops:outstanding"
+
+# Total channel subscriptions across the deployment (the denominator's denominator —
+# see `channel_factor`). A running counter maintained by sync_subscribe/sync_unsubscribe
+# because the alternative, summing SCARD over every channel, is the one part of the
+# factor that would otherwise need to enumerate channels.
+SUBS_TOTAL = "subs:total"
+
+
+def channel_price(channel_id: int) -> str:
+    """Cached admission price for one channel ({"price", "expires_at"} JSON).
+
+    Populated lazily by `service.channel_prices` and stamped with the *global*
+    snapshot's `expires_at`, so a channel's price is frozen for exactly the window its
+    base price is, and the two roll over together. Without this the price quoted on a
+    channel list and the price charged by `create_post` could differ, which is the
+    same broken promise `PRICE_SNAPSHOT` exists to prevent.
+    """
+    return f"feed:price:channel:{channel_id}"
+
 
 def queue(user_id: str) -> str:
     """Per-user review queue (list of post_ids)."""

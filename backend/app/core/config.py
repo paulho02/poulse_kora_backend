@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # post without having to review anything first. Also folded into
     # `rebuild_from_pg`'s token seeding (starting balance + reviewed_count), so a
     # Redis rebuild doesn't retroactively strip a never-reviewed account's grant.
-    FEED_STARTING_TOKENS: int = 5
+    FEED_STARTING_TOKENS: int = 10
 
     # --- Redis-backed feed distribution algorithm ---
     # Per-user review-queue capacity. A user is in the `free_queue` set while their
@@ -39,11 +39,33 @@ class Settings(BaseSettings):
     # finds K free recipients in a saturated channel, at the cost of a larger (still
     # O(sample)) membership check. Must be >= 1.
     FEED_FANOUT_SAMPLE_MULTIPLIER: int = 4
-    # Dynamic admission price for creating an original post, as a function of the
-    # operation-queue length: clamp(MIN + len(ops) // STEP_ITEMS, MIN, MAX).
+    # Dynamic admission price for creating an original post. Rather than a fixed
+    # queue-length threshold (a given backlog means something very different at 5
+    # active users vs 100,000), the price is nudged by exactly 1 toward whichever
+    # side of a *relative* target the fan-out queue currently sits on (see
+    # app/feed/pricing.py: compute_price / price_target). A bigger step would
+    # overshoot and hunt back and forth (a pendulum); nudging by 1 per refresh tick
+    # trades responsiveness for stability on purpose.
     FEED_PRICE_MIN: int = 1
-    FEED_PRICE_MAX: int = 5
-    FEED_PRICE_STEP_ITEMS: int = 20
+    FEED_PRICE_MAX: int = 30
+    # Target fan-out queue length, as a fraction of currently active users
+    # (service.active_user_count) — the "healthy buffer" the price steers toward.
+    FEED_PRICE_BUFFER_RATIO: float = 0.1
+    # Floor for the target above, so a small/zero active-user count (cold start, a
+    # quiet night) doesn't collapse the target to 0-1 and ratchet price up on noise.
+    # `price_target` takes whichever of this or the ratio above is larger.
+    FEED_PRICE_TARGET_MIN_ITEMS: int = 20
+    # Band around the target, as a fraction of it, within which the price is left
+    # untouched rather than nudged — without this, a price sitting one item off
+    # target would hunt between two adjacent values forever (+1, -1, +1, ...) even
+    # though it's already about as close as a single-item queue metric can get.
+    FEED_PRICE_DEADBAND_RATIO: float = 0.1
+    # How far a single channel's price may stray from the global one, as a fraction
+    # (0.25 ⇒ 75%-125% of the base price). Each channel is priced by nudging the shared
+    # global price, never by running its own controller — see app/feed/pricing.py:
+    # channel_factor. The band is the entire stability mechanism: the factor is
+    # stateless, so unlike the global price it cannot wander, it can only be clamped.
+    FEED_PRICE_CHANNEL_BAND: float = 0.25
     # The price above is expensive to keep consistent if computed live on every
     # request (two calls a few seconds apart can see different queue lengths). Instead
     # a background task recomputes it on a timer and publishes one shared snapshot that
@@ -57,6 +79,11 @@ class Settings(BaseSettings):
     # shows up as a missing snapshot rather than a silently stale price served forever.
     FEED_PRICE_REFRESH_SECONDS: int = 60
     FEED_PRICE_TTL_SECONDS: int = 90
+    # Sliding window for "currently active" (see service.mark_active /
+    # active_user_count): a user counts as active until this many seconds pass without
+    # another feed fetch. 60s means a refresh at 59s keeps them active; the window
+    # resets on every fetch rather than counting from first-seen.
+    ACTIVE_USER_WINDOW_SECONDS: int = 60
     # Seconds an undeliverable operation (no free recipient) waits before retry.
     FEED_RETRY_INTERVAL_SECONDS: int = 20
     # How long an operation may keep retrying before it is abandoned (5 days). Without
