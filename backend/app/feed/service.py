@@ -605,8 +605,10 @@ async def has_eligible_recipient(
     ever meant full queues, and parking for retry was always the right answer. Exclusions
     make a post able to genuinely run out of audience — and parking one of those would
     cycle it through the stream every FEED_RETRY_INTERVAL_SECONDS until
-    FEED_RETRY_MAX_AGE_SECONDS: ~21k pointless fan-out attempts over 5 days per saturated
-    post, each one inflating XLEN and therefore the admission price everyone pays.
+    FEED_RETRY_MAX_AGE_SECONDS: ~43k pointless fan-out attempts over 10 days per
+    saturated post, each one inflating XLEN and therefore the admission price everyone
+    pays. That arithmetic is why this gate got *more* valuable when the deadline was
+    doubled, not less.
 
     Cheap gate first. Exhaustion requires the seen set to cover every subscriber bar at
     most the author, so `seen + 1 < subscribers` rules it out with two O(1) SCARDs — the

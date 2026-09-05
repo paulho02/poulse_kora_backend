@@ -107,3 +107,22 @@ class PostEconomy(BaseModel):
     token_balance: int
     post_price: int
     post_price_expires_at: datetime
+
+
+class FeedStatus(BaseModel):
+    """A cheap look at the review queue, for a client that wants to notice new
+    arrivals without pulling the feed itself.
+
+    `post_ids` is the whole queue in order, not a count: a client that keeps track
+    of which ids it has already pulled can tell "something new arrived" from "the
+    same posts, minus the ones I reviewed" exactly, and so never refetches for
+    nothing. It is at most FEED_QUEUE_MAX_SLOTS entries, which is why returning all
+    of them is cheaper than the count would suggest.
+
+    `capacity` is that cap, and it is the difference between "nothing has been
+    published for you yet" and "your queue is full — review something to make
+    room", which are opposite instructions to give a reader.
+    """
+
+    post_ids: list[int]
+    capacity: int

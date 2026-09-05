@@ -2,7 +2,7 @@ import sys
 from functools import cached_property
 from typing import Any
 
-from pydantic import HttpUrl, PostgresDsn, RedisDsn, field_validator
+from pydantic import Field, HttpUrl, PostgresDsn, RedisDsn, field_validator
 from pydantic.networks import AnyHttpUrl
 from pydantic_settings import BaseSettings
 
@@ -86,12 +86,19 @@ class Settings(BaseSettings):
     ACTIVE_USER_WINDOW_SECONDS: int = 60
     # Seconds an undeliverable operation (no free recipient) waits before retry.
     FEED_RETRY_INTERVAL_SECONDS: int = 20
-    # How long an operation may keep retrying before it is abandoned (5 days). Without
+    # How long an operation may keep retrying before it is abandoned (10 days). Without
     # this a post published to a channel that never gains a free subscriber would cycle
     # through the stream forever, and its presence in XLEN would inflate the admission
     # price for everyone. The deadline is set on the first park and carried across
     # re-parks, so it bounds total age, not the gap between attempts.
-    FEED_RETRY_MAX_AGE_SECONDS: int = 5 * 24 * 60 * 60
+    #
+    # This is the one knob that decides how long a post keeps *looking* for an audience,
+    # and it is deliberately generous: a post is only ever parked because nobody had a
+    # free slot, so abandoning one early throws away reach its author paid for. A post
+    # that has genuinely run out of audience never waits this out — `has_eligible_-
+    # recipient` abandons it on the spot — so the deadline only ever bites the case it
+    # is meant to: a channel too quiet to drain its subscribers' queues within it.
+    FEED_RETRY_MAX_AGE_SECONDS: int = 10 * 24 * 60 * 60
 
     # --- delivery exclusions ---
     # Never fan a post out to its own author. Free to enforce: `author_id` rides along
@@ -107,10 +114,34 @@ class Settings(BaseSettings):
     # (user, post) review constraint stays the backstop, so losing the set degrades to
     # today's 409 rather than breaking correctness.
     FEED_EXCLUDE_SEEN: bool = True
-    # Lifetime of a `seen:{post_id}` set, refreshed on every delivery. Must exceed
-    # FEED_RETRY_MAX_AGE_SECONDS, or a post still circulating could outlive the record
-    # of who has already had it.
-    FEED_SEEN_TTL_SECONDS: int = 7 * 24 * 60 * 60
+    # How much longer than the retry deadline a `seen:{post_id}` set must survive, as a
+    # multiple of it. See FEED_SEEN_TTL_SECONDS below for what the extra window buys.
+    FEED_SEEN_TTL_RETRY_MULTIPLE: int = Field(default=2, ge=2)
+
+    @property
+    def FEED_SEEN_TTL_SECONDS(self) -> int:
+        """Lifetime of a `seen:{post_id}` set, refreshed on every delivery.
+
+        Derived rather than configured, because there is no such thing as a sensible
+        value for it that is not a function of FEED_RETRY_MAX_AGE_SECONDS — and the
+        one way to get the pair wrong fails *silently*: a set that expires while an op
+        is still parked leaves the next fan-out with no record of who has had the post,
+        and the only symptom is someone being handed a post they already reviewed.
+        Deriving it means that pairing cannot be expressed, which beats validating it.
+
+        Why a multiple and not just "a bit more". The set's clock runs from the post's
+        last *delivery*; a parked op's deadline runs from its *park*. Those are not the
+        same instant, so the set has to cover both the retry window and however long the
+        post sat undelivered before that op existed — a forward, say, from someone who
+        left the post unread in their queue for a while. Allowing one retry window for
+        each is the reasoning behind the default of 2; there is no exact answer here,
+        because dwell time has no hard bound, which is also why Postgres' unique
+        (user, post) review constraint stays the real backstop rather than this.
+
+        The cost of being generous is Redis memory — a set of recipient ids per post,
+        held longer — which is small next to the media those posts carry.
+        """
+        return self.FEED_RETRY_MAX_AGE_SECONDS * self.FEED_SEEN_TTL_RETRY_MULTIPLE
 
     # --- operation stream (Redis Streams consumer group) ---
     # How long (ms) a delivered-but-unacked op may sit idle before another consumer

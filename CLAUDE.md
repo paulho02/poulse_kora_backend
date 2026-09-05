@@ -108,8 +108,48 @@ after cloning).
   `FEED_EXCLUDE_SEEN` on an existing DB requires `python rebuild_redis.py`** to seed the
   sets from `post_reviews`. Consequence to know: exclusions make channel *saturation*
   reachable, so `process_operation` now asks `has_eligible_recipient` whether to park or
-  abandon — an exhausted channel drops the op instead of retrying it for 5 days. An *empty*
+  abandon — an exhausted channel drops the op instead of retrying it for 10 days. An *empty*
   channel is still parked (that backlog is how a new channel reaches its first subscriber).
+  `FEED_RETRY_MAX_AGE_SECONDS` is the one knob for how long a post keeps looking for an
+  audience (10 days), and it is deliberately generous: a parked op is one nobody had *room*
+  for, so abandoning it early throws away reach the author paid for. A post that has
+  genuinely run out of audience never waits it out — `has_eligible_recipient` abandons it on
+  the spot. **`FEED_SEEN_TTL_SECONDS` is derived from it, not configured**
+  (`FEED_SEEN_TTL_RETRY_MULTIPLE`, default 2 ⇒ 20 days): a seen set has to outlive every op
+  still trying to deliver that post, no value for it makes sense independently of the retry
+  deadline, and getting the pair wrong fails *silently* — the set expires mid-retry, the next
+  fan-out forgets who has had the post, and someone is handed one they already reviewed. It
+  is a `@property`, so setting `FEED_SEEN_TTL_SECONDS` in an env now fails at startup
+  (`extra="forbid"`) rather than being quietly ignored. Why a *multiple* rather than a small
+  margin: the set's clock runs from the post's last delivery while an op's deadline runs from
+  its park, so the set must cover the retry window *plus* however long the post sat
+  undelivered before that op existed. Dwell time has no hard bound, which is why the unique
+  `(user, post)` constraint stays the real backstop rather than this.
+- **Keeping the feed current** (`GET /posts/feed`, `GET /posts/feed/status`): the review queue
+  is something the worker *pushes into*, so a client that only fetches once reads a list that
+  can only ever shrink — the reason the app used to need a reload button. `/posts/feed/status`
+  is the cheap counterpart the client polls while the feed is on screen: one `LRANGE`, no
+  Postgres, no presigning, answering with the queue's **post ids** rather than a count. Ids,
+  because a client that remembers which ones it has already pulled can then distinguish a real
+  arrival from "the same posts, minus the ones I reviewed" exactly — with a count, a channel
+  filter alone would make every single tick look like news and provoke a full feed fetch
+  forever. It marks the user active for the same reason the feed read does: someone watching is
+  a reader. `capacity` is `FEED_QUEUE_MAX_SLOTS`, and a full queue is worth naming separately —
+  nothing more can be *placed* until the reader reviews something, which is the opposite
+  instruction from "nothing has been published for you yet".
+  Two things follow for `/posts/feed`. Its `limit` now defaults to `FEED_QUEUE_MAX_SLOTS`
+  instead of 20, so a client that omits it always holds the whole queue — a page size fixed
+  client-side would silently stop topping up the day that cap is raised past it. And
+  `channel_id` is filtered in SQL *before* `skip`/`limit` rather than after the slice, which it
+  used to be: filtering a page returned fewer than `limit` posts and left the rest of that
+  channel unreachable at any offset. Reading the whole queue to do it costs nothing worth
+  saving — it is capped by construction.
+  What this deliberately does **not** add is a pull-based top-up. There is real un-delivered
+  supply (posts published before you subscribed, whose fan-out went elsewhere), and
+  `backfill_queue` would hand it over — but reach is what an author *paid* for, `FEED_FANOUT`
+  recipients per operation, so serving those posts on demand would be free reach and an
+  economy change, not a UX one. A feed that runs dry with nothing queued is the economy
+  working; see the todo.
 - **Google sign-in** (`backend/app/api/google_auth.py`): an **ID-token** flow, not fastapi-users'
   `get_oauth_router` — that is a browser redirect flow the mobile app has no deep links for, and
   its `associate_by_email` linking is silent, leaving nowhere for the confirmation step. The client

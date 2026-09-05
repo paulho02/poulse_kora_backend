@@ -87,7 +87,8 @@ def seen(post_id: int) -> str:
 
     Written by the `place` script in the same atomic call that pushes the post into a
     queue, so membership is recorded before the recipient can act on it. Expires after
-    FEED_SEEN_TTL_SECONDS, refreshed on each delivery — the set dies with the post
-    rather than accumulating forever.
+    FEED_SEEN_TTL_SECONDS (derived from FEED_RETRY_MAX_AGE_SECONDS, so it always
+    outlives the ops still delivering this post), refreshed on each delivery — the set
+    dies with the post rather than accumulating forever.
     """
     return f"seen:{post_id}"

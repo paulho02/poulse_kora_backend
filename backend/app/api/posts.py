@@ -25,6 +25,7 @@ from app.models.post_review import PostReview
 from app.models.user import User
 from app.models.user_subscription import UserSubscription
 from app.schemas.post import (
+    FeedStatus,
     PostAuthor,
     PostBlockIn,
     PostBlockRead,
@@ -187,7 +188,7 @@ async def get_posts_feed(
     redis: CurrentRedis,
     channel_id: int | None = None,
     skip: int = 0,
-    limit: int = 20,
+    limit: int | None = None,
 ):
     """Return the user's review queue, oldest first, rendered from Postgres by ID.
 
@@ -197,12 +198,29 @@ async def get_posts_feed(
 
     Also marks the user as active (see service.mark_active) — this is the sole
     signal for the active-user estimate the admission-price formula reads.
+
+    `skip`/`limit` page the *filtered* result, which is why the whole queue is read
+    from Redis rather than just the requested slice: a channel filter applied after
+    the slice would silently return fewer than `limit` posts and leave the rest of
+    that channel unreachable at any offset. Reading it whole costs nothing worth
+    saving — the queue is capped at FEED_QUEUE_MAX_SLOTS by construction.
+
+    That cap is also `limit`'s default, so a client that omits it always holds the
+    whole queue and can tell a genuine arrival from something it simply never asked
+    for. A page size hardcoded client-side would quietly stop topping up the day the
+    cap is raised past it.
     """
+    limit = settings.FEED_QUEUE_MAX_SLOTS if limit is None else limit
     await service.mark_active(redis, str(user.id))
-    post_ids = await service.render_queue_ids(redis, str(user.id), limit, skip)
-    if not post_ids:
+    queue_ids = await service.render_queue_ids(
+        redis, str(user.id), settings.FEED_QUEUE_MAX_SLOTS
+    )
+    if not queue_ids:
         return []
 
+    filters = [Post.id.in_(queue_ids)]
+    if channel_id is not None:
+        filters.append(Post.channel_id == channel_id)
     posts = (
         (
             await session.execute(
@@ -212,17 +230,36 @@ async def get_posts_feed(
                     selectinload(Post.author),
                     selectinload(Post.blocks).selectinload(PostBlock.media),
                 )
-                .filter(Post.id.in_(post_ids))
+                .filter(*filters)
             )
         )
         .scalars()
         .all()
     )
     by_id = {p.id: p for p in posts}
-    ordered = [by_id[pid] for pid in post_ids if pid in by_id]
-    if channel_id is not None:
-        ordered = [p for p in ordered if p.channel_id == channel_id]
-    return [_serialize_post(p, user) for p in ordered]
+    ordered = [by_id[pid] for pid in queue_ids if pid in by_id]
+    return [_serialize_post(p, user) for p in ordered[skip : skip + limit]]
+
+
+@router.get("/feed/status", response_model=FeedStatus)
+async def get_feed_status(user: CurrentVerifiedUser, redis: CurrentRedis):
+    """What is in the review queue right now, without rendering any of it.
+
+    This is what lets the feed keep itself current instead of waiting to be pulled:
+    a client polls it while the feed is on screen and only fetches `GET /posts/feed`
+    when an id it has not already pulled shows up. One LRANGE, no Postgres, no
+    presigning — cheap enough to poll, which is the entire point, since the same
+    check against `/posts/feed` would re-serialize and re-sign the whole queue every
+    time to answer "nothing new".
+
+    Marks the user active for the same reason the feed read does: someone watching
+    the feed is a reader whether or not they have pulled anything this minute.
+    """
+    await service.mark_active(redis, str(user.id))
+    post_ids = await service.render_queue_ids(
+        redis, str(user.id), settings.FEED_QUEUE_MAX_SLOTS
+    )
+    return FeedStatus(post_ids=post_ids, capacity=settings.FEED_QUEUE_MAX_SLOTS)
 
 
 @router.post(

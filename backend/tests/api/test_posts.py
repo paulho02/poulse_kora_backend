@@ -284,6 +284,84 @@ class TestPostsFeed:
         ids = [p["id"] for p in resp.json()]
         assert ids == [post_a.id]
 
+    async def test_feed_channel_filter_pages_the_filtered_result(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        """A channel filter must be applied before `skip`/`limit`, not after.
+
+        Filtering a page would make `limit=1` return nothing whenever the head of
+        the queue belongs to another channel, and leave the rest of that channel
+        unreachable at every offset.
+        """
+        user: User = await create_user()
+        channel_a: Channel = await create_channel()
+        channel_b: Channel = await create_channel()
+        wanted = [await create_post(channel=channel_a) for _ in range(2)]
+        noise = await create_post(channel=channel_b)
+        for post in (*wanted, noise):
+            await service.place_post(redis, str(user.id), post.id)
+
+        # `noise` was placed last, so it sits at the head of the queue (LPUSH).
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed",
+            params={"channel_id": channel_a.id, "limit": 1},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert [p["id"] for p in resp.json()] == [wanted[1].id]
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed",
+            params={"channel_id": channel_a.id, "skip": 1, "limit": 1},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert [p["id"] for p in resp.json()] == [wanted[0].id]
+
+
+class TestFeedStatus:
+    async def test_status_empty_queue(self, client: AsyncClient, create_user):
+        user: User = await create_user()
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed/status", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "post_ids": [],
+            "capacity": settings.FEED_QUEUE_MAX_SLOTS,
+        }
+
+    async def test_status_lists_the_queue_in_feed_order(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post_a: Post = await create_post(channel=channel)
+        post_b: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), post_a.id)
+        await service.place_post(redis, str(user.id), post_b.id)
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed/status", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        # Same order the feed itself renders, so a client can compare id-for-id.
+        assert resp.json()["post_ids"] == [post_b.id, post_a.id]
+
+    async def test_status_requires_authentication(self, client: AsyncClient):
+        resp = await client.get(settings.API_PATH + "/posts/feed/status")
+        assert resp.status_code == 401, resp.text
+
 
 class TestCreatePost:
     async def test_create_fails_insufficient_tokens(

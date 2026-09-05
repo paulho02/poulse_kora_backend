@@ -63,3 +63,48 @@ class TestRedisUrlValidator:
             )
         )
         assert "test-host" in str(settings.REDIS_URL)
+
+
+class TestSeenTtl:
+    """The `seen:{post_id}` TTL is derived from the retry deadline, not configured.
+
+    There is no sensible value for it that is not a function of
+    FEED_RETRY_MAX_AGE_SECONDS: the set has to outlive every op still trying to deliver
+    that post, and the one way to get the pair wrong fails silently — the set expires
+    mid-retry, the next fan-out forgets who has had the post, and someone is handed one
+    they already reviewed. Deriving it makes that pairing inexpressible; these tests
+    pin that it stays derived.
+    """
+
+    @staticmethod
+    def _kwargs(**overrides):
+        return _base_kwargs(
+            TEST_DATABASE_URL="postgresql://test-host/apptest",
+            TEST_REDIS_URL="redis://test-host:6379/1",
+            **overrides,
+        )
+
+    def test_tracks_the_retry_deadline(self):
+        settings = Settings(**self._kwargs(FEED_RETRY_MAX_AGE_SECONDS=1000))
+        assert settings.FEED_SEEN_TTL_SECONDS == 2000
+
+    def test_always_outlives_the_retry_deadline(self):
+        # The invariant the old validator used to police, now true by construction —
+        # including for a retry deadline nobody anticipated.
+        for retry_age in (1, 60, 5 * 24 * 60 * 60, 365 * 24 * 60 * 60):
+            settings = Settings(**self._kwargs(FEED_RETRY_MAX_AGE_SECONDS=retry_age))
+            assert settings.FEED_SEEN_TTL_SECONDS > retry_age
+
+    def test_multiple_below_two_is_refused(self):
+        # 1 would make the set expire exactly as the last retry falls due, which is the
+        # same race with the margin removed; 0 would delete the key outright.
+        for bad in (0, 1):
+            with pytest.raises(ValidationError):
+                Settings(**self._kwargs(FEED_SEEN_TTL_RETRY_MULTIPLE=bad))
+
+    def test_setting_the_ttl_directly_is_refused(self):
+        # Not silently ignored: `extra="forbid"` means a deployment still carrying the
+        # old env var fails at startup with the name in the message, rather than
+        # running on a value it believes it set.
+        with pytest.raises(ValidationError, match="FEED_SEEN_TTL_SECONDS"):
+            Settings(**self._kwargs(FEED_SEEN_TTL_SECONDS=7 * 24 * 60 * 60))
