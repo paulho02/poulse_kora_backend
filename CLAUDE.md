@@ -212,6 +212,52 @@ after cloning).
   EXIF is *applied* (`ImageOps.exif_transpose`) before it is stripped: a phone "portrait"
   photo is often a landscape sensor frame plus a rotate-90 tag, which would otherwise be
   stored sideways and measured against the wrong ratio.
+- **Feedback** (`backend/app/api/feedback.py`, `app/models/feedback.py`): in-app feedback, bug
+  reports and feature requests, with optional screenshots/screen recordings. Four things are
+  load-bearing:
+  - **It works signed out.** The form is linked from the login/register screens as well as the
+    profile, because "I can't sign in" is unreportable from inside the app — so this is the one
+    route using `OptionalUser` (`app/deps/users.py`). The route does *not* trust the form: with no
+    user, `is_anonymous` is forced on and `allow_contact` off, so a crafted request cannot attach
+    itself to an account, and a signed-in request whose token expired degrades to an anonymous
+    submission rather than a rejection. `limit_feedback` is likewise the one rate limiter that
+    keys on **client IP** (`request.client.host`, never the spoofable `X-Forwarded-For`) when
+    there is no user id — behind a proxy that throttles more than intended, which is the safe
+    direction.
+  - **Anonymity is the absence of the link.** An anonymous submission stores **no `user_id` at
+    all**, rather than storing one behind a flag — unlike `Post.author_id`, which anonymous posts
+    still carry because fan-out needs it. `is_anonymous` is kept only so a NULL id reads as a
+    choice rather than as missing data.
+  - **No contact address is stored.** `allow_contact` is consent to be reached *as an account*;
+    `Feedback.contact_email` is a **property** resolving off the linked `user` at serialization
+    time (hence `lazy="selectin"` on that relationship — a lazy load in a property read during
+    serialization is a hard error under async). Deliberately not a snapshotted column: `user_id`
+    is `ON DELETE SET NULL`, so erasing an account already cuts the link, whereas a copied address
+    would outlive the erasure and leave stray PII in this table. It also can't go stale. The
+    report itself survives the erasure — only the ability to answer it goes.
+  - **`locale` stays a column and is not derivable from the account.** There is deliberately no
+    `User.locale` in this codebase (see Localization below), and the rows that most need it are
+    the anonymous ones, which have no user to read anything from.
+  - **`status` (`FEEDBACK_STATUSES`: `new`/`viewed`/`noted`/`done`, `new` on arrival) is internal
+    triage state with no logic behind it yet** — nothing reads or writes it, there is no
+    transition rule and no route sets it; it is exposed read-only on the superuser listing. A
+    submitter cannot set it, and not because it is filtered: `feedback_create_form` is an explicit
+    allow-list of form fields and the route builds the row itself, so `status`,
+    `user_agreed_data_saving_at`, `user_id`, `locale` and `created` are all simply unreachable
+    from a request. Kept a plain string, not a DB enum, so adding a state later is a value rather
+    than a migration; no index until something actually filters on it.
+  - **`user_agreed_data_saving_at` is what makes the row lawful, and it is server-stamped.**
+    Without `consent=true` nothing is written (`feedback_consent_required`) and the column is NOT
+    NULL, so a row existing *is* the evidence that consent preceded it; the client never sends a
+    time it could backdate.
+  - **The two fixed post ratios must not apply here**, which is the whole reason
+    `process_feedback_upload` exists beside `process_upload` rather than calling it: a screenshot
+    is whatever shape the reporter's screen is, and a screen recording center-cropped to 4:5 loses
+    the bug. Images are stripped and downscaled without a ratio check (and a PNG stays PNG — JPEG
+    ringing lands on exactly the text being reported); video runs the same transcode with
+    `crop_to_ratio=False`. EXIF is still stripped, because a submission can be anonymous.
+  Read back via superuser-only `GET /feedback` (there is no per-user view — a submission may
+  carry no user to scope one to).
 - **Rate limiting** (`backend/app/core/rate_limit.py`, `app/deps/rate_limit.py`): feed writes
   (create post, forward, drop) share **one per-user budget** — `INTERACTION_RATE_LIMIT` hits per
   sliding `INTERACTION_RATE_WINDOW_SECONDS` window, enforced by a Lua sliding-window log in Redis

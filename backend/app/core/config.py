@@ -362,6 +362,32 @@ class Settings(BaseSettings):
     # real authoring limit.
     POST_BLOCKS_MAX_COUNT: int = 40
 
+    # --- feedback ---
+    # User-submitted feedback / bug reports (app/models/feedback.py). Attachments go
+    # through the same validation module as post media but on their own path
+    # (`process_feedback_upload`), because the two fixed post ratios must NOT apply
+    # here: a screenshot is whatever shape the reporter's screen is, and cropping a
+    # screen recording to 4:5 would throw away the part being reported.
+    FEEDBACK_MESSAGE_MAX_LENGTH: int = 4000
+    FEEDBACK_MEDIA_MAX_FILES: int = 5
+    FEEDBACK_MEDIA_MAX_TOTAL_BYTES: int = 40 * 1024 * 1024
+    FEEDBACK_IMAGE_MAX_BYTES: int = 12 * 1024 * 1024  # upload cap, pre-re-encode
+    FEEDBACK_IMAGE_MAX_DIMENSION_PX: int = 2048  # longest side after re-encode
+    FEEDBACK_VIDEO_MAX_BYTES: int = 25 * 1024 * 1024
+    # More generous than POST_VIDEO_MAX_DURATION_SECONDS: reproducing a bug on
+    # camera takes longer than a post is meant to be.
+    FEEDBACK_VIDEO_MAX_DURATION_SECONDS: int = 120
+    # Deliberately reuses the POST_* allow-lists rather than defining its own: what
+    # may be uploaded here is a fact about what Pillow/ffmpeg can decode, which is
+    # the same question in both places. The *ratio* rule is what differs, and that
+    # lives in process_feedback_upload, not in a content-type list.
+    #
+    # Feedback is submittable while signed out (it is reachable from the login
+    # screen), so this budget is keyed by user id when there is one and by client IP
+    # otherwise - see app/deps/rate_limit.py: limit_feedback. Set to 0 to disable.
+    FEEDBACK_RATE_LIMIT: int = 5
+    FEEDBACK_RATE_WINDOW_SECONDS: float = 3600.0
+
     BACKEND_CORS_ORIGINS: list[str] = []
 
     TEST_DATABASE_URL: PostgresDsn | None = None

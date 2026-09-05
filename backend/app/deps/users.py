@@ -251,3 +251,16 @@ async def get_verified_user(user: CurrentUser) -> UserModel:
 
 
 CurrentVerifiedUser = Annotated[UserModel, Depends(get_verified_user)]
+
+# For routes that work signed in *and* signed out, and behave differently
+# depending. Currently only feedback (app/api/feedback.py), which is linked from
+# the login screen precisely so "I can't sign in" is reportable.
+#
+# `optional=True` makes fastapi-users yield None instead of raising for a missing
+# token - and also for an *expired or malformed* one, which is the behaviour to be
+# aware of: a route using this must never treat None as "definitely a stranger" in
+# a way that would silently downgrade a signed-in user's request. Feedback's
+# handling of that is to force anonymity, which fails in the safe direction.
+OptionalUser = Annotated[
+    UserModel | None, Depends(fastapi_users.current_user(active=True, optional=True))
+]

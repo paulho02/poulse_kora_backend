@@ -1,7 +1,10 @@
-"""Route dependency enforcing the per-user interaction budget.
+"""Route dependencies enforcing the per-user budgets (see app/core/rate_limit.py).
 
-Attach it to a route with `dependencies=[Depends(limit_interactions)]` rather than
+Attach one to a route with `dependencies=[Depends(limit_interactions)]` rather than
 as a handler argument — nothing in the handler needs its result.
+
+`limit_feedback` is the odd one out: its route works signed out, so it keys on the
+client IP when there is no user id. Everything else here keys on the user alone.
 
 It runs *before* the handler body, so an interaction that goes on to fail validation
 (unknown channel, post no longer in the queue) still spends a slot. That is
@@ -12,13 +15,13 @@ be cheap enough to sit in front of the work rather than behind it.
 import math
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
 from app.core.config import settings
 from app.core.errors import api_error
 from app.core.rate_limit import consume
 from app.deps.redis import CurrentRedis
-from app.deps.users import CurrentUser, CurrentVerifiedUser
+from app.deps.users import CurrentUser, CurrentVerifiedUser, OptionalUser
 
 # All feed writes (create post, forward, drop) share this one budget, so a user
 # cannot dodge it by alternating between endpoints.
@@ -28,6 +31,10 @@ INTERACTION_SCOPE = "interact"
 # current password), so it needs its own budget rather than sharing one that a
 # burst of ordinary posting/reviewing would also draw down.
 PASSWORD_CHANGE_SCOPE = "change_password"
+
+# Feedback submission, which is reachable signed out - so this is the one scope
+# whose identity may be a client IP rather than a user id. See `limit_feedback`.
+FEEDBACK_SCOPE = "feedback"
 
 
 async def limit_interactions(user: CurrentVerifiedUser, redis: CurrentRedis) -> None:
@@ -97,6 +104,63 @@ async def limit_password_change(user: CurrentUser, redis: CurrentRedis) -> None:
         retry_after=retry_after,
         limit=settings.PASSWORD_CHANGE_RATE_LIMIT,
         window_seconds=settings.PASSWORD_CHANGE_RATE_WINDOW_SECONDS,
+    )
+    exc.headers = {"Retry-After": str(retry_after)}
+    raise exc
+
+
+async def limit_feedback(
+    request: Request, user: OptionalUser, redis: CurrentRedis
+) -> None:
+    """Spend one feedback-submission slot, or raise 429 with the wait in seconds.
+
+    Its own budget, and the only one here that has to work for a caller with no
+    account: the feedback form is reachable from the login screen (see
+    app/api/feedback.py), so there is frequently no user id to key on. Signed in it
+    keys on the user id like every other limiter; signed out it falls back to the
+    client IP.
+
+    Two things about that fallback are deliberate:
+
+    - **`request.client.host`, not `X-Forwarded-For`.** A forwarded-for header is
+      client-supplied unless a trusted proxy is known to overwrite it, and trusting
+      it here would turn the limit into an opt-out (send a fresh fake IP per
+      request). The cost of not trusting it is the opposite error: behind a proxy
+      every submission looks like one host and shares one budget, which throttles
+      more than intended rather than less. If a proxy in front of this is ever
+      trusted, that is the place to fix it - not here.
+    - **A signed-in user is keyed by id, so signing out is not a way around a spent
+      budget** - and, conversely, one busy office network cannot exhaust an
+      identified user's own allowance.
+
+    Superusers are exempt, matching the other limiters. Setting `FEEDBACK_RATE_LIMIT`
+    to 0 disables it.
+    """
+    if settings.FEEDBACK_RATE_LIMIT <= 0 or (user is not None and user.is_superuser):
+        return
+
+    if user is not None:
+        identity = str(user.id)
+    else:
+        identity = f"ip:{request.client.host if request.client else 'unknown'}"
+
+    retry_ms = await consume(
+        redis,
+        FEEDBACK_SCOPE,
+        identity,
+        settings.FEEDBACK_RATE_LIMIT,
+        settings.FEEDBACK_RATE_WINDOW_SECONDS,
+    )
+    if retry_ms <= 0:
+        return
+
+    retry_after = max(1, math.ceil(retry_ms / 1000))
+    exc = api_error(
+        429,
+        "rate_limited",
+        retry_after=retry_after,
+        limit=settings.FEEDBACK_RATE_LIMIT,
+        window_seconds=settings.FEEDBACK_RATE_WINDOW_SECONDS,
     )
     exc.headers = {"Retry-After": str(retry_after)}
     raise exc

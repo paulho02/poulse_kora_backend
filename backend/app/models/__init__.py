@@ -1,6 +1,7 @@
 # Import all models here so alembic can discover them
 from app.models.channel import Channel
 from app.models.channel_subscription import ChannelSubscription
+from app.models.feedback import Feedback, FeedbackMedia
 from app.models.item import Item
 from app.models.oauth_account import OAuthAccount
 from app.models.post import Post

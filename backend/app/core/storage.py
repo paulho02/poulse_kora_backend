@@ -74,6 +74,7 @@ _EXTENSIONS = {
 
 PROFILE_PICTURE_PREFIX = "profile-pictures"
 POST_MEDIA_PREFIX = "post-media"
+FEEDBACK_MEDIA_PREFIX = "feedback-media"
 
 
 class StorageError(RuntimeError):
@@ -103,6 +104,20 @@ def post_media_key(content_type: str) -> str:
     """A flat, random key. Carries no post id and no author id on purpose - see
     point 2 in the module docstring."""
     return f"{POST_MEDIA_PREFIX}/{uuid.uuid4()}.{_extension(content_type)}"
+
+
+def feedback_media_key(content_type: str) -> str:
+    """Flat and random for the same reason as `post_media_key`, and here it is not
+    even a judgement call: a feedback submission can be *sent anonymously*, in which
+    case the row carries no `user_id` at all (see app/models/feedback.py). A key
+    derived from the submitter would put back exactly the link the anonymous option
+    exists to remove.
+
+    Its own prefix rather than sharing POST_MEDIA_PREFIX purely so a bucket listing
+    stays readable and a retention rule can be scoped to feedback alone - the two
+    kinds of object have quite different lifetimes.
+    """
+    return f"{FEEDBACK_MEDIA_PREFIX}/{uuid.uuid4()}.{_extension(content_type)}"
 
 
 class ObjectStorage:

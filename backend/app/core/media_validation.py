@@ -1,9 +1,10 @@
 """Upload validation, re-encoding and metadata stripping for everything users upload.
 
 **Nothing reaches object storage without passing through here**: post attachments
-via `process_upload` (before app/api/posts.py spends a token or writes a row) and
-profile pictures via `process_profile_picture`. Two rules hold for both, and they
-are the reason this module exists:
+via `process_upload` (before app/api/posts.py spends a token or writes a row),
+profile pictures via `process_profile_picture`, and feedback attachments via
+`process_feedback_upload`. Two rules hold for all three, and they are the reason
+this module exists:
 
 - The client's declared `content_type` is never trusted at face value - only as a
   coarse image/video split. The real check is what Pillow/ffprobe actually make of
@@ -30,6 +31,11 @@ Images take the opposite route on both counts: the *client* crops them (only it 
 show the author what the crop is throwing away) and this module merely rejects a
 shape that is not one of the two allowed ones. Nothing here ever crops an image
 silently - a wrong shape is an error, not something to guess at.
+
+The fixed ratios are the one rule that is **specific to posts** rather than to
+uploads in general, which is why `process_feedback_upload` exists beside
+`process_upload` instead of calling it: a screenshot has whatever shape the
+reporter's screen has, and a screen recording cropped to 4:5 loses the bug.
 """
 
 import asyncio
@@ -135,6 +141,95 @@ async def process_upload(
     if file.content_type in settings.POST_VIDEO_ALLOWED_CONTENT_TYPES:
         return await _process_video(file, orientation)
     raise api_error(400, "post_media_invalid_type")
+
+
+async def process_feedback_upload(file: UploadFile) -> ProcessedMedia:
+    """Validate and re-encode one attachment on a feedback submission.
+
+    Same two rules as everything else in this module - the declared content type is
+    only a coarse image/video split, and the stored bytes are re-encoded with their
+    metadata dropped - but deliberately **not** `process_upload`, for one reason:
+    the two fixed post ratios must not apply here. A screenshot is whatever shape
+    the reporter's screen is, so validating it against 4:3/4:5 would reject almost
+    every real bug report; and a screen recording center-cropped to 4:5 would have
+    the thing being reported cut off the sides. So an image is only stripped and
+    downscaled, and a video is transcoded with the crop filter left out
+    (`crop_to_ratio=False`).
+
+    The EXIF strip is still worth having even though a screenshot carries none: a
+    reporter may well photograph a broken screen with another phone, and a feedback
+    row can be submitted anonymously - GPS in that photo would undo the anonymity
+    the submitter chose, exactly as it would on an anonymous post.
+    """
+    if file.content_type in settings.POST_IMAGE_ALLOWED_CONTENT_TYPES:
+        return await _process_feedback_image(file)
+    if file.content_type in settings.POST_VIDEO_ALLOWED_CONTENT_TYPES:
+        data = await file.read()
+        if len(data) > settings.FEEDBACK_VIDEO_MAX_BYTES:
+            raise api_error(400, "feedback_media_too_large")
+        return await process_video_bytes(
+            data,
+            crop_to_ratio=False,
+            max_duration_seconds=settings.FEEDBACK_VIDEO_MAX_DURATION_SECONDS,
+            error_prefix="feedback_media",
+        )
+    raise api_error(400, "feedback_media_invalid_type")
+
+
+async def _process_feedback_image(file: UploadFile) -> ProcessedMedia:
+    """`_process_image` minus the aspect-ratio check - see
+    `process_feedback_upload` for why that one rule cannot carry over."""
+    data = await file.read()
+    if len(data) > settings.FEEDBACK_IMAGE_MAX_BYTES:
+        raise api_error(400, "feedback_media_too_large")
+
+    try:
+        probe = Image.open(io.BytesIO(data))
+        probe.verify()
+    except Exception:
+        raise api_error(400, "feedback_media_invalid_type") from None
+
+    img = Image.open(io.BytesIO(data))  # verify() leaves its parser unusable
+    img.load()
+    source_format = img.format
+    # Applied before it is stripped, so the stored image is the right way up - a
+    # phone photo of a broken screen is the case this matters for.
+    img = ImageOps.exif_transpose(img) or img
+
+    has_alpha = img.mode in ("RGBA", "LA") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+    # Screenshots are routinely PNG, and a PNG screenshot re-encoded as JPEG picks
+    # up ringing around exactly the text and UI edges the reporter is pointing at -
+    # so lossless is kept whenever the source was, rather than only for alpha.
+    save_format = source_format if source_format in ("PNG", "WEBP") else "JPEG"
+    if save_format == "JPEG":
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+    else:
+        target_mode = "RGBA" if has_alpha else "RGB"
+        if img.mode != target_mode:
+            img = img.convert(target_mode)
+
+    max_dim = settings.FEEDBACK_IMAGE_MAX_DIMENSION_PX
+    if img.width > max_dim or img.height > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+
+    buffer = io.BytesIO()
+    # No `exif=`/`icc_profile=` forwarded - that omission is the metadata strip.
+    save_kwargs = {"quality": 90} if save_format == "JPEG" else {}
+    img.save(buffer, format=save_format, **save_kwargs)
+    out = buffer.getvalue()
+
+    return ProcessedMedia(
+        media_type="image",
+        content_type=_IMAGE_SAVE_FORMAT_CONTENT_TYPE[save_format],
+        data=out,
+        size_bytes=len(out),
+        duration_seconds=None,
+        width=img.width,
+        height=img.height,
+    )
 
 
 async def process_profile_picture(file: UploadFile) -> tuple[bytes, str]:
@@ -279,7 +374,12 @@ async def _process_video(file: UploadFile, orientation: str | None) -> Processed
 
 
 async def process_video_bytes(
-    data: bytes, orientation: str | None = None
+    data: bytes,
+    orientation: str | None = None,
+    *,
+    crop_to_ratio: bool = True,
+    max_duration_seconds: int | None = None,
+    error_prefix: str = "post_media",
 ) -> ProcessedMedia:
     """The video half of `process_upload`, over bytes already in hand.
 
@@ -292,6 +392,14 @@ async def process_video_bytes(
     about what a client may upload, and applying it to bytes already accepted
     under an older (or larger) one would make the backfill refuse precisely the
     rows it exists to repair.
+
+    `crop_to_ratio=False` runs the same transcode with the aspect-ratio crop left
+    out, for the one caller whose video is not a post: a feedback screen recording
+    (`process_feedback_upload`). Everything else the transcode does - H.264/AAC so
+    every target can decode it, the metadata strip, faststart, the poster frame -
+    is wanted there too; only the crop would destroy the thing being reported.
+    `error_prefix` picks which family of error codes the client sees, since
+    "post_media_video_too_long" is nonsense on a feedback screen.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         src_path = Path(tmp_dir) / "in"
@@ -299,24 +407,33 @@ async def process_video_bytes(
 
         probe = await _probe_video(src_path)
         if probe is None:
-            raise api_error(400, "post_media_invalid_type")
+            raise api_error(400, f"{error_prefix}_invalid_type")
         duration, src_width, src_height = probe
-        if duration > settings.POST_VIDEO_MAX_DURATION_SECONDS:
-            raise api_error(400, "post_media_video_too_long")
+        max_duration = (
+            settings.POST_VIDEO_MAX_DURATION_SECONDS
+            if max_duration_seconds is None
+            else max_duration_seconds
+        )
+        if duration > max_duration:
+            raise api_error(400, f"{error_prefix}_video_too_long")
 
-        if orientation not in ORIENTATIONS:
-            orientation = nearest_orientation(src_width / src_height)
-        target_ratio = ratio_for_orientation(orientation)
+        target_ratio: float | None = None
+        if crop_to_ratio:
+            if orientation not in ORIENTATIONS:
+                orientation = nearest_orientation(src_width / src_height)
+            target_ratio = ratio_for_orientation(orientation)
 
         out_path = Path(tmp_dir) / "out.mp4"
-        await _transcode_video(src_path, out_path, target_ratio)
+        await _transcode_video(
+            src_path, out_path, target_ratio, error_prefix=error_prefix
+        )
         out_data = out_path.read_bytes()
 
         # Measured, not computed: the crop and scale filters both round to even
         # pixel counts, so the exact output size is ffmpeg's business, not ours.
         out_probe = await _probe_video(out_path)
         if out_probe is None:
-            raise api_error(400, "post_media_invalid_type")
+            raise api_error(400, f"{error_prefix}_invalid_type")
         _, width, height = out_probe
 
         poster = await _extract_poster(out_path, duration)
@@ -404,9 +521,16 @@ async def _probe_video(path: Path) -> tuple[float, int, int] | None:
     return duration, width, height
 
 
-async def _transcode_video(src: Path, dst: Path, target_ratio: float) -> None:
+async def _transcode_video(
+    src: Path,
+    dst: Path,
+    target_ratio: float | None,
+    *,
+    error_prefix: str = "post_media",
+) -> None:
     """Re-encode `src` into `dst` as H.264/AAC mp4, center-cropped to
-    `target_ratio` and normalized for playback everywhere.
+    `target_ratio` (or uncropped, when it is None) and normalized for playback
+    everywhere.
 
     A full transcode, deliberately, rather than the cheaper `-c copy` remux this
     used to do. Phone cameras default to **HEVC/H.265** (iPhone "High
@@ -423,7 +547,10 @@ async def _transcode_video(src: Path, dst: Path, target_ratio: float) -> None:
       here, in a pass that was already running. `crop` is written as an
       expression over ffmpeg's own `iw`/`ih` rather than numbers computed from a
       probe, so the filter stays correct whatever the source turns out to be, and
-      it defaults to a centered crop.
+      it defaults to a centered crop. `target_ratio=None` drops the crop filter
+      entirely and keeps everything else - that is the feedback path, where the
+      clip is evidence of a bug rather than a post, and cropping it to one of the
+      two feed shapes would cut away the part worth seeing.
     - `-movflags +faststart` moves the `moov` index to the front, so progressive
       HTTP playback works on the first read instead of forcing the player to
       range-seek to the tail of the file first.
@@ -438,7 +565,13 @@ async def _transcode_video(src: Path, dst: Path, target_ratio: float) -> None:
       carried over, which is what the anonymity rule needs.
     """
     max_dim = settings.POST_VIDEO_MAX_DIMENSION_PX
-    ratio = f"{target_ratio:.6f}"
+    # Center-crop to the target shape (min() keeps the crop inside the frame
+    # whichever way the source is off), then fit the result inside a max_dim box.
+    # force_divisible_by=2 because H.264 requires even dimensions.
+    crop_filter = ""
+    if target_ratio is not None:
+        ratio = f"{target_ratio:.6f}"
+        crop_filter = f"crop=w='min(iw,ih*{ratio})':h='min(ih,iw/{ratio})',"
     returncode, _, stderr = await _run_subprocess(
         "ffmpeg",
         "-y",
@@ -446,11 +579,8 @@ async def _transcode_video(src: Path, dst: Path, target_ratio: float) -> None:
         str(src),
         "-map_metadata",
         "-1",
-        # Center-crop to the target shape (min() keeps the crop inside the frame
-        # whichever way the source is off), then fit the result inside a max_dim
-        # box. force_divisible_by=2 because H.264 requires even dimensions.
         "-vf",
-        f"crop=w='min(iw,ih*{ratio})':h='min(ih,iw/{ratio})',"
+        f"{crop_filter}"
         f"scale=w='min(iw,{max_dim})':h='min(ih,{max_dim})'"
         ":force_original_aspect_ratio=decrease:force_divisible_by=2",
         "-c:v",
@@ -479,7 +609,7 @@ async def _transcode_video(src: Path, dst: Path, target_ratio: float) -> None:
         timeout=_TRANSCODE_TIMEOUT_SECONDS,
     )
     if returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
-        raise api_error(400, "post_media_invalid_type")
+        raise api_error(400, f"{error_prefix}_invalid_type")
 
 
 async def _extract_poster(path: Path, duration: float) -> bytes | None:
