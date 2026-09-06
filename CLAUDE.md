@@ -150,6 +150,22 @@ after cloning).
   recipients per operation, so serving those posts on demand would be free reach and an
   economy change, not a UX one. A feed that runs dry with nothing queued is the economy
   working; see the todo.
+- **A post's score is disclosed once, after the verdict** (`POST /posts/{id}/review`):
+  `post_forwarded_count` and `post_reviewed_count` (everyone who forwarded *or* dropped
+  it — the denominator, so a client can say "2 of 9" rather than a bare count), both
+  including the review that just happened. `Post.forwarded_count`/`dropped_count` are
+  **deliberately absent from `PostRead`**, so no read route carries them: a reader who
+  can see that everyone else forwarded a post is voting on the crowd rather than on the
+  post, and hiding it client-side would leave the raw API as the way around that. That is
+  the whole rule — the counters themselves are old, already maintained by `review_post`
+  and already summed into `GET /stats`, so this costs no column, no index and no extra
+  query. The two knock-on details: the post's counters are incremented **SQL-side**
+  (`post.forwarded_count = Post.forwarded_count + 1`) rather than in Python, because a
+  post is fanned out to `FEED_FANOUT` readers at once and its row is the one here that
+  concurrent requests actually contend for; and that leaves the attributes expired, which
+  an async session cannot resolve lazily, hence the explicit `session.refresh(post, [...])`
+  after the commit. Note what is *not* claimed: this is reviewers, not viewers — someone
+  holding the post in their queue is uncounted, and there is no delivery counter.
 - **Google sign-in** (`backend/app/api/google_auth.py`): an **ID-token** flow, not fastapi-users'
   `get_oauth_router` — that is a browser redirect flow the mobile app has no deep links for, and
   its `associate_by_email` linking is silent, leaving nowhere for the confirmation step. The client

@@ -1607,6 +1607,9 @@ class TestReviewPost:
         data = resp.json()
         assert data["reviewed_count"] == 1
         assert data["token_balance"] == 1  # earned one for reviewing
+        # The post's own score, disclosed only here and counting this review.
+        assert data["post_forwarded_count"] == 1
+        assert data["post_reviewed_count"] == 1
 
         await db.refresh(post)
         await db.refresh(user)
@@ -1631,7 +1634,11 @@ class TestReviewPost:
             json={"kind": "drop"},
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["token_balance"] == 1
+        data = resp.json()
+        assert data["token_balance"] == 1
+        # A drop counts towards the post's reviewed total but not its forwards.
+        assert data["post_forwarded_count"] == 0
+        assert data["post_reviewed_count"] == 1
         await db.refresh(post)
         assert post.dropped_count == 1
         assert await service.operation_queue_len(redis) == 0  # no re-injection
@@ -1687,6 +1694,7 @@ class TestReviewPost:
     async def test_redelivery_after_review_is_already_reviewed_conflict(
         self,
         client: AsyncClient,
+        db: AsyncSession,
         redis: Redis,
         create_user,
         create_channel,
@@ -1724,6 +1732,65 @@ class TestReviewPost:
         assert second.json()["detail"]["error"] == "already_reviewed"
         # Still removed from the queue by the failed attempt's claim.
         assert await service.render_queue_ids(redis, str(user.id), 10) == []
+        # The score counts *reviewers*, not encounters: the refused second review
+        # moved neither counter. The increment shares the rejected transaction, so
+        # the rollback is what enforces this - it is not a separate check.
+        await db.refresh(post)
+        assert post.forwarded_count == 1
+        assert post.dropped_count == 0
+
+    async def test_score_counts_other_reviewers_and_is_never_read_before(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        """The score a reviewer is shown reflects everyone who reviewed before them -
+        and none of the read routes hand it over beforehand, which is the whole
+        point: a reader must not be able to check the crowd through the raw API."""
+        author: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel, author=author)
+        early: User = await create_user()
+        await review(db, early, post, "forward")
+        other: User = await create_user()
+        await review(db, other, post, "drop")
+
+        user: User = await create_user()
+        await service.place_post(redis, str(user.id), post.id)
+
+        # Both routes that can render this post to its reviewer, before the verdict.
+        queued = await client.get(
+            settings.API_PATH + "/posts/feed", headers=get_jwt_header(user)
+        )
+        assert queued.status_code == 200, queued.text
+        detail = await client.get(
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
+        )
+        assert detail.status_code == 200, detail.text
+        for body in (queued.json()[0], detail.json()):
+            assert "forwarded_count" not in body
+            assert "dropped_count" not in body
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "forward"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["post_forwarded_count"] == 2  # the early forward plus this one
+        assert data["post_reviewed_count"] == 3  # ...and the drop in between
+
+        # Nor afterwards, on the author's own list or the reviewed history.
+        mine = await client.get(
+            settings.API_PATH + "/posts/mine", headers=get_jwt_header(author)
+        )
+        assert mine.status_code == 200, mine.text
+        assert "forwarded_count" not in mine.json()[0]
+        history = await client.get(
+            settings.API_PATH + "/posts/reviewed", headers=get_jwt_header(user)
+        )
+        assert history.status_code == 200, history.text
+        assert "forwarded_count" not in history.json()[0]["post"]
 
 
 class TestDeliveryExclusions:

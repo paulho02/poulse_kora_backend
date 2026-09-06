@@ -77,8 +77,12 @@ class PostRead(BaseModel):
     blocks: list[PostBlockRead]
     is_anonymous: bool
     author: PostAuthor
-    forwarded_count: int
-    dropped_count: int
+    # Deliberately no forwarded/dropped counts here. How a post has fared so far is
+    # withheld until the viewer has committed to their own verdict - a reader who
+    # can see that everyone else forwarded it is voting on the crowd, not on the
+    # post, and the raw API would be the way around a client that merely hid it.
+    # The numbers are returned once, by POST /posts/{id}/review - see
+    # PostReviewResult in app/schemas/post_review.py.
     subscription_kind: str | None
     created: datetime
 

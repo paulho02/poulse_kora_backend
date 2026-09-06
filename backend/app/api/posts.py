@@ -98,8 +98,6 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
         ],
         is_anonymous=post.is_anonymous,
         author=author,
-        forwarded_count=post.forwarded_count,
-        dropped_count=post.dropped_count,
         subscription_kind=post.subscription_kind,
         created=post.created,
     )
@@ -595,6 +593,10 @@ async def review_post(
     Rate-limited per user (see app/deps/rate_limit.py): swiping faster than the limit
     isn't reading, and a token is earned per review, so the cap also stops someone
     farming tokens by machine-gunning drops.
+
+    This is also the only route that discloses how the post has fared
+    (`post_forwarded_count` / `post_reviewed_count`) - after the verdict, so the
+    crowd cannot cast it. Keep it out of PostRead.
     """
     post = await session.get(Post, post_id)
     if not post:
@@ -609,11 +611,16 @@ async def review_post(
 
     session.add(PostReview(user_id=user.id, post_id=post_id, kind=review_in.kind))
     user.reviewed_count += 1
+    # The post's counters are incremented SQL-side, unlike the user's: a post is
+    # fanned out to FEED_FANOUT readers at once, so its row is the one here that
+    # concurrent requests actually contend for, and a read-modify-write in Python
+    # silently loses increments. Cheap insurance now that the numbers are shown
+    # back to the reviewer rather than only summed into stats.
     if review_in.kind == "forward":
-        post.forwarded_count += 1
+        post.forwarded_count = Post.forwarded_count + 1
         user.forwarded_count += 1
     else:
-        post.dropped_count += 1
+        post.dropped_count = Post.dropped_count + 1
         user.dropped_count += 1
     try:
         await session.commit()
@@ -626,6 +633,11 @@ async def review_post(
         # expired early, or never seeded - see FEED_EXCLUDE_SEEN in CLAUDE.md).
         log.warning("post.review_rejected", post_id=post_id, reason="already_reviewed")
         raise api_error(409, "already_reviewed") from None
+
+    # The SQL-expression increments above leave those two attributes expired, and
+    # an async session cannot load them lazily on attribute access - re-read them
+    # explicitly (one indexed row, two ints) so the result can report them.
+    await session.refresh(post, ["forwarded_count", "dropped_count"])
 
     token_balance = await service.earn_token(redis, str(user.id))
 
@@ -650,4 +662,6 @@ async def review_post(
         review_gate=settings.RELAY_REVIEW_GATE,
         unlocked=is_review_gate_unlocked(user),
         token_balance=token_balance,
+        post_forwarded_count=post.forwarded_count,
+        post_reviewed_count=post.forwarded_count + post.dropped_count,
     )
