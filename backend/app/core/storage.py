@@ -52,6 +52,7 @@ re-download of every image and poster. The cost is that a URL is only guaranteed
 is why the two settings are set with a wide gap between them.
 """
 
+import time
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -60,7 +61,9 @@ import httpx
 
 from app.core import sigv4
 from app.core.config import settings
-from app.core.logger import logger
+from app.core.logger import get_logger
+
+log = get_logger(__name__)
 
 # Enough to keep a bucket listing human-readable; the extension is cosmetic, since
 # what a client is served is decided by the object's stored Content-Type.
@@ -229,7 +232,10 @@ class ObjectStorage:
         try:
             await self._request("DELETE", key)
         except StorageError:
-            logger.warning("failed to delete object %s", key, exc_info=True)
+            # WARNING, not ERROR: nothing the user did failed. What it leaves
+            # behind is an object nobody references and a bucket that grows
+            # quietly, which is exactly the kind of thing only a log notices.
+            log.warning("storage.delete_failed", object_key=key, exc_info=True)
 
     async def ensure_bucket(self) -> None:
         """Create the bucket if it is missing, when STORAGE_AUTO_CREATE_BUCKET is
@@ -240,14 +246,19 @@ class ObjectStorage:
         if not settings.STORAGE_AUTO_CREATE_BUCKET:
             return
         try:
-            await self._request("PUT", None)
-            logger.info("created object storage bucket %s", settings.STORAGE_BUCKET)
+            await self._request("PUT", None, warn_on_error=False)
+            log.info("storage.bucket_created", bucket=settings.STORAGE_BUCKET)
         except StorageError as exc:
             # Already existing is the normal case on every boot after the first.
             # S3 spells it BucketAlreadyOwnedByYou (200/409 depending on region
             # rules); MinIO returns 409.
             if "409" in str(exc) or "BucketAlreadyOwnedByYou" in str(exc):
                 return
+            # `warn_on_error=False` above, because the 409 this swallows is the
+            # normal case on every boot after the first and would otherwise put a
+            # WARNING in the startup log of every single deploy. A real failure
+            # still gets a line - this one - before it takes the process down.
+            log.error("storage.bucket_create_failed", bucket=settings.STORAGE_BUCKET)
             raise
 
     # --- plumbing ----------------------------------------------------------
@@ -271,6 +282,7 @@ class ObjectStorage:
         *,
         payload: bytes | None = None,
         headers: dict[str, str] | None = None,
+        warn_on_error: bool = True,
     ) -> httpx.Response:
         self._require_configured()
         url, host, canonical_uri = self._address(
@@ -287,17 +299,47 @@ class ObjectStorage:
             payload=payload,
             headers=headers,
         )
+        started = time.perf_counter()
         try:
             response = await self._http().request(
                 method, url, content=payload, headers=request_headers
             )
         except httpx.HTTPError as exc:
+            # The bucket being unreachable is invisible from the outside - the
+            # route turns it into a generic 503 - so this line is the only place
+            # the actual transport error is ever recorded.
+            if warn_on_error:
+                log.warning(
+                    "storage.request_failed",
+                    http_method=method,
+                    object_key=key,
+                    error=str(exc),
+                )
             raise StorageError(f"{method} {key or '<bucket>'} failed: {exc}") from exc
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
         if response.status_code >= 400:
+            if warn_on_error:
+                log.warning(
+                    "storage.request_failed",
+                    http_method=method,
+                    object_key=key,
+                    status=response.status_code,
+                    duration_ms=elapsed_ms,
+                )
             raise StorageError(
                 f"{method} {key or '<bucket>'} -> {response.status_code}: "
                 f"{response.text[:500]}"
             )
+        # DEBUG: one per attachment on every upload. Kept because upload latency
+        # is the bucket's, not ours, and this is what tells the two apart.
+        log.debug(
+            "storage.request",
+            http_method=method,
+            object_key=key,
+            status=response.status_code,
+            duration_ms=elapsed_ms,
+            bytes=len(payload) if payload else 0,
+        )
         return response
 
 

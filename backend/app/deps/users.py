@@ -1,4 +1,3 @@
-import logging
 import uuid
 from typing import Annotated
 
@@ -18,6 +17,7 @@ from app.core import email_verification as ev
 from app.core.config import settings
 from app.core.email import send_email
 from app.core.errors import api_error
+from app.core.logger import bind_request_context, get_logger
 from app.core.password_policy import strength_violations
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import get_redis
@@ -25,7 +25,7 @@ from app.feed.service import earn_token
 from app.models.oauth_account import OAuthAccount
 from app.models.user import User as UserModel
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 bearer_transport = BearerTransport(tokenUrl=f"{settings.API_PATH}/auth/jwt/login")
 
@@ -86,6 +86,15 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         an immediate retry via `/auth/email-verification/resend`.
         """
         await earn_token(self._redis, str(user.id), settings.FEED_STARTING_TOKENS)
+        # Signups are the one number nobody wants to have to query the database
+        # for, and this is also where a broken registration path shows up as a
+        # gap rather than as an error.
+        log.info(
+            "user.registered",
+            user_id=str(user.id),
+            via="google" if user.oauth_accounts else "password",
+            starting_tokens=settings.FEED_STARTING_TOKENS,
+        )
         # `not user.is_verified` skips the code for Google signups, which arrive here
         # already verified (oauth_callback with is_verified_by_default) - Google has
         # confirmed the address, so mailing a code would be asking the user to prove
@@ -96,11 +105,32 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
             try:
                 await send_email(user.email, subject, body)
             except Exception:
-                logging.getLogger(__name__).exception(
-                    "Failed to send verification email to %s on register", user.email
+                # No address in the line: an email is personal data and the user
+                # id resolves to one for whoever is entitled to look. This is an
+                # ERROR because a user who never gets the code is stuck for good
+                # (re-registering only yields `user_already_exists`).
+                log.exception(
+                    "email.verification_send_failed",
+                    user_id=str(user.id),
+                    on="register",
                 )
             else:
                 await ev.start_resend_cooldown(self._redis, str(user.id))
+
+    async def on_after_login(
+        self,
+        user: UserModel,
+        request: Request | None = None,
+        response=None,
+    ) -> None:
+        """The only place a successful password login is recorded.
+
+        Google sign-in does not pass through here - `POST /auth/google` mints its
+        token directly - so it logs `auth.google_signin` itself.
+        """
+        # `via`, not `method`: the request context already carries the HTTP
+        # method, and a field of the same name would shadow it on this line.
+        log.info("auth.login", user_id=str(user.id), via="password")
 
     async def authenticate(self, credentials):
         """Tell a Google account apart from a wrong password.
@@ -124,9 +154,19 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         try:
             existing = await self.get_by_email(credentials.username)
         except UserNotExists:
+            # No id to name and deliberately not the address that was tried:
+            # `client_ip` is already on the line from the request context, which
+            # is what makes a burst of these attributable at all.
+            log.info("auth.login_failed", reason="unknown_account")
             return None
         if existing.oauth_accounts:
+            log.info(
+                "auth.login_failed", reason="google_account", user_id=str(existing.id)
+            )
             raise api_error(400, "login_use_google")
+        # The line worth counting: repeated failures against an account that
+        # exists is what password guessing looks like from here.
+        log.info("auth.login_failed", reason="bad_password", user_id=str(existing.id))
         return None
 
     async def update(self, user_update, user: UserModel, safe: bool = False, request=None):
@@ -179,6 +219,10 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         # path to `is_verified = True` in a place nobody would think to audit.
         if "email" in update_dict and update_dict["email"] != user.email:
             update_dict = {**update_dict, "is_verified": False}
+            # Neither address is logged, only that the account moved: an email
+            # change that revokes verification is the start of most "I can no
+            # longer get in" reports, so it wants to be findable.
+            log.info("user.email_changed", user_id=str(user.id))
         return await super()._update(user, update_dict)
 
     async def on_after_update(
@@ -213,7 +257,11 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
             # now would tell the client nothing happened when in fact everything
             # did. Leave the cooldown unset instead, so "resend" is immediately
             # available on the screen the user is about to land on.
-            logger.exception("Could not send verification code to %s", user.email)
+            log.exception(
+                "email.verification_send_failed",
+                user_id=str(user.id),
+                on="email_change",
+            )
             return
         await ev.start_resend_cooldown(self._redis, str(user.id))
 
@@ -228,10 +276,46 @@ def get_user_manager(user_db=Depends(get_user_db), redis: Redis = Depends(get_re
 
 fastapi_users = FastAPIUsers(get_user_manager, [jwt_authentication])
 
-CurrentUser = Annotated[UserModel, Depends(fastapi_users.current_user(active=True))]
-CurrentSuperuser = Annotated[
-    UserModel, Depends(fastapi_users.current_user(active=True, superuser=True))
-]
+
+async def _bind_current_user(
+    user: Annotated[UserModel, Depends(fastapi_users.current_user(active=True))],
+) -> UserModel:
+    """Put the caller's id into the log context for the rest of the request.
+
+    Wrapping the dependency is what makes `user_id` appear on every line a route
+    produces - the access-log line included, which is written after the response
+    and would otherwise never see it - without a single route having to pass the
+    user into a log call. Superuser and optional variants below do the same, so
+    the only routes without a user id on their lines are the ones that genuinely
+    have no user (login, register, signed-out feedback) and fastapi-users' own
+    `/users/me` router, which builds its dependency itself.
+    """
+    bind_request_context(user_id=str(user.id))
+    return user
+
+
+async def _bind_current_superuser(
+    user: Annotated[
+        UserModel, Depends(fastapi_users.current_user(active=True, superuser=True))
+    ],
+) -> UserModel:
+    bind_request_context(user_id=str(user.id), superuser=True)
+    return user
+
+
+async def _bind_optional_user(
+    user: Annotated[
+        UserModel | None,
+        Depends(fastapi_users.current_user(active=True, optional=True)),
+    ],
+) -> UserModel | None:
+    if user is not None:
+        bind_request_context(user_id=str(user.id))
+    return user
+
+
+CurrentUser = Annotated[UserModel, Depends(_bind_current_user)]
+CurrentSuperuser = Annotated[UserModel, Depends(_bind_current_superuser)]
 
 
 async def get_verified_user(user: CurrentUser) -> UserModel:
@@ -261,6 +345,4 @@ CurrentVerifiedUser = Annotated[UserModel, Depends(get_verified_user)]
 # aware of: a route using this must never treat None as "definitely a stranger" in
 # a way that would silently downgrade a signed-in user's request. Feedback's
 # handling of that is to force anonymity, which fails in the safe direction.
-OptionalUser = Annotated[
-    UserModel | None, Depends(fastapi_users.current_user(active=True, optional=True))
-]
+OptionalUser = Annotated[UserModel | None, Depends(_bind_optional_user)]

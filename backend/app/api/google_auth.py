@@ -34,6 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
 from app.core.errors import api_error
 from app.core.google_oauth import GoogleIdentity, verify_google_id_token
+from app.core.logger import bind_request_context, get_logger
 from app.core.username import generate_unique_username
 from app.deps.db import CurrentAsyncSession
 from app.deps.users import (
@@ -46,6 +47,8 @@ from app.deps.users import (
 from app.models.oauth_account import GOOGLE_OAUTH_NAME
 from app.models.user import User
 from app.schemas.user import GoogleAuthRequest, GoogleLinkRequest, UserRead
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -162,6 +165,15 @@ async def google_auth(
 
     if not user.is_active:
         raise api_error(400, "login_bad_credentials")
+    bind_request_context(user_id=str(user.id))
+    # `outcome` is the field worth having: "linked" is the irreversible upgrade
+    # (the password is destroyed by it), and it is the one branch a support
+    # question can hinge on months later.
+    log.info(
+        "auth.google_signin",
+        user_id=str(user.id),
+        outcome="linked" if linking else ("existing" if existing else "created"),
+    )
     return await _issue_token(user)
 
 
@@ -216,4 +228,12 @@ async def link_google(
         user.is_verified = True
     _disable_password(user_manager, user)
     await session.commit()
+    log.info(
+        "auth.google_linked",
+        user_id=str(user.id),
+        # Whether the Google address matched the account's own is exactly what
+        # decides `is_verified` here, so it is the field to record - not either
+        # address itself.
+        addresses_match=identity.email.lower() == user.email.lower(),
+    )
     return user

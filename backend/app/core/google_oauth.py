@@ -10,7 +10,6 @@ Everything this module adds on top is the part `google-auth` cannot know about -
 which audiences *we* accept, and the email_verified requirement.
 """
 
-import logging
 from dataclasses import dataclass
 
 from google.auth.exceptions import GoogleAuthError
@@ -20,8 +19,9 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.errors import api_error
+from app.core.logger import get_logger
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 #: Reused across calls so the library's certificate cache survives between requests
 #: - a fresh transport would re-fetch Google's certs on every single sign-in.
@@ -60,20 +60,27 @@ async def verify_google_id_token(token: str) -> GoogleIdentity:
         # Transport-level: we couldn't reach Google to fetch its certificates. Kept
         # distinct from the ValueError below so the client says "try again" instead
         # of telling the user their perfectly good token is invalid.
-        logger.warning("Google ID token verification unavailable: %s", exc)
+        log.warning("auth.google_verification_unavailable", error=str(exc))
         raise api_error(503, "google_verification_unavailable") from exc
     except ValueError as exc:
         # Deliberately not logged at error level or echoed back: an invalid token is
         # an ordinary client-side outcome (expired while the user hesitated), not a
         # server fault.
-        logger.info("Rejected Google ID token: %s", exc)
+        log.info("auth.google_token_rejected", reason=str(exc))
         raise api_error(400, "google_invalid_id_token") from exc
 
     if claims.get("aud") not in settings.GOOGLE_CLIENT_IDS:
         # A token minted for somebody else's Google client is a perfectly valid
         # Google token, so nothing above would have caught it. Without this check any
         # app could trade its own users' tokens for accounts here.
-        logger.warning("Google ID token with unaccepted aud %r", claims.get("aud"))
+        # Worth a WARNING with the value: either GOOGLE_CLIENT_IDS is missing an
+        # entry after a client was added (a whole platform silently cannot sign
+        # in), or someone is presenting another app's tokens here.
+        log.warning(
+            "auth.google_token_rejected",
+            reason="unaccepted_aud",
+            aud=claims.get("aud"),
+        )
         raise api_error(400, "google_invalid_id_token")
 
     subject = claims.get("sub")
@@ -85,6 +92,7 @@ async def verify_google_id_token(token: str) -> GoogleIdentity:
     # unverified `email` claim would let whoever controls such a Google account take
     # over the existing password account that owns that address.
     if claims.get("email_verified") is not True:
+        log.warning("auth.google_token_rejected", reason="email_unverified")
         raise api_error(400, "google_email_unverified")
 
     return GoogleIdentity(

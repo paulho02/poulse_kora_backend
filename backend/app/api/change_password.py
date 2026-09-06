@@ -8,10 +8,13 @@ from fastapi import APIRouter, Depends, status
 from fastapi_users.exceptions import InvalidPasswordException
 
 from app.core.errors import api_error
+from app.core.logger import get_logger
 from app.deps.db import CurrentAsyncSession
 from app.deps.rate_limit import limit_password_change
 from app.deps.users import CurrentUser, UserManager, get_user_manager
 from app.schemas.user import PasswordChange
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -37,6 +40,10 @@ async def change_password(
         body.current_password, user.hashed_password
     )
     if not verified:
+        # A security event: this route is where a stolen token would be used to
+        # take an account over, and it is rate-limited separately for the same
+        # reason. WARNING so a run of them stands out without a query.
+        log.warning("auth.password_change_failed", reason="wrong_current_password")
         raise api_error(400, "change_password_wrong_current_password")
 
     try:
@@ -48,3 +55,4 @@ async def change_password(
 
     user.hashed_password = user_manager.password_helper.hash(body.new_password)
     await session.commit()
+    log.info("auth.password_changed", user_id=str(user.id))

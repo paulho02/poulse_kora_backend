@@ -8,6 +8,19 @@ TEST_REDIS_URL=redis://:CHANGE_ME@redis:6379/1
 SECRET_KEY=CHANGE_ME
 BACKEND_CORS_ORIGINS='["http://localhost:3000","http://127.0.0.1:3000"]'
 
+# --- logging ---
+# Defaults are the intended settings for local dev; app/core/logger.py documents
+# the whole strategy and RAILWAY.md the deployed side. LOG_FORMAT=auto means
+# console here and JSON on Railway (where JSON keys become filterable
+# attributes), so neither needs to be set. Two worth knowing about while
+# developing:
+#   LOG_LEVEL=DEBUG                    everything, including per-op fan-out
+#   LOG_LEVEL_OVERRIDES={"app.feed":"DEBUG"}   just the feed, at INFO elsewhere
+# LOG_SQL=true prints every statement SQLAlchemy runs - useful for a few minutes
+# when chasing a query, unusable as a standing setting.
+ENVIRONMENT=development
+LOG_LEVEL=INFO
+
 # --- object storage (media bucket) ---
 # Local dev/CI use the MinIO container in docker-compose.yml; production uses a
 # Railway Bucket. The backend speaks the same S3+SigV4 protocol to both, so only
@@ -103,4 +116,11 @@ GOOGLE_CLIENT_IDS='["CHANGE_ME.apps.googleusercontent.com"]'
 #   origin the Flutter web app is served from (http://localhost:3000 for dev, plus
 #   the deployed domains); the Android client needs the signing SHA-1 of whichever
 #   keystore the APK is built with.
-# SENTRY_DSN: optional, recommended once traffic is more than just you.
+# SENTRY_DSN: declared in config.py but not wired to anything yet - see the
+#   "Logs and monitoring" section of RAILWAY.md for what it would buy over
+#   Railway's own log explorer.
+# ENVIRONMENT: set per Railway environment ("production", "int"). It is stamped on
+#   every log line, which is what lets one query tell two environments apart.
+# Nothing to set for logging on Railway beyond ENVIRONMENT: the JSON format and
+#   reading the caller's IP from X-Forwarded-For are both derived from Railway's
+#   own environment variables. See RAILWAY.md.

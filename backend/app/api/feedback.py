@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.errors import api_error
-from app.core.logger import logger
+from app.core.logger import get_logger
 from app.core.media_validation import ProcessedMedia, process_feedback_upload
 from app.core.storage import StorageError, feedback_media_key, storage
 from app.deps.db import CurrentAsyncSession
@@ -15,6 +15,8 @@ from app.deps.rate_limit import limit_feedback
 from app.deps.users import CurrentSuperuser, OptionalUser
 from app.models.feedback import FEEDBACK_KINDS, Feedback, FeedbackMedia
 from app.schemas.feedback import FeedbackCreate, FeedbackCreateResult, FeedbackRead
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/feedback")
 
@@ -82,10 +84,7 @@ async def _store_media(
                 written.append(poster_key)
             keys.append((key, poster_key))
     except StorageError:
-        logger.exception(
-            "feedback media upload failed, discarding %d already-written object(s)",
-            len(written),
-        )
+        log.exception("feedback.media_upload_failed", discarded_objects=len(written))
         for key in written:
             await storage.delete_object(key)
         raise api_error(503, "media_storage_unavailable") from None
@@ -217,6 +216,20 @@ async def create_feedback(
 
     await session.commit()
     await session.refresh(feedback)
+    # Never the message text: it is user-authored prose that may name anyone, and
+    # an anonymous submission deliberately carries no user_id (see Feedback) - so
+    # this line records that a report arrived and what shape it is, and the report
+    # itself is read through GET /feedback like any other row.
+    log.info(
+        "feedback.submitted",
+        feedback_id=feedback.id,
+        kind=feedback.kind,
+        anonymous=is_anonymous,
+        allow_contact=allow_contact,
+        attachments=len(files),
+        locale=locale,
+        rating=feedback.rating,
+    )
     return FeedbackCreateResult(
         id=feedback.id, kind=feedback.kind, created=feedback.created
     )

@@ -4,13 +4,15 @@ from sqlalchemy import func, select
 from starlette.responses import Response
 
 from app.core.errors import api_error
-from app.core.logger import logger
+from app.core.logger import get_logger
 from app.core.media_validation import process_profile_picture
 from app.core.storage import StorageError, profile_picture_key, storage
 from app.deps.db import CurrentAsyncSession
 from app.deps.users import CurrentSuperuser, CurrentUser
 from app.models.user import User
 from app.schemas.user import UserRead
+
+log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -60,7 +62,7 @@ async def upload_profile_picture(
     try:
         await storage.put_object(key, data, content_type=content_type)
     except StorageError:
-        logger.exception("profile picture upload failed for user %s", user.id)
+        log.exception("user.profile_picture_upload_failed", bytes=len(data))
         raise api_error(503, "media_storage_unavailable") from None
 
     user.profile_picture_key = key
@@ -69,6 +71,12 @@ async def upload_profile_picture(
 
     if previous_key:
         await storage.delete_object(previous_key)
+    log.info(
+        "user.profile_picture_updated",
+        bytes=len(data),
+        content_type=content_type,
+        replaced=bool(previous_key),
+    )
     return user
 
 
@@ -80,4 +88,5 @@ async def delete_profile_picture(session: CurrentAsyncSession, user: CurrentUser
     await session.commit()
     if previous_key:
         await storage.delete_object(previous_key)
+    log.info("user.profile_picture_removed", had_picture=bool(previous_key))
     return user

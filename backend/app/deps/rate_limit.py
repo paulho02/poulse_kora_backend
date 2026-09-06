@@ -19,9 +19,31 @@ from fastapi import Depends, Request
 
 from app.core.config import settings
 from app.core.errors import api_error
+from app.core.logger import get_logger
 from app.core.rate_limit import consume
 from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentUser, CurrentVerifiedUser, OptionalUser
+
+log = get_logger(__name__)
+
+
+def _log_rejection(scope: str, identity: str, retry_after: int, limit: int) -> None:
+    """One line for every throttled request, at WARNING.
+
+    WARNING rather than INFO because a limit being hit is by definition unusual:
+    the budgets are set well above what the UI can produce by hand, so a burst
+    means either a client bug (a retry loop) or someone driving the API directly.
+    The identity is logged because it is the only thing that tells those apart -
+    for signed-out feedback it is an `ip:` key, which is exactly when it matters.
+    """
+    log.warning(
+        "rate_limit.exceeded",
+        scope=scope,
+        identity=identity,
+        retry_after=retry_after,
+        limit=limit,
+    )
+
 
 # All feed writes (create post, forward, drop) share this one budget, so a user
 # cannot dodge it by alternating between endpoints.
@@ -59,6 +81,9 @@ async def limit_interactions(user: CurrentVerifiedUser, redis: CurrentRedis) -> 
     # Round up, and never advertise 0 seconds — a client obeying it would retry
     # immediately and be rejected again.
     retry_after = max(1, math.ceil(retry_ms / 1000))
+    _log_rejection(
+        INTERACTION_SCOPE, str(user.id), retry_after, settings.INTERACTION_RATE_LIMIT
+    )
     exc = api_error(
         429,
         "rate_limited",
@@ -98,6 +123,12 @@ async def limit_password_change(user: CurrentUser, redis: CurrentRedis) -> None:
         return
 
     retry_after = max(1, math.ceil(retry_ms / 1000))
+    _log_rejection(
+        PASSWORD_CHANGE_SCOPE,
+        str(user.id),
+        retry_after,
+        settings.PASSWORD_CHANGE_RATE_LIMIT,
+    )
     exc = api_error(
         429,
         "rate_limited",
@@ -155,6 +186,7 @@ async def limit_feedback(
         return
 
     retry_after = max(1, math.ceil(retry_ms / 1000))
+    _log_rejection(FEEDBACK_SCOPE, identity, retry_after, settings.FEEDBACK_RATE_LIMIT)
     exc = api_error(
         429,
         "rate_limited",

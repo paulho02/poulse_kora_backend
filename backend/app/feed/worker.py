@@ -32,15 +32,16 @@ service.select_recipients) — no Postgres access needed.
 """
 
 import asyncio
-import logging
+import uuid
 
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
 from app.core.config import settings
+from app.core.logger import get_logger, new_request_context, reset_request_context
 from app.feed import keys, service
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 async def process_operation(
@@ -71,6 +72,17 @@ async def process_operation(
     if delivered:
         # Terminal outcome: stop counting this op against the channel's price.
         await service.retire_operation(redis, channel_id)
+        # The happy path, and the highest-frequency event in the system (every
+        # post and every forward passes through here), so DEBUG - `post.created`
+        # and `post.reviewed` already record at INFO that the work exists. What
+        # this adds is *where it went*, which only matters while investigating.
+        log.debug(
+            "feed.op_delivered",
+            post_id=post_id,
+            channel_id=channel_id,
+            delivered=delivered,
+            selected=len(recipients),
+        )
         return delivered
 
     if await service.has_eligible_recipient(redis, channel_id, post_id, author_id):
@@ -79,11 +91,17 @@ async def process_operation(
         await service.schedule_retry(
             redis, post_id, channel_id, expires_at=expires_at, author_id=author_id
         )
-        logger.info(
-            "feed op undeliverable, retry scheduled in %ss: post_id=%s channel_id=%s",
-            settings.FEED_RETRY_INTERVAL_SECONDS,
-            post_id,
-            channel_id,
+        # DEBUG on purpose. A parked op re-parks every
+        # FEED_RETRY_INTERVAL_SECONDS (20s) for up to FEED_RETRY_MAX_AGE_SECONDS
+        # (10 days), so at INFO a single stuck post in a quiet channel would emit
+        # ~43k lines on its own. The terminal outcomes below are the ones worth a
+        # standing line; this one is what you turn on (LOG_LEVEL_OVERRIDES,
+        # {"app.feed": "DEBUG"}) when a specific post is not arriving.
+        log.debug(
+            "feed.op_parked",
+            post_id=post_id,
+            channel_id=channel_id,
+            retry_in=settings.FEED_RETRY_INTERVAL_SECONDS,
         )
     else:
         # Every subscriber has already had this post (or the only one left is its
@@ -94,10 +112,13 @@ async def process_operation(
         # is not what a new subscriber needs. Note this is strictly narrower than an
         # *empty* channel, which is still parked — that backlog is worth keeping.
         await service.retire_operation(redis, channel_id)
-        logger.info(
-            "feed op exhausted its channel, abandoned: post_id=%s channel_id=%s",
-            post_id,
-            channel_id,
+        # Terminal and rare, and it is reach an author paid tokens for that is
+        # being given up on - so it stays at INFO however busy the stream gets.
+        log.info(
+            "feed.op_abandoned",
+            post_id=post_id,
+            channel_id=channel_id,
+            reason="channel_exhausted",
         )
     return 0
 
@@ -111,6 +132,24 @@ async def _process_and_confirm(redis: Redis, entry_id: str, fields: dict) -> dic
     """
     post_id = int(fields["post_id"])
     channel_id = int(fields["channel_id"])
+    # The worker's answer to the request id: one unit of work, one correlation
+    # id, carried by every line the fan-out produces (including a traceback from
+    # inside app/feed/service.py). Without it, concurrent ops in the same process
+    # interleave into an unreadable stream.
+    context = new_request_context(
+        request_id=f"op-{uuid.uuid4().hex[:12]}", post_id=post_id, channel_id=channel_id
+    )
+    try:
+        return await _fan_out_and_retire(redis, entry_id, fields, post_id, channel_id)
+    finally:
+        reset_request_context(context)
+
+
+async def _fan_out_and_retire(
+    redis: Redis, entry_id: str, fields: dict, post_id: int, channel_id: int
+) -> dict:
+    """The body of `_process_and_confirm`, split out only so the log context it
+    runs inside is opened and closed in one place."""
     raw_expiry = fields.get("expires_at")
     expires_at = float(raw_expiry) if raw_expiry is not None else None
     # Absent on ops enqueued before FEED_EXCLUDE_OWN_POSTS existed — tolerated, like
@@ -185,13 +224,15 @@ async def reclaim_orphaned_operations(redis: Redis, consumer: str) -> int:
         await _process_and_confirm(redis, entry_id, fields)
         count += 1
     if count:
-        logger.info("reclaimed %s abandoned feed op(s)", count)
+        # Rare by construction (it takes a crashed or wedged consumer), and it is
+        # the visible symptom of one - INFO, and worth alerting on if it repeats.
+        log.info("feed.ops_reclaimed", count=count)
     return count
 
 
 async def run_consumer(redis: Redis, consumer: str) -> None:
     """Consume the operation stream as `consumer` until cancelled."""
-    logger.info("feed consumer started: %s", consumer)
+    log.info("feed.consumer_started", consumer=consumer)
     await service.ensure_group(redis)
     try:
         while True:
@@ -202,8 +243,8 @@ async def run_consumer(redis: Redis, consumer: str) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("feed consumer error; continuing")
+                log.exception("feed.consumer_error", consumer=consumer)
                 await asyncio.sleep(0.5)
     except asyncio.CancelledError:
-        logger.info("feed consumer stopped: %s", consumer)
+        log.info("feed.consumer_stopped", consumer=consumer)
         raise

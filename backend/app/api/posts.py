@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
@@ -8,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.errors import api_error
-from app.core.logger import logger
+from app.core.logger import get_logger
 from app.core.media_validation import ProcessedMedia, process_upload
 from app.core.relay_rules import is_review_gate_unlocked
 from app.core.storage import StorageError, post_media_key, storage
@@ -36,6 +37,8 @@ from app.schemas.post import (
     PostRead,
 )
 from app.schemas.post_review import PostReviewCreate, PostReviewResult, ReviewedPostRead
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/posts")
 
@@ -159,10 +162,7 @@ async def _store_media(
                 written.append(poster_key)
             keys[index] = (key, poster_key)
     except StorageError:
-        logger.exception(
-            "post media upload failed, discarding %d already-written object(s)",
-            len(written),
-        )
+        log.exception("post.media_upload_failed", discarded_objects=len(written))
         for key in written:
             await storage.delete_object(key)
         raise api_error(503, "media_storage_unavailable") from None
@@ -216,6 +216,11 @@ async def get_posts_feed(
         redis, str(user.id), settings.FEED_QUEUE_MAX_SLOTS
     )
     if not queue_ids:
+        # DEBUG, not INFO: an empty queue is the economy working as intended (see
+        # the feed notes in CLAUDE.md), and this route is called far too often for
+        # an INFO line. It is here at all because "my feed is empty" is a report
+        # that arrives regularly and is otherwise unanswerable after the fact.
+        log.debug("feed.served", queued=0, returned=0, channel_id=channel_id)
         return []
 
     filters = [Post.id.in_(queue_ids)]
@@ -238,7 +243,14 @@ async def get_posts_feed(
     )
     by_id = {p.id: p for p in posts}
     ordered = [by_id[pid] for pid in queue_ids if pid in by_id]
-    return [_serialize_post(p, user) for p in ordered[skip : skip + limit]]
+    page = ordered[skip : skip + limit]
+    log.debug(
+        "feed.served",
+        queued=len(queue_ids),
+        returned=len(page),
+        channel_id=channel_id,
+    )
+    return [_serialize_post(p, user) for p in page]
 
 
 @router.get("/feed/status", response_model=FeedStatus)
@@ -340,12 +352,17 @@ async def create_post(
 
     processed_by_index: dict[int, ProcessedMedia] = {}
     total_media_bytes = 0
+    # Validation/transcode is by far the most expensive thing this route does
+    # (ffmpeg, in-process, holding the clip in memory), so it is timed separately
+    # from the request as a whole - "posting is slow" is nearly always this.
+    media_started = time.perf_counter()
     for index, file in enumerate(files):
         item = await process_upload(file, orientation_by_index.get(index))
         total_media_bytes += item.size_bytes
         if total_media_bytes > settings.POST_MEDIA_MAX_TOTAL_BYTES:
             raise api_error(400, "post_media_total_too_large")
         processed_by_index[index] = item
+    media_ms = round((time.perf_counter() - media_started) * 1000, 1)
 
     price = (await service.channel_prices(redis, [post_in.channel_id]))[
         post_in.channel_id
@@ -355,12 +372,16 @@ async def create_post(
     else:
         token_balance = await service.spend_tokens(redis, str(user.id), price)
         if token_balance is None:
-            raise api_error(
-                402,
-                "insufficient_tokens",
-                balance=await service.token_balance(redis, str(user.id)),
+            balance = await service.token_balance(redis, str(user.id))
+            # Not an error - the economy working as designed - but the rate of it
+            # is the signal that says whether the price is set anywhere near right.
+            log.info(
+                "post.rejected_insufficient_tokens",
+                channel_id=post_in.channel_id,
                 price=price,
+                balance=balance,
             )
+            raise api_error(402, "insufficient_tokens", balance=balance, price=price)
 
     is_supporter = (
         await session.scalar(
@@ -425,6 +446,19 @@ async def create_post(
 
     await service.enqueue_operation(
         redis, post.id, post.channel_id, author_id=str(post.author_id)
+    )
+    log.info(
+        "post.created",
+        post_id=post.id,
+        channel_id=post.channel_id,
+        price=price,
+        token_balance=token_balance,
+        blocks=len(blocks),
+        media_files=len(files),
+        media_bytes=total_media_bytes,
+        media_ms=media_ms,
+        is_anonymous=post.is_anonymous,
+        supporter=is_supporter,
     )
 
     post = await _get_post_with_relations(session, post.id)
@@ -568,6 +602,9 @@ async def review_post(
 
     removed = await service.claim_from_queue(redis, str(user.id), post_id)
     if removed == 0:
+        # Usually a double-tap or a stale client, but a run of them means the
+        # queue and the screen have drifted apart, which is a real bug class.
+        log.info("post.review_rejected", post_id=post_id, reason="not_in_queue")
         raise api_error(409, "not_in_queue")
 
     session.add(PostReview(user_id=user.id, post_id=post_id, kind=review_in.kind))
@@ -584,6 +621,10 @@ async def review_post(
         # Re-delivery: a fan-out (e.g. a due ops:retry) put back a post this user had
         # already reviewed. It has been removed from the queue above; nothing to record.
         await session.rollback()
+        # WARNING rather than INFO: the unique constraint is the *backstop* for the
+        # seen-set exclusion, so hitting it means the set did its job badly (lost,
+        # expired early, or never seeded - see FEED_EXCLUDE_SEEN in CLAUDE.md).
+        log.warning("post.review_rejected", post_id=post_id, reason="already_reviewed")
         raise api_error(409, "already_reviewed") from None
 
     token_balance = await service.earn_token(redis, str(user.id))
@@ -594,6 +635,13 @@ async def review_post(
         await service.enqueue_operation(
             redis, post_id, post.channel_id, author_id=str(post.author_id)
         )
+    log.info(
+        "post.reviewed",
+        post_id=post_id,
+        channel_id=post.channel_id,
+        kind=review_in.kind,
+        token_balance=token_balance,
+    )
 
     return PostReviewResult(
         post_id=post_id,

@@ -43,7 +43,22 @@ Set these as Variables on the backend service (Settings → Variables):
 | `STORAGE_AUTO_CREATE_BUCKET` | no | Leave unset (`false`). The platform provisions the bucket and the credentials are scoped to it. |
 | `MEDIA_URL_TTL_SECONDS` / `MEDIA_URL_REFRESH_SECONDS` | no | Defaults (1 h / 15 min) are fine. The first is how long a leaked media URL keeps working, the second how often the URL string changes — see the media section below before touching either. |
 | `TEST_STORAGE_BUCKET` / `TEST_STORAGE_PUBLIC_ENDPOINT_URL` | not needed | Dev/CI-only, used only when `pytest` is running. |
-| `SENTRY_DSN` | optional | Recommended once real users are on it. |
+| `SENTRY_DSN` | optional | Declared in `app/core/config.py` but **not wired to anything yet** — setting it today does nothing. See "Logs and monitoring" below. |
+| `ENVIRONMENT` | recommended | `production` (or `int`). Stamped on every log line as `env`, which is what lets one log query tell two environments apart. |
+| `LOG_LEVEL` | no | `INFO` default. `DEBUG` is for a few minutes of investigation, not a standing setting. |
+| `LOG_FORMAT` | no | `auto` default → JSON on Railway, which is what makes the fields below filterable. Only set it to pin the format. |
+| `LOG_LEVEL_OVERRIDES` | no | JSON object, e.g. `{"app.feed": "DEBUG"}` — turn one module up without turning the process up. |
+| `LOG_QUIET_PATHS` / `LOG_SLOW_REQUEST_MS` / `LOG_ACCESS` / `LOG_SQL` / `LOG_CLIENT_IP` | no | Defaults are the intended production setting; see `app/core/logger.py` for what each trades. |
+
+There is deliberately **no variable for reading the caller's IP out of `X-Forwarded-For`**. Behind
+Railway's edge the socket peer is always the proxy, so the backend takes the address from that
+header here and from the socket everywhere else — decided by the same Railway detection that picks
+the JSON format, because which one is right is a fact about where the process runs rather than a
+preference, and a flag set wrong would quietly log the proxy's address (or a forgeable one) with no
+symptom. It reads the *rightmost* entry, the one Railway's own proxy appended; the leftmost is
+whatever the caller chose to claim. This affects logs only — the rate limiter keys on the socket
+address regardless (`app/deps/rate_limit.py`), since a forgeable identity there would be an opt-out
+of the limit rather than a mislabelled line.
 | `TEST_DATABASE_URL` / `TEST_REDIS_URL` | not needed | Dev/CI-only, used only when `pytest` is running. |
 
 `app/core/config.py` already normalizes a `postgres://`-scheme `DATABASE_URL` to `postgresql://`,
@@ -124,6 +139,59 @@ or whenever the Flutter app's domain changes (e.g. adding a custom domain).
   CORS error while the same URL works in `curl`, that is the bucket's CORS configuration, not the
   signature.
 
+## Logs and monitoring
+
+Everything goes to stdout, which is all Railway needs. `LOG_FORMAT=auto` emits **JSON** whenever
+`RAILWAY_ENVIRONMENT_NAME` is set, and Railway lifts each top-level key of a JSON log line into a
+filterable attribute — that, plus the request id, is the whole "production errors should be
+traceable" story. Full design notes are in `backend/app/core/logger.py`; the operational summary:
+
+**Finding one user's problem.** Every response carries an `X-Request-ID` header, and every 500
+body carries the same value as `detail.request_id` — so a user who can screenshot an error gives
+you an exact key. In the Railway log explorer:
+
+```
+@request_id:"a1b2c3d4e5f6a7b8"
+```
+
+returns every line that request produced, in order, across every module — the access line, the
+domain events, and the traceback. `@user_id:"<uuid>"` does the same for everything one account
+did. A worker fan-out gets its own id of the form `op-…`, so a delivery problem is traceable the
+same way even though no HTTP request is involved.
+
+**Useful standing queries.**
+
+| Question | Query |
+|---|---|
+| Is anything broken right now? | `@level:ERROR` |
+| What is slow? | `@slow:true` (anything over `LOG_SLOW_REQUEST_MS`, default 1.5 s) |
+| Are people being throttled? | `rate_limit.exceeded` |
+| Is the economy behaving? | `feed.price_changed` — one line per actual price move, with the queue length and active-user count that caused it |
+| Did the money flow? | `subscription.activated`, `subscription.renewed`, `payment.webhook_unknown_customer` |
+| Is anyone signing up? | `user.registered`, `auth.login`, `auth.login_failed` |
+| Are posts reaching people? | `post.created` vs `feed.op_abandoned` |
+| Is the bucket healthy? | `storage.request_failed` |
+
+**Volume.** One line per request plus one per user action, so it scales with traffic rather than
+with work — a fan-out to three recipients is one line, not four. The two endpoints the client
+polls on a timer (`/api/v1/health`, `/api/v1/posts/feed/status`) are logged at DEBUG, so they cost
+nothing at INFO; at a few hundred users they would otherwise be the majority of the log. A rough
+figure: at 500 daily active users doing ~40 actions each, expect low tens of thousands of INFO
+lines a day. If that ever needs cutting further, `LOG_ACCESS=false` removes the per-request line
+and leaves the domain events.
+
+**Monitoring — what Railway does and does not give you.** The log explorer covers searching and
+filtering, and its saved views plus the Observability dashboard can chart a query over time (an
+`@level:ERROR` count widget is a serviceable error-rate panel). What Railway does *not* provide is
+error *grouping* (5,000 occurrences of one bug shown as one issue with a trend), alerting on a log
+query, or release-over-release regression tracking — its notifications are about deploy and crash
+events, not about what the app logs. That is the gap `SENTRY_DSN` in the table above is meant for,
+and it is currently an unwired setting: nothing reads it. Wiring it is small (add `sentry-sdk`,
+call `sentry_sdk.init(dsn=..., environment=settings.ENVIRONMENT, release=RAILWAY_GIT_COMMIT_SHA)`
+in `create_app`, and set the request id as a tag so a Sentry issue and a log query point at the
+same request), but it adds a dependency and an external processor of user data, so it is left as a
+deliberate decision rather than done by default.
+
 ## Verifying a deploy
 
 - `GET https://<backend-domain>/api/v1/health` → `{"msg": "ok"}` — this is also what Railway's own
@@ -131,6 +199,10 @@ or whenever the Flutter app's domain changes (e.g. adding a custom domain).
 - `GET https://<backend-domain>/docs/` — OpenAPI UI, confirms static/app serving works.
 - Tail the deploy logs for the `alembic upgrade head` output on boot to confirm migrations applied
   cleanly.
+- Look for the `app.started` line: it names the flags that actually took effect on that deploy
+  (`smtp_configured`, `require_email_verification`, `google_oauth_enabled`, `storage_bucket`,
+  `log_format` — which should read `json` here). A misconfiguration is usually visible in that one
+  line before any user finds it.
 - Upload a profile picture from the app and confirm the returned `profile_picture_url` points at
   `https://<bucket>.storage.railway.app/...` and loads. A `SignatureDoesNotMatch` here almost always
   means `STORAGE_ADDRESSING_STYLE` is still `path` — the host is part of the signature.

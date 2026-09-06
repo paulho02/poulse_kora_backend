@@ -14,6 +14,51 @@ class Settings(BaseSettings):
 
     API_PATH: str = "/api/v1"
 
+    # --- logging ---
+    # See app/core/logger.py for the whole strategy; these are the knobs it reads.
+    #
+    # ENVIRONMENT is stamped on every log line and is otherwise unused - it is
+    # the field you filter on when staging and production ship logs to the same
+    # place, so it is worth setting per Railway environment ("production",
+    # "int", ...).
+    ENVIRONMENT: str = "development"
+    LOG_LEVEL: str = "INFO"
+    # "auto" -> json when running on Railway, console otherwise. Railway parses
+    # JSON on stdout into filterable attributes, which is the entire reason for
+    # the format; a terminal wants the other one. Override to pin either.
+    LOG_FORMAT: str = "auto"
+    # Per-logger levels, e.g. '{"app.feed": "DEBUG"}' to watch fan-out on a live
+    # deploy without turning the whole process up. Applied after the built-in
+    # library levels, so it can also un-mute a noisy dependency.
+    LOG_LEVEL_OVERRIDES: dict[str, str] = {}
+    # One line per request from our own middleware (app/core/request_logging.py),
+    # which knows the duration, the request id, the resolved route and the user.
+    # Turning it off hands the job back to uvicorn's plainer access log rather
+    # than leaving none at all.
+    LOG_ACCESS: bool = True
+    # Requests to these paths are logged at DEBUG instead of INFO. Both defaults
+    # are polled on a timer rather than by a person - Railway's health probe and
+    # the client's reconnect loop hit the first, the feed screen polls the second
+    # while it is open - so at any real user count they would be the overwhelming
+    # majority of an INFO log and none of its content.
+    LOG_QUIET_PATHS: list[str] = ["/api/v1/health", "/api/v1/posts/feed/status"]
+    # Requests at or above this are logged at WARNING whatever their status, so a
+    # route that has started crawling surfaces on its own.
+    LOG_SLOW_REQUEST_MS: int = 1500
+    # Emit every SQL statement SQLAlchemy runs. Useful for a few minutes when
+    # chasing a slow query, unusable as a standing setting.
+    LOG_SQL: bool = False
+    # An IP address is personal data under GDPR, and it is also the only thing
+    # that makes abuse from signed-out traffic investigable. On by default; this
+    # is the one flag that removes it from every line.
+    #
+    # There is deliberately no companion setting for *where* to read the address
+    # from (a socket peer behind Railway's proxy is a useless constant; an
+    # X-Forwarded-For header with no proxy in front is a lie). That is a fact
+    # about where the process runs, not a preference, so it is derived - see
+    # app/core/request_logging.py: _client_ip.
+    LOG_CLIENT_IP: bool = True
+
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 7 * 24 * 60  # 7 days
 
     # Number of posts a user must review (forward or drop) before they can create one.

@@ -6,11 +6,19 @@ from sqlalchemy import select
 from app.core import mollie
 from app.core.config import settings
 from app.core.errors import api_error
+from app.core.logger import get_logger
 from app.deps.db import CurrentAsyncSession
 from app.deps.users import CurrentVerifiedUser
 from app.models.supporter_subscription import SupporterSubscription
 from app.models.user_subscription import UserSubscription
 from app.schemas.subscription import SupporterCheckoutResult, SupporterSubscriptionRead
+
+# Money moves through this module, so every branch of the webhook logs, at INFO,
+# whatever it decided - including the branches that decide nothing. A payment
+# provider's state machine is the one thing you cannot replay after the fact:
+# Mollie's dashboard says what Mollie thinks, and only these lines say what this
+# backend did about it.
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/subscriptions")
 
@@ -133,6 +141,14 @@ async def create_supporter_checkout(
         )
     await session.commit()
 
+    log.info(
+        "subscription.checkout_started",
+        mollie_customer_id=customer_id,
+        payment_id=payment.get("id"),
+        amount=settings.SUPPORTER_PRICE_AMOUNT,
+        currency=settings.SUPPORTER_PRICE_CURRENCY,
+        returning=bool(existing),
+    )
     return SupporterCheckoutResult(checkout_url=payment["_links"]["checkout"]["href"])
 
 
@@ -163,6 +179,11 @@ async def cancel_supporter_subscription(
     sub.status = "canceled"
     await _revoke_supporter(session, user.id)
     await session.commit()
+    log.info(
+        "subscription.canceled",
+        reason="user_request",
+        mollie_subscription_id=sub.mollie_subscription_id,
+    )
 
 
 @router.post("/webhook/mollie", include_in_schema=False)
@@ -190,10 +211,25 @@ async def mollie_webhook(session: CurrentAsyncSession, id: str = Form(...)):
         )
     )
     if not sub:
+        # Answered 200 and dropped (see the docstring), so without this line the
+        # event leaves no trace at all - and "Mollie says it paid, the app says
+        # it didn't" starts exactly here.
+        log.warning(
+            "payment.webhook_unknown_customer",
+            payment_id=id,
+            mollie_customer_id=customer_id,
+        )
         return {"ok": True}
 
     status_ = payment.get("status")
     mollie_subscription_id = payment.get("subscriptionId")
+    log.info(
+        "payment.webhook_received",
+        payment_id=id,
+        user_id=str(sub.user_id),
+        payment_status=status_,
+        subscription_status=sub.status,
+    )
 
     if status_ == "paid" and sub.mollie_subscription_id is None:
         # First payment for this customer just succeeded: the mandate now exists,
@@ -214,6 +250,12 @@ async def mollie_webhook(session: CurrentAsyncSession, id: str = Form(...)):
         )
         await _grant_supporter(session, sub.user_id)
         await session.commit()
+        log.info(
+            "subscription.activated",
+            user_id=str(sub.user_id),
+            mollie_subscription_id=sub.mollie_subscription_id,
+            period_end=sub.current_period_end,
+        )
 
     elif status_ == "paid" and mollie_subscription_id == sub.mollie_subscription_id:
         # A renewal payment succeeded — refresh the period end and make sure the
@@ -228,6 +270,12 @@ async def mollie_webhook(session: CurrentAsyncSession, id: str = Form(...)):
         )
         await _grant_supporter(session, sub.user_id)
         await session.commit()
+        log.info(
+            "subscription.renewed",
+            user_id=str(sub.user_id),
+            mollie_subscription_id=sub.mollie_subscription_id,
+            period_end=sub.current_period_end,
+        )
 
     elif (
         status_ in ("failed", "expired", "canceled")
@@ -236,6 +284,13 @@ async def mollie_webhook(session: CurrentAsyncSession, id: str = Form(...)):
         # The first, mandate-establishing payment never completed.
         sub.status = "failed"
         await session.commit()
+        # INFO, not WARNING: a user abandoning a checkout is normal. The *rate*
+        # of it against subscription.activated is the thing worth watching.
+        log.info(
+            "subscription.first_payment_failed",
+            user_id=str(sub.user_id),
+            payment_status=status_,
+        )
 
     elif mollie_subscription_id == sub.mollie_subscription_id:
         # A renewal payment failed. Mollie retries automatically and only cancels
@@ -248,5 +303,19 @@ async def mollie_webhook(session: CurrentAsyncSession, id: str = Form(...)):
             sub.status = "canceled"
             await _revoke_supporter(session, sub.user_id)
             await session.commit()
+            log.info(
+                "subscription.canceled",
+                reason="renewal_failed",
+                user_id=str(sub.user_id),
+                mollie_status=subscription.get("status"),
+            )
+        else:
+            # Mollie is still retrying; the entitlement deliberately stays.
+            log.info(
+                "subscription.renewal_failed",
+                user_id=str(sub.user_id),
+                payment_status=status_,
+                mollie_status=subscription.get("status"),
+            )
 
     return {"ok": True}

@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from sqlalchemy import select
 
 from app.core.errors import api_error
+from app.core.logger import get_logger
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentVerifiedUser
@@ -9,6 +10,8 @@ from app.feed import service
 from app.models.channel import Channel
 from app.models.channel_subscription import ChannelSubscription
 from app.schemas.channel import ChannelRead
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/channels")
 
@@ -90,6 +93,9 @@ async def subscribe_channel(
     # already-distributed history here would be a second delivery path racing those
     # retries, which is how the same post used to land in the queue twice.
     await service.sync_subscribe(redis, str(user.id), channel_id)
+    # Subscriptions are what fan-out actually targets, so their rate is the one
+    # number that explains a channel's delivery behaviour changing.
+    log.info("channel.subscribed", channel_id=channel_id, already=bool(existing))
 
     subscribed_ids = await _subscribed_channel_ids(session, user.id)
     prices = await service.channel_prices(redis, [channel_id])
@@ -120,6 +126,9 @@ async def unsubscribe_channel(
     # Mirror into Redis: remove the user from the channel's subscriber set so they
     # no longer receive fan-out from it. Already-queued posts are left in place.
     await service.sync_unsubscribe(redis, str(user.id), channel_id)
+    log.info(
+        "channel.unsubscribed", channel_id=channel_id, was_subscribed=bool(existing)
+    )
 
     subscribed_ids = await _subscribed_channel_ids(session, user.id)
     prices = await service.channel_prices(redis, [channel_id])

@@ -320,6 +320,54 @@ after cloning).
   factories, not per-test — data persists across tests in a run and rollback is best-effort cleanup,
   not full isolation. `tests/utils.py` has `get_jwt_header(user)` for authenticating requests without
   hitting the login endpoint.
+- **Logging** (`backend/app/core/logger.py`, `app/core/request_logging.py`): one stdout handler,
+  configured from `create_app()` (which is *after* uvicorn installs its own config, hence the
+  explicit reclaiming of the `uvicorn.*` loggers). `LOG_FORMAT=auto` emits **console** lines
+  locally and **JSON** on Railway, where each top-level key of a JSON line becomes a filterable
+  attribute — the reason structured fields are flattened into the payload rather than nested.
+  Five things are load-bearing:
+  - **The message is an event name, the values are keywords**: `log.info("post.created",
+    post_id=..., price=...)`, never prose with values interpolated in. An event name is
+    countable — an error rate or a "posts per hour" panel is a filter on one field rather than a
+    regex over English. `get_logger(__name__)` returns the adapter that accepts those keywords;
+    it redefines the level methods rather than inheriting them so that a field named `level` or
+    `msg` cannot collide with a parameter and raise at the call site.
+  - **The request id is the join.** `RequestLoggingMiddleware` opens a contextvar holding
+    request id, method, path and client IP; the auth dependencies in `app/deps/users.py` bind
+    `user_id` onto it as they resolve, and a `logging.Filter` stamps the lot onto every record
+    emitted anywhere underneath. The id goes back to the client in `X-Request-ID` **and in the
+    body of a 500** (`detail.request_id`), so a user-reported failure is one query
+    (`@request_id:"..."`) away from the traceback. The context is a *mutable dict* on purpose:
+    `user_id` is bound long after the middleware opened it and still has to reach the
+    access-log line the middleware writes after the response. The worker opens the same kind of
+    context per operation (`op-…`), so fan-out is traceable without an HTTP request.
+  - **Errors are logged once, in the middleware.** An unhandled exception passes through that
+    frame — the only one with the context bound — before Starlette's `ServerErrorMiddleware`
+    turns it into a response, so the traceback is written there (`http.request_failed`) and
+    `_unhandled_exception_handler` in `factory.py` deliberately writes none. That handler also
+    reads the id off `scope` rather than the contextvar, because it runs *outside* the
+    middleware, after the context has been reset. (uvicorn's own "Exception in ASGI application"
+    line is a third-party duplicate of the traceback with no request id; ours is the one to
+    read.)
+  - **Volume is a design constraint, not an afterthought.** INFO is one line per request plus one
+    per *user action*, so it scales with traffic and not with work. Anything per-retry, per-item
+    or per-poll is DEBUG — `feed.op_parked` most of all, since a parked op re-parks every
+    `FEED_RETRY_INTERVAL_SECONDS` for up to ten days and would emit ~43k lines on its own at
+    INFO. `LOG_QUIET_PATHS` drops the two timer-driven endpoints (`/health`,
+    `/posts/feed/status`) to DEBUG for the same reason. `LOG_SLOW_REQUEST_MS` promotes a slow
+    request to WARNING whatever its status, and `LOG_LEVEL_OVERRIDES` (e.g. `{"app.feed":
+    "DEBUG"}`) turns one module up on a live deploy without turning the process up.
+  - **Log ids, never contents.** No email addresses (`user_id` is one join from one, for whoever
+    is entitled to look), no post or feedback text, no tokens, no query strings — the one
+    deliberate exception being `send_email`'s unconfigured-SMTP branch, which *is* the delivery
+    mechanism in dev and cannot fire where a relay exists. `LOG_CLIENT_IP` is a flag because an
+    IP is personal data under GDPR; it defaults on because signed-out abuse is otherwise
+    uninvestigable. *Where* that address is read from is derived rather than configured
+    (`_client_ip`): the socket peer normally, the **rightmost** `X-Forwarded-For` entry on
+    Railway, where the peer is always the edge proxy. Rightmost because a proxy appends, so
+    the last entry is the one our own hop wrote and the first is the caller's to invent — and
+    a setting for this would be one whose wrong value degrades in silence. See RAILWAY.md for the operational side (queries worth saving, and what
+    Railway does and does not offer for monitoring — `SENTRY_DSN` is still an unwired setting).
 - **Localization**: `SUPPORTED_LOCALES`/`DEFAULT_LOCALE` in `app/core/config.py` (English + German
   today). Locale is resolved per-request from `Accept-Language` (`app/core/locale.py`,
   `app/deps/locale.py`'s `CurrentLocale` dependency) — deliberately no persisted `User.locale`

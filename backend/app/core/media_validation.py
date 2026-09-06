@@ -43,6 +43,7 @@ import io
 import json
 import math
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,7 +52,9 @@ from PIL import Image, ImageOps
 
 from app.core.config import settings
 from app.core.errors import api_error
-from app.core.logger import logger
+from app.core.logger import get_logger
+
+log = get_logger(__name__)
 
 # Blocks decompression-bomb-style images (tiny byte size, huge declared pixel
 # dimensions): Pillow refuses to even open something that would decode past this
@@ -424,9 +427,11 @@ async def process_video_bytes(
             target_ratio = ratio_for_orientation(orientation)
 
         out_path = Path(tmp_dir) / "out.mp4"
+        transcode_started = time.perf_counter()
         await _transcode_video(
             src_path, out_path, target_ratio, error_prefix=error_prefix
         )
+        transcode_ms = round((time.perf_counter() - transcode_started) * 1000, 1)
         out_data = out_path.read_bytes()
 
         # Measured, not computed: the crop and scale filters both round to even
@@ -438,6 +443,23 @@ async def process_video_bytes(
 
         poster = await _extract_poster(out_path, duration)
 
+    # INFO, not DEBUG, and the one per-file line that is: a transcode is the
+    # heaviest thing this process does (ffmpeg, in-process, up to
+    # _TRANSCODE_TIMEOUT_SECONDS holding a worker), it is bounded by how often
+    # someone posts a video rather than by traffic, and the ratio of these to
+    # `post.created` is the number that decides whether this ever needs to move
+    # out to a queue.
+    log.info(
+        "media.video_transcoded",
+        duration_seconds=round(duration, 2),
+        transcode_ms=transcode_ms,
+        in_bytes=len(data),
+        out_bytes=len(out_data),
+        width=width,
+        height=height,
+        cropped=crop_to_ratio,
+        has_poster=poster is not None,
+    )
     return ProcessedMedia(
         media_type="video",
         # Always mp4 now, whatever came in: _transcode_video normalizes every
@@ -609,6 +631,14 @@ async def _transcode_video(
         timeout=_TRANSCODE_TIMEOUT_SECONDS,
     )
     if returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
+        # The client is told only "invalid type", which is unhelpful when the
+        # clip plays fine on the phone that shot it - ffmpeg's own last words are
+        # the only thing that ever explains why, so keep them.
+        log.warning(
+            "media.transcode_failed",
+            returncode=returncode,
+            ffmpeg_stderr=stderr.decode("utf-8", "replace")[-500:],
+        )
         raise api_error(400, f"{error_prefix}_invalid_type")
 
 
@@ -650,12 +680,20 @@ async def _extract_poster(path: Path, duration: float) -> bytes | None:
                 str(out),
             )
         except Exception:
-            logger.warning("poster extraction failed to run", exc_info=True)
+            log.warning(
+                "media.poster_extraction_failed",
+                reason="ffmpeg_error",
+                exc_info=True,
+            )
             return None
         if returncode != 0 or not out.exists() or out.stat().st_size == 0:
-            logger.warning(
-                "poster extraction produced no frame: %s",
-                stderr.decode("utf-8", "replace")[-500:],
+            # Non-fatal by design (see the docstring), which is exactly why it
+            # needs a line: the upload succeeds, the client silently shows its
+            # neutral tile, and nothing else would ever record that it happened.
+            log.warning(
+                "media.poster_extraction_failed",
+                reason="no_frame",
+                ffmpeg_stderr=stderr.decode("utf-8", "replace")[-300:],
             )
             return None
         return out.read_bytes()

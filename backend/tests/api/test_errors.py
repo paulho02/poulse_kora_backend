@@ -113,7 +113,13 @@ class TestErrorEnvelope:
                 f"{settings.API_PATH}/posts/feed", headers=get_jwt_header(user)
             )
         assert resp.status_code == 500
-        assert resp.json()["detail"] == {"error": "internal_error"}
+        detail = resp.json()["detail"]
+        assert detail["error"] == "internal_error"
+        # The one thing a 500 body may say about the failure: which one it was.
+        # `RequestLoggingMiddleware` puts the same id on every log line the
+        # request produced, so a user reporting this string is a log query.
+        assert detail["request_id"]
+        assert resp.headers["x-request-id"] == detail["request_id"]
 
 
 class TestSettingsRevision:

@@ -1,7 +1,7 @@
 import asyncio
-import logging
 import os
 import socket
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -18,6 +18,8 @@ from starlette.responses import FileResponse, JSONResponse
 from app.api import api_router
 from app.core.config import settings
 from app.core.errors import detail_text, slugify_detail
+from app.core.logger import configure_logging, get_logger, resolved_log_format
+from app.core.request_logging import RequestLoggingMiddleware
 from app.core.storage import storage
 from app.deps.users import fastapi_users, jwt_authentication
 from app.feed import service
@@ -25,7 +27,7 @@ from app.feed.worker import run_consumer
 from app.redis import redis_client
 from app.schemas.user import UserCreate, UserRead, UserUpdate
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -54,9 +56,27 @@ async def lifespan(app: FastAPI):
     price_task = asyncio.create_task(service.run_price_refresher(redis_client))
     app.state.feed_consumer_task = task
     app.state.price_refresher_task = price_task
+    started_at = time.time()
+    # The first line of a deploy, and the one to read when a deploy behaves
+    # unlike the last one: it names the flags that decide behaviour, so "why is
+    # nobody getting verification emails" is answerable from the log alone.
+    log.info(
+        "app.started",
+        consumer=consumer_name,
+        log_level=settings.LOG_LEVEL,
+        log_format=resolved_log_format(),
+        require_email_verification=settings.REQUIRE_EMAIL_VERIFICATION,
+        smtp_configured=bool(settings.SMTP_HOST),
+        google_oauth_enabled=settings.GOOGLE_OAUTH_ENABLED,
+        subscriptions_enabled=settings.SUBSCRIPTIONS_ENABLED,
+        storage_bucket=settings.STORAGE_BUCKET,
+        feed_fanout=settings.FEED_FANOUT,
+        queue_slots=settings.FEED_QUEUE_MAX_SLOTS,
+    )
     try:
         yield
     finally:
+        log.info("app.stopping", uptime_seconds=round(time.time() - started_at, 1))
         task.cancel()
         price_task.cancel()
         try:
@@ -71,6 +91,10 @@ async def lifespan(app: FastAPI):
 
 
 def create_app():
+    # Before anything else: uvicorn has already installed its own logging config
+    # by the time it imports this module, so this is where it is taken back (see
+    # app/core/logger.py: configure_logging).
+    configure_logging()
     description = f"{settings.PROJECT_NAME} API"
     app = FastAPI(
         title=settings.PROJECT_NAME,
@@ -84,6 +108,12 @@ def create_app():
     setup_exception_handlers(app)
     setup_cors_middleware(app)
     serve_static_app(app)
+    # Added last, so it ends up outermost (Starlette runs user middleware in
+    # reverse registration order): the status it logs is the one the client
+    # actually received, after CORS and after the SPA fallback have had their
+    # say, and the request context it opens is in place for every other
+    # middleware as well as the routes.
+    app.add_middleware(RequestLoggingMiddleware)
     return app
 
 
@@ -99,6 +129,13 @@ def setup_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+        # A 5xx raised deliberately (media_storage_unavailable, email_send_failed)
+        # is still a broken dependency, and the route that raised it has usually
+        # logged the cause already - this records that the client was told, with
+        # the code it was told. 4xx are the client's business and are covered by
+        # the one access-log line.
+        if exc.status_code >= 500:
+            log.error("http.server_error_response", status=exc.status_code)
         detail = exc.detail
         if isinstance(detail, dict):
             # Already structured. fastapi-users uses `code`/`reason` for password
@@ -136,10 +173,29 @@ def setup_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception):
-        # Deliberately opaque: the client shows a generic "something went wrong".
-        # Starlette re-raises after this so the traceback still reaches the logs.
-        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
-        return JSONResponse({"detail": {"error": "internal_error"}}, status_code=500)
+        # Deliberately opaque about the cause: the client shows a generic
+        # "something went wrong". It is not opaque about *which* failure it was —
+        # `request_id` is the one field that turns a user saying "it broke" into
+        # the exact traceback, via `@request_id:"..."` in the log explorer.
+        #
+        # Read off the scope rather than the log context: this handler is invoked
+        # by Starlette's ServerErrorMiddleware, which sits *outside*
+        # RequestLoggingMiddleware, so by now the context has been reset. The
+        # traceback is not logged here either, for the same reason — the frame
+        # that still had the context logged it (`http.request_failed`), and a
+        # second copy here would only double the error count.
+        body: dict[str, str] = {"error": "internal_error"}
+        request_id = request.scope.get("request_id")
+        if not request_id:
+            return JSONResponse({"detail": body}, status_code=500)
+        body["request_id"] = request_id
+        # Set here as well as in the middleware: this response is produced
+        # *outside* it (ServerErrorMiddleware holds the outer `send`), so the
+        # header the middleware adds to every other response would be missing
+        # from exactly the ones that most need it.
+        return JSONResponse(
+            {"detail": body}, status_code=500, headers={"X-Request-ID": request_id}
+        )
 
 
 def setup_routers(app: FastAPI, fastapi_users: FastAPIUsers) -> None:

@@ -7,7 +7,6 @@ storing post_ids rather than content.
 
 import asyncio
 import json
-import logging
 import time
 import uuid
 from collections.abc import Sequence
@@ -19,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.logger import get_logger
 from app.feed import keys
 from app.feed.pricing import channel_price as compute_channel_price
 from app.feed.pricing import compute_price
@@ -28,7 +28,7 @@ from app.models.post import Post
 from app.models.post_review import PostReview
 from app.models.user import User
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 # `place_post` returns this instead of a queue length when the post was refused
 # because the user has already had it (see FEED_EXCLUDE_SEEN).
@@ -214,6 +214,24 @@ async def refresh_price_snapshot(redis: Redis, now: float | None = None) -> dict
     await redis.set(
         keys.PRICE_SNAPSHOT, json.dumps(snapshot), ex=settings.FEED_PRICE_TTL_SECONDS
     )
+    # Only when it actually moves. The refresher runs every
+    # FEED_PRICE_REFRESH_SECONDS and most ticks change nothing (the deadband
+    # exists precisely to make that true), so logging every tick would be a
+    # minute-by-minute heartbeat saying "still 3". Logging the *transitions*
+    # gives the price history of the economy for free: the inputs are on the line,
+    # so a complaint that posting got expensive is answerable to the minute.
+    if previous is None or previous["price"] != price:
+        log.info(
+            "feed.price_changed",
+            price=price,
+            # Absent rather than equal to `price` when there was no previous
+            # snapshot at all (a cold start or a flushed Redis) - that is a
+            # different event from a price that moved, and the missing field is
+            # what says so.
+            previous_price=previous["price"] if previous is not None else None,
+            ops_queue=ops_len,
+            active_users=active_users,
+        )
     return snapshot
 
 
@@ -335,7 +353,7 @@ async def run_price_refresher(redis: Redis) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("price snapshot refresh failed; continuing")
+            log.exception("feed.price_refresh_failed")
         try:
             await asyncio.sleep(settings.FEED_PRICE_REFRESH_SECONDS)
         except asyncio.CancelledError:
@@ -411,11 +429,12 @@ async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
             # Terminal: this op will never be delivered, so it stops counting against
             # the channel's price.
             await retire_operation(redis, op["channel_id"])
-            logger.info(
-                "feed op abandoned after %ss of retries: post_id=%s channel_id=%s",
-                settings.FEED_RETRY_MAX_AGE_SECONDS,
-                op["post_id"],
-                op["channel_id"],
+            log.info(
+                "feed.op_abandoned",
+                post_id=op["post_id"],
+                channel_id=op["channel_id"],
+                reason="retry_deadline",
+                max_age_seconds=settings.FEED_RETRY_MAX_AGE_SECONDS,
             )
             continue
         # XADD before ZREM: if the process dies in between, the op is merely duplicated
