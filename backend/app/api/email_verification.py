@@ -12,6 +12,7 @@ from app.core.email import send_email
 from app.core.errors import api_error
 from app.core.logger import get_logger
 from app.deps.db import CurrentAsyncSession
+from app.deps.locale import CurrentLocale
 from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentUser
 from app.schemas.email_verification import (
@@ -25,7 +26,9 @@ router = APIRouter(prefix="/auth/email-verification", tags=["auth"])
 
 
 @router.post("/resend", response_model=EmailVerificationStatus)
-async def resend_email_verification_code(user: CurrentUser, redis: CurrentRedis):
+async def resend_email_verification_code(
+    user: CurrentUser, redis: CurrentRedis, locale: CurrentLocale
+):
     if user.is_verified:
         return EmailVerificationStatus(is_verified=True)
 
@@ -36,9 +39,9 @@ async def resend_email_verification_code(user: CurrentUser, redis: CurrentRedis)
         raise exc
 
     code = await ev.issue_code(redis, str(user.id))
-    subject, body = ev.email_content(code)
+    subject, body, html = ev.email_content(code, locale)
     try:
-        await send_email(user.email, subject, body)
+        await send_email(user.email, subject, body, html)
     except Exception:
         # Don't start the cooldown for a send that never went out - otherwise a
         # transient SMTP hiccup locks the user out of a real retry for a full

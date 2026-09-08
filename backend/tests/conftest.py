@@ -96,6 +96,22 @@ async def auto_rollback(db: AsyncSession):
 
 
 @pytest.fixture(scope="function", autouse=True)
+def no_outbound_email(monkeypatch):
+    """Pin the email connector to the one that cannot leave the machine.
+
+    Unlike DATABASE_URL and REDIS_URL, EMAIL_PROVIDER has no TEST_ counterpart that
+    config.py swaps in under pytest — it reads the same .env the dev app does. So a
+    developer who sets EMAIL_PROVIDER=lettermint to work on it would, from then on,
+    have every registration test in the suite fire a real API call at a real
+    provider with real credentials, and the SMTP tests would silently stop testing
+    SMTP. Anything that wants a specific connector overrides this itself; anything
+    that doesn't gets the one whose unconfigured state is to log and return.
+    """
+    monkeypatch.setattr(settings, "EMAIL_PROVIDER", "smtp")
+    monkeypatch.setattr(settings, "SMTP_HOST", None)
+
+
+@pytest.fixture(scope="function", autouse=True)
 async def flush_redis():
     """Isolate feed state per test. Runs against the test Redis DB (DB 1), which the
     config swaps in under pytest — never the dev DB."""

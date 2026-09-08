@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core import email_verification as ev
 from app.core.config import settings
 from app.core.email import send_email
+from app.core.locale import parse_accept_language
 from app.core.errors import api_error
 from app.core.logger import bind_request_context, get_logger
 from app.core.password_policy import strength_violations
@@ -54,6 +55,20 @@ _USERNAME_CONSTRAINT = "users_username_key"
 #: Changing any of them bumps `User.settings_revision`; changing anything else
 #: (bio, username, password) does not, because those are only ever edited online.
 SETTINGS_FIELDS = frozenset({"dark_mode"})
+
+
+def _locale_of(request: "Request | None") -> str:
+    """The locale to write a mail in, from the request that triggered it.
+
+    fastapi-users' hooks get the `Request` but no dependency injection, so
+    `CurrentLocale` (app/deps/locale.py) is not available here - this is the same
+    resolution one step lower down. `None` happens when a hook is invoked outside
+    a request (a script, a test calling the manager directly), and falls back to
+    DEFAULT_LOCALE like an absent header would.
+    """
+    if request is None:
+        return settings.DEFAULT_LOCALE
+    return parse_accept_language(request.headers.get("accept-language"))
 
 
 class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
@@ -107,9 +122,9 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         # something we already know.
         if settings.REQUIRE_EMAIL_VERIFICATION and not user.is_verified:
             code = await ev.issue_code(self._redis, str(user.id))
-            subject, body = ev.email_content(code)
+            subject, body, html = ev.email_content(code, _locale_of(request))
             try:
-                await send_email(user.email, subject, body)
+                await send_email(user.email, subject, body, html)
             except Exception:
                 # No address in the line: an email is personal data and the user
                 # id resolves to one for whoever is entitled to look. This is an
@@ -319,9 +334,9 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
             return
 
         code = await ev.issue_code(self._redis, str(user.id))
-        subject, body = ev.email_content(code)
+        subject, body, html = ev.email_content(code, _locale_of(request))
         try:
-            await send_email(user.email, subject, body)
+            await send_email(user.email, subject, body, html)
         except Exception:
             # The email change itself is already committed, so failing the request
             # now would tell the client nothing happened when in fact everything

@@ -85,6 +85,16 @@ after cloning).
   (`fastapi_users.current_user()`), exposed as the `CurrentUser` / `CurrentSuperuser` typed
   dependencies. `User` model (`app/models/user.py`) extends `SQLAlchemyBaseUserTableUUID`, so user
   IDs are UUIDs.
+  **`User.username` is unique, and the refusal is `409 username_taken`** — one code for both
+  writers (`POST /auth/register` and fastapi-users' own `PATCH /users/me`), because the client
+  renders it under the same field either way. Enforced in `UserManager`, not in a route: the
+  stock fastapi-users routers are where a username reaches the DB, so a route-level check
+  would have had nowhere to live for the PATCH. Two layers on purpose — `is_username_taken`
+  (`app/core/username.py`) is a probe, not a reservation, so a lost race still hits the unique
+  index and `_conflict_as_api_error` maps *that* to the same 409 after rolling the session back
+  (matched on the constraint name; any other IntegrityError stays a 500). Without the second
+  layer the answer would be a bare 500 on the one field a user could have fixed themselves,
+  which is exactly what it was.
 - **DB layer** (`backend/app/db.py`, `app/deps/db.py`): async SQLAlchemy 2.0 (`asyncpg`). Models
   subclass `Base` (`DeclarativeBase`). Route handlers get a session via the `CurrentAsyncSession`
   dependency (one session per request, closed after).
@@ -194,6 +204,74 @@ after cloning).
   between the two, since Google ID tokens live about an hour. `User.oauth_accounts` is
   `lazy="selectin"`, deliberately not the `joined` fastapi-users' docs show: a joined *collection*
   eager load obliges every `select(User)` in the codebase to call `.unique()` or raise at runtime.
+- **Outbound email** (`backend/app/core/email.py`): `send_email(to, subject, body)` is the only
+  entry point the codebase knows, and `EMAIL_PROVIDER` picks which connector it hands the
+  message to — `"smtp"` (default, `aiosmtplib`, any relay) or `"lettermint"`
+  (https://lettermint.co, an EU transactional provider, through its official `lettermint` SDK).
+  Adding the second one changed nothing about the first: the default is still SMTP, so an
+  environment that sets nothing behaves exactly as it did. Three things are load-bearing:
+  - **Only the SMTP connector logs instead of sending.** An unset `SMTP_HOST` is the *default*
+    state, so that fallback can only fire where nobody asked for real mail — which is what makes
+    it safe to log the address and the body there, and why a dev reads the verification code out
+    of `docker compose logs`. Naming a connector is the opposite: an explicit act whose only
+    purpose is delivery. So `EMAIL_PROVIDER=lettermint` without `LETTERMINT_API_TOKEN` **fails at
+    startup** (`Settings.require_token_for_lettermint`) rather than degrading — degrading would
+    print verification codes into a production log stream, which is the one thing the logging
+    rules forbid, and it would fail *silently* until a user reported that no code arrived.
+    That check is a **field** validator, not a model one, for the same reason it exists:
+    pydantic quotes the validated input in the error it raises, and a model validator's input is
+    the whole settings dict — so the crash meant to protect a secret would print `SECRET_KEY`
+    into the log on its way out. `email.delivery_configured()` reports the same fact on the
+    `app.started` line.
+  - **A Lettermint client per send, never a shared one.** The SDK's email builder is mutable and
+    *cached on the client* (`client.email` returns the same object every time), so two coroutines
+    sharing one client would interleave their `.to()`/`.subject()` calls and mail one user
+    another user's verification code. A fresh client per message costs a TLS handshake at a
+    volume of roughly one mail per registration, and makes the hazard unexpressible rather than a
+    comment someone has to remember.
+  - **`LETTERMINT_FROM_EMAIL`/`_NAME` fall back to `SMTP_FROM_*`**, so there is nothing extra to
+    set in the normal case. They exist at all because a from-address is provider-scoped —
+    Lettermint only accepts a domain verified inside *its* account — so one shared setting could
+    not express both the day those differ.
+  Two smaller things the first live send taught. The SDK's exceptions **stringify to
+  nothing usable** — a rejected send raises `ValidationError: Validation error:
+  ValidationError` and the caller's `log.exception` then writes a traceback naming no
+  cause; the API's actual field errors are on `.response_body`, so the connector logs
+  them itself (`email.lettermint_rejected`) with the recipient scrubbed back out, since
+  Lettermint quotes values in some of its messages. And `tests/conftest.py`'s
+  `no_outbound_email` pins the connector per test: `EMAIL_PROVIDER` has no `TEST_`
+  counterpart the way `DATABASE_URL` does, so without it a developer with
+  `EMAIL_PROVIDER=lettermint` in `.env` makes every registration test in the suite fire
+  a real API call at a real provider, and the SMTP tests quietly stop testing SMTP.
+  Note the `httpx` pin in `pyproject.toml` is now a range with a real ceiling: lettermint needs
+  `>=0.27`, and `0.28` removed the `AsyncClient(app=...)` shortcut `tests/conftest.py` builds the
+  test client with.
+- **Email bodies** (`backend/app/core/email_templates.py`): the HTML and matching
+  plain-text bodies, kept apart from `email.py` (which is about *connectors*) and
+  `email_verification.py` (about codes and Redis). `send_email(to, subject, body, html=None)`
+  sends `multipart/alternative` when `html` is given — **`body` is never optional**, since a
+  client set to prefer text would otherwise show nothing, and an HTML-only alternative is a
+  spam signal by itself. Three things are load-bearing:
+  - **It is markup from 2005 on purpose.** Nested tables and inline `style` attributes,
+    because Gmail strips `<style>` in some contexts and Outlook renders through Word's
+    engine, so neither flexbox nor grid can be relied on. No external assets either: remote
+    images are blocked by default in most clients, so a logo image renders as a broken box
+    for a first-time recipient — and the code itself must stay selectable text so it can be
+    copied and read aloud. `tests/core/test_email_templates.py` asserts each of these,
+    because every one of them fails *silently* in exactly one popular client.
+  - **Copy is localized here rather than via `api_error` codes.** That contract works by
+    handing a code to the client and letting its `.arb` supply the words; there is no client
+    in an inbox, so the words have to live on this side. Same situation as `banner.py`, same
+    shape: one dict per locale. `_t` falls back **per key**, so a half-finished translation
+    degrades to one English sentence rather than raising and failing a send that carries a
+    credential someone is waiting on.
+  - **Locale reaches the mail two different ways**, because the three senders differ: the
+    resend route takes `CurrentLocale`, while fastapi-users' `on_after_register` /
+    `on_after_update` hooks get no dependency injection — only a `Request` — so
+    `_locale_of()` in `app/deps/users.py` does the same resolution one level lower, and falls
+    back to `DEFAULT_LOCALE` when a hook fires outside a request at all.
+  Colors track the Flutter app's palette (`lib/src/core/theme/app_colors.dart`) — emerald
+  accent, neutral greys — so the mail and the app read as one product.
 - **Object storage** (`app/core/storage.py`, `app/core/sigv4.py`): every uploaded image, video and
   poster frame lives in an S3-compatible bucket — a **MinIO container** in docker-compose locally
   and in CI, a **Railway Bucket** (Tigris) in production. Nothing in the code knows which; the

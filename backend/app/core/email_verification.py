@@ -11,6 +11,7 @@ import secrets
 
 from redis.asyncio import Redis
 
+from app.core import email_templates as templates
 from app.core.config import settings
 
 _CODE_KEY = "email_verify:code:{user_id}"
@@ -30,17 +31,14 @@ def _generate_code() -> str:
     return str(secrets.randbelow(upper)).zfill(settings.EMAIL_VERIFICATION_CODE_LENGTH)
 
 
-def email_content(code: str) -> tuple[str, str]:
-    """(subject, body) for the verification email - shared by the on-register send
-    and the resend endpoint so the copy only lives in one place."""
-    minutes = settings.EMAIL_VERIFICATION_CODE_TTL_SECONDS // 60
-    subject = "Your Poulse Kora verification code"
-    body = (
-        f"Your verification code is {code}.\n\n"
-        f"It expires in {minutes} minutes. If you didn't request this, you can "
-        "ignore this email."
-    )
-    return subject, body
+def email_content(code: str, locale: str) -> tuple[str, str, str]:
+    """(subject, text, html) for the verification email - shared by the on-register
+    send and the resend endpoint so the copy only lives in one place.
+
+    A thin pass-through to app/core/email_templates.py, kept here so the two
+    senders still import one name from the module that owns the code itself.
+    """
+    return templates.verification_email(code, locale)
 
 
 async def issue_code(redis: Redis, user_id: str) -> str:

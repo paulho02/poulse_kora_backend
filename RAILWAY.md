@@ -31,8 +31,10 @@ Set these as Variables on the backend service (Settings → Variables):
 | `SECRET_KEY` | yes | Generate per environment: `openssl rand -hex 32`. Never reuse a dev value. |
 | `BACKEND_CORS_ORIGINS` | yes | JSON array of the exact `https://` origin(s) the Flutter web app is served from, e.g. `["https://<flutter-service>.up.railway.app"]`. See the bootstrapping note below — you won't have this value until step 4. |
 | `REQUIRE_STRONG_PASSWORD` | recommended | `true` — defaults to `false`, which is fine for local dev only. Anything internet-reachable should turn this on. |
-| `REQUIRE_EMAIL_VERIFICATION` | already `true` by default | Keep it, but it's a no-op (codes only get logged, never delivered) until SMTP is configured — see below. |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | required if `REQUIRE_EMAIL_VERIFICATION=true` | Any relay works (Gmail SMTP, SES, Mailgun, Postmark, ...). |
+| `REQUIRE_EMAIL_VERIFICATION` | already `true` by default | Keep it, but it's a no-op (codes only get logged, never delivered) until an email connector is configured — see below. |
+| `EMAIL_PROVIDER` | recommended | `smtp` (default) or `lettermint`. Picks which connector `send_email` uses; the other one's settings are then ignored. |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | required if `EMAIL_PROVIDER=smtp` and `REQUIRE_EMAIL_VERIFICATION=true` | Any relay works (Gmail SMTP, SES, Mailgun, Postmark, ...). |
+| `LETTERMINT_API_TOKEN` | required if `EMAIL_PROVIDER=lettermint` | A *sending* token from the Lettermint dashboard, not a team API token. The app refuses to boot without it — see below. Optional companions: `LETTERMINT_ROUTE`, `LETTERMINT_FROM_EMAIL`, `LETTERMINT_FROM_NAME`. |
 | `STORAGE_ENDPOINT_URL` | yes | `${{Bucket.ENDPOINT}}` (`https://storage.railway.app`) |
 | `STORAGE_BUCKET` | yes | `${{Bucket.BUCKET}}` |
 | `STORAGE_REGION` | yes | `${{Bucket.REGION}}` — `auto` |
@@ -118,8 +120,17 @@ or whenever the Flutter app's domain changes (e.g. adding a custom domain).
   convenience only.
 - **`SECRET_KEY` must be a real random value**, not the `CHANGE_ME` placeholder from
   `env-template`/local `.env`.
-- **SMTP must be configured** for `REQUIRE_EMAIL_VERIFICATION` to do anything real — otherwise it's
-  silently a no-op (see `app/core/email.py`: unset `SMTP_HOST` just logs and returns).
+- **An email connector must be configured** for `REQUIRE_EMAIL_VERIFICATION` to do anything real.
+  On the default `EMAIL_PROVIDER=smtp`, an unset `SMTP_HOST` is silently a no-op (see
+  `app/core/email.py`: it just logs the code and returns), which is the local-dev behaviour leaking
+  into a deploy. `EMAIL_PROVIDER=lettermint` cannot fail this way — a missing `LETTERMINT_API_TOKEN`
+  crashes the app at startup instead, deliberately, so that verification codes can never end up
+  printed into a production log stream. Both cases are visible on the `app.started` line
+  (`email_provider`, `email_delivery_configured`).
+- **Sending domain**: whichever connector is live, the from-address has to be one that provider is
+  allowed to send as. For Lettermint that means the domain is verified in the Lettermint account
+  (DNS records on `poulse.com`); `LETTERMINT_FROM_EMAIL` exists for the case where it differs
+  from the address the SMTP relay used.
 - **Rate limiting is already on by default** (`INTERACTION_RATE_LIMIT`/`INTERACTION_RATE_WINDOW_SECONDS`
   in `app/core/config.py`) — no action needed, just be aware it exists if load testing.
 - **`/docs/` (OpenAPI UI) is publicly reachable by design** (`app/factory.py`) — acceptable for an
@@ -200,7 +211,8 @@ deliberate decision rather than done by default.
 - Tail the deploy logs for the `alembic upgrade head` output on boot to confirm migrations applied
   cleanly.
 - Look for the `app.started` line: it names the flags that actually took effect on that deploy
-  (`smtp_configured`, `require_email_verification`, `google_oauth_enabled`, `storage_bucket`,
+  (`email_provider`, `email_delivery_configured`, `require_email_verification`,
+  `google_oauth_enabled`, `storage_bucket`,
   `log_format` — which should read `json` here). A misconfiguration is usually visible in that one
   line before any user finds it.
 - Upload a profile picture from the app and confirm the returned `profile_picture_url` points at

@@ -20,7 +20,14 @@ email-validator = "^2.2.0"
 pydantic-settings = "^2.8.1"
 redis = { extras = ["hiredis"], version = "^5.2.1" }
 aiosmtplib = "^5.1.2"
-httpx = "^0.24.1"
+# Ceiling is load-bearing, not caution: httpx 0.28 removed the `AsyncClient(app=...)`
+# shortcut that tests/conftest.py builds the test client with. The floor is
+# lettermint's (>=0.27). Raising this means switching that fixture to ASGITransport.
+httpx = "^0.27"
+# Official SDK for Lettermint (https://lettermint.co), the EU transactional email
+# provider behind EMAIL_PROVIDER="lettermint". See app/core/email.py - the SMTP
+# connector is still the default, so this is dormant until that setting says so.
+lettermint = "^2.5.0"
 # Official Google library, used only to verify Google ID tokens (signature,
 # issuer, expiry) in app/core/google_oauth.py. The `requests` extra selects its
 # HTTP transport; `requests` is already a direct dependency above.

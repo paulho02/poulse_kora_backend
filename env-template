@@ -75,6 +75,45 @@ MOLLIE_API_KEY=
 # backend — a local dev server needs a tunnel (e.g. ngrok) with that URL set here.
 PUBLIC_BASE_URL=http://localhost:8000
 
+# --- outbound email ---
+# Which connector send_email uses (app/core/email.py). Both ship in the image;
+# this picks one.
+#   smtp        any relay, via SMTP_* below. The default.
+#   lettermint  https://lettermint.co, the EU transactional provider, via its
+#               official SDK and LETTERMINT_* below.
+EMAIL_PROVIDER=smtp
+#
+# SMTP connector. Leaving SMTP_HOST unset (the local-dev default) is what makes
+# verification codes appear in `docker compose logs backend` instead of in an
+# inbox, so registration works end-to-end here with no relay at all.
+# SMTP_HOST=
+# SMTP_PORT=587
+# SMTP_USERNAME=
+# SMTP_PASSWORD=
+# SMTP_USE_TLS=true
+# SMTP_FROM_EMAIL=no-reply@poulse.com
+# SMTP_FROM_NAME=Poulse Kora
+#
+# Lettermint connector. LETTERMINT_API_TOKEN is a *sending* token from the
+# Lettermint dashboard, not a team API token, and it is required the moment
+# EMAIL_PROVIDER=lettermint - the app refuses to start without it rather than
+# quietly logging codes the way the unconfigured SMTP path does. There is no
+# local sandbox: pointing this at Lettermint sends real mail, so leave the
+# provider on smtp for day-to-day dev.
+# LETTERMINT_API_TOKEN=
+# The from-address domain must be verified in the Lettermint account, or every
+# send comes back 422 "The domain '...' is not verified or does not belong to
+# your account" - which is what the email.lettermint_rejected log line reports.
+# Optional. Unset uses the account's default sending route.
+# LETTERMINT_ROUTE=
+# Optional, both fall back to SMTP_FROM_EMAIL / SMTP_FROM_NAME. Only needed if
+# the domain verified in Lettermint differs from the one the SMTP relay sends as.
+# LETTERMINT_FROM_EMAIL=
+# LETTERMINT_FROM_NAME=
+# Optional. Unset uses the SDK default (https://api.lettermint.co/v1).
+# LETTERMINT_API_BASE_URL=
+# LETTERMINT_TIMEOUT_SECONDS=30
+
 # --- Google sign-in ---
 # Defaults to false; leave unset until the Google Cloud OAuth clients exist.
 # GOOGLE_CLIENT_IDS lists the `aud` values accepted on incoming ID tokens. The
@@ -99,10 +138,14 @@ GOOGLE_CLIENT_IDS='["CHANGE_ME.apps.googleusercontent.com"]'
 #   '["https://poulse-kora-app-production.up.railway.app"]'. No wildcards.
 # REQUIRE_STRONG_PASSWORD: defaults to false (fine for pure local dev). Set to true
 #   for any environment reachable over the internet, including "int".
-# SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL: required
-#   once real users need to receive the email-verification code
-#   (REQUIRE_EMAIL_VERIFICATION defaults to true) — left unset, verification codes
-#   are only logged server-side and no one can complete verification.
+# EMAIL_PROVIDER and its connector's settings: one of the two must be configured
+#   for real once real users need to receive the email-verification code
+#   (REQUIRE_EMAIL_VERIFICATION defaults to true). Either EMAIL_PROVIDER=smtp with
+#   SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL, or
+#   EMAIL_PROVIDER=lettermint with LETTERMINT_API_TOKEN. Left on smtp with no
+#   SMTP_HOST, verification codes are only logged server-side and no one can
+#   complete verification; the `app.started` log line reports which connector is
+#   live and whether it is configured.
 # STORAGE_*: point at the Railway Bucket instead of the local MinIO container -
 #   STORAGE_ENDPOINT_URL=${{Bucket.ENDPOINT}} (https://storage.railway.app),
 #   STORAGE_BUCKET=${{Bucket.BUCKET}}, STORAGE_REGION=${{Bucket.REGION}} ("auto"),

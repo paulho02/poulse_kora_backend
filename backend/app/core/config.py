@@ -1,6 +1,6 @@
 import sys
 from functools import cached_property
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, HttpUrl, PostgresDsn, RedisDsn, field_validator
 from pydantic.networks import AnyHttpUrl
@@ -266,7 +266,13 @@ class Settings(BaseSettings):
     # app/core/google_oauth.py - an empty list accepts nothing.
     GOOGLE_CLIENT_IDS: list[str] = []
 
-    # --- outbound email (SMTP) ---
+    # --- outbound email ---
+    # Which connector send_email hands the message to (app/core/email.py). Both are
+    # always compiled in; this picks one. "smtp" is the original path and stays the
+    # default, so an environment that says nothing keeps behaving exactly as before.
+    EMAIL_PROVIDER: Literal["smtp", "lettermint"] = "smtp"
+
+    # --- outbound email: SMTP connector ---
     # Any relay works unchanged (Gmail SMTP, AWS SES, Mailgun, Postmark, ...) - just
     # set these in .env. Left unset (the default, e.g. local dev/tests), send_email
     # logs the message instead of sending it, so registering an account never
@@ -276,8 +282,72 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str | None = None
     SMTP_PASSWORD: str | None = None
     SMTP_USE_TLS: bool = True
-    SMTP_FROM_EMAIL: str = "no-reply@poulsekora.app"
+    # Also the sender identity of the Lettermint connector unless LETTERMINT_FROM_*
+    # overrides it - see there for when the two have to differ.
+    SMTP_FROM_EMAIL: str = "no-reply@poulse.com"
     SMTP_FROM_NAME: str = "Poulse Kora"
+
+    # --- outbound email: Lettermint connector ---
+    # https://lettermint.co - an EU-hosted transactional provider, driven through its
+    # official SDK (`lettermint` on PyPI). Reached only when EMAIL_PROVIDER is
+    # "lettermint"; every value below is ignored otherwise.
+    #
+    # The token is a *sending* token (the SDK's default auth scheme), not a team API
+    # token. It is required whenever the connector is selected - see
+    # `require_token_for_lettermint` below for why a missing one is a startup
+    # failure rather than a quiet fall back to logging.
+    # `validate_default` so the check below still runs when the env omits the
+    # variable entirely, which is exactly the case it exists to catch.
+    LETTERMINT_API_TOKEN: str | None = Field(default=None, validate_default=True)
+
+    @field_validator("LETTERMINT_API_TOKEN")
+    @classmethod
+    def require_token_for_lettermint(
+        cls, v: str | None, info: dict[str, Any]
+    ) -> str | None:
+        """A selected email connector must actually be able to send.
+
+        Deliberately a startup failure rather than a fall back to the SMTP path's
+        log-the-message behaviour. That fallback is safe precisely because *not*
+        configuring SMTP is the default state, so it can only fire where nobody has
+        asked for real mail. Naming a connector is the opposite: an explicit act
+        whose only purpose is delivery. Left to degrade quietly it would print
+        verification codes into a production log stream - the one thing
+        app/core/logger.py says never to log - and the failure would be invisible
+        until a user reported that no code ever arrived. A crash on deploy is the
+        loud version of the same information.
+
+        A field validator rather than a model one, for the same reason: pydantic
+        puts the *validated input* in the error it raises, and for a model
+        validator that input is the whole settings dict - so the crash meant to
+        protect a secret would print SECRET_KEY into the log on its way out. Here
+        the offending value is this field's own, which is by definition unset.
+        EMAIL_PROVIDER is declared above so `info.data` already holds it; pydantic
+        fills it in field-definition order.
+        """
+        if info.data.get("EMAIL_PROVIDER") == "lettermint" and not v:
+            raise ValueError(
+                'EMAIL_PROVIDER is "lettermint" but LETTERMINT_API_TOKEN is not set'
+            )
+        return v
+
+    # Unset uses the SDK's own default (https://api.lettermint.co/v1). Here only so a
+    # staging or mock endpoint can be pointed at without a code change, mirroring
+    # MOLLIE_API_BASE_URL.
+    LETTERMINT_API_BASE_URL: str | None = None
+    LETTERMINT_TIMEOUT_SECONDS: float = 30.0
+    # Lettermint "route" - which configured sending route the message goes out on.
+    # Unset lets the account's default route decide, which is what a single-route
+    # account wants; set it once transactional and marketing mail are separated.
+    LETTERMINT_ROUTE: str | None = None
+    # Sender identity for this connector, falling back to the SMTP_FROM_* values so
+    # there is nothing extra to set in the normal case. They are separate settings
+    # because a from-address is provider-scoped: Lettermint only accepts a domain
+    # verified inside *its* account, so on the day that domain differs from whatever
+    # the SMTP relay was allowed to send as, one shared setting could not express
+    # both.
+    LETTERMINT_FROM_EMAIL: str | None = None
+    LETTERMINT_FROM_NAME: str | None = None
 
     # --- supporter subscription (payments) ---
     # Master switch: off means every /subscriptions/* route answers 404

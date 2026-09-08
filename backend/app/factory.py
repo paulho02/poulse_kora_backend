@@ -16,6 +16,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 
 from app.api import api_router
+from app.core import email
 from app.core.config import settings
 from app.core.errors import detail_text, slugify_detail
 from app.core.logger import configure_logging, get_logger, resolved_log_format
@@ -66,7 +67,8 @@ async def lifespan(app: FastAPI):
         log_level=settings.LOG_LEVEL,
         log_format=resolved_log_format(),
         require_email_verification=settings.REQUIRE_EMAIL_VERIFICATION,
-        smtp_configured=bool(settings.SMTP_HOST),
+        email_provider=settings.EMAIL_PROVIDER,
+        email_delivery_configured=email.delivery_configured(),
         google_oauth_enabled=settings.GOOGLE_OAUTH_ENABLED,
         subscriptions_enabled=settings.SUBSCRIPTIONS_ENABLED,
         storage_bucket=settings.STORAGE_BUCKET,
