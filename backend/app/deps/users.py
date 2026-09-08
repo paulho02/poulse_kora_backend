@@ -12,6 +12,7 @@ from fastapi_users.exceptions import InvalidPasswordException, UserNotExists
 from fastapi_users.manager import BaseUserManager, UUIDIDMixin
 from fastapi_users_db_sqlalchemy import SQLAlchemyUserDatabase
 from redis.asyncio import Redis
+from sqlalchemy.exc import IntegrityError
 
 from app.core import email_verification as ev
 from app.core.config import settings
@@ -19,6 +20,7 @@ from app.core.email import send_email
 from app.core.errors import api_error
 from app.core.logger import bind_request_context, get_logger
 from app.core.password_policy import strength_violations
+from app.core.username import is_username_taken
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import get_redis
 from app.feed.service import earn_token
@@ -43,6 +45,10 @@ jwt_authentication = AuthenticationBackend(
     get_strategy=get_jwt_strategy,
 )
 
+
+#: The unique index behind `User.username`, named by Postgres. Only used to tell a
+#: username clash apart from any other IntegrityError, which stays a 500.
+_USERNAME_CONSTRAINT = "users_username_key"
 
 #: User fields the mobile app mirrors into its local, offline-editable settings store.
 #: Changing any of them bumps `User.settings_revision`; changing anything else
@@ -169,6 +175,62 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         log.info("auth.login_failed", reason="bad_password", user_id=str(existing.id))
         return None
 
+    async def _check_username_free(
+        self, username: str | None, *, exclude_user_id: uuid.UUID | None = None
+    ) -> None:
+        """Refuse a username someone else already holds, with a code the client
+        can render under the field.
+
+        `User.username` is unique, so without this the INSERT/UPDATE raises an
+        IntegrityError that nothing catches and the user gets a bare 500 - a
+        registration form saying "something went wrong" about the one thing they
+        could have fixed themselves. Checked here rather than in a route because
+        both writers (`POST /auth/register` and fastapi-users' own
+        `PATCH /users/me` / `PATCH /users/{id}`) go through this manager.
+        """
+        if username is None:
+            return
+        session = self.user_db.session
+        if await is_username_taken(session, username, exclude_user_id=exclude_user_id):
+            # The name itself stays out of the line - it is user-chosen content,
+            # and `user_id` is already bound on an authenticated request. Worth
+            # counting: a registration form that keeps refusing names is the kind
+            # of drop-off nobody would otherwise see.
+            log.info(
+                "user.username_taken",
+                on="update" if exclude_user_id else "register",
+            )
+            raise api_error(409, "username_taken")
+
+    async def _conflict_as_api_error(self, exc: IntegrityError) -> None:
+        """Turn the lost race into the same refusal as the pre-check.
+
+        `_check_username_free` is a probe, not a reservation, so two signups
+        claiming one name in the same instant both pass it and one loses at the
+        constraint. Same answer either way; anything else is a genuine bug and is
+        re-raised. The session has to be rolled back first - it is aborted after a
+        failed flush, and it outlives this call (the request still has to render
+        the error response through it).
+        """
+        await self.user_db.session.rollback()
+        # asyncpg names the constraint on the exception; the string match is the
+        # fallback for drivers/wrappers that only put it in the message.
+        constraint = getattr(exc.orig, "constraint_name", None)
+        if constraint != _USERNAME_CONSTRAINT and _USERNAME_CONSTRAINT not in str(
+            exc.orig
+        ):
+            raise exc
+        log.info("user.username_taken", on="race")
+        raise api_error(409, "username_taken")
+
+    async def create(self, user_create, safe: bool = False, request=None):
+        """Reject a taken username before fastapi-users writes the row."""
+        await self._check_username_free(getattr(user_create, "username", None))
+        try:
+            return await super().create(user_create, safe=safe, request=request)
+        except IntegrityError as exc:
+            await self._conflict_as_api_error(exc)
+
     async def update(self, user_update, user: UserModel, safe: bool = False, request=None):
         """`PATCH /users/me` is fastapi-users' own stock route, and `BaseUserUpdate`
         exposes a bare `password` field with no proof the caller knows the current
@@ -190,7 +252,8 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
 
     async def _update(self, user: UserModel, update_dict: dict) -> UserModel:
         """Derive the fields a write implies: `settings_revision` on a settings
-        change, and revoking `is_verified` on an email change.
+        change, and revoking `is_verified` on an email change - plus the one guard
+        that refuses a write outright, a username someone else holds.
 
         Hooked here rather than in a route because `PATCH /users/me` is served by
         fastapi-users' own router, and because this is the single chokepoint every
@@ -207,6 +270,10 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
                 **update_dict,
                 "settings_revision": user.settings_revision + 1,
             }
+        if "username" in update_dict and update_dict["username"] != user.username:
+            await self._check_username_free(
+                update_dict["username"], exclude_user_id=user.id
+            )
         # `is_verified` asserts one specific thing: that this person can read mail
         # at `user.email`. It is proof about an *address*, not about an account, so
         # pointing the account at a different address invalidates it - otherwise
@@ -223,7 +290,10 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
             # change that revokes verification is the start of most "I can no
             # longer get in" reports, so it wants to be findable.
             log.info("user.email_changed", user_id=str(user.id))
-        return await super()._update(user, update_dict)
+        try:
+            return await super()._update(user, update_dict)
+        except IntegrityError as exc:
+            await self._conflict_as_api_error(exc)
 
     async def on_after_update(
         self, user: UserModel, update_dict: dict, request: Request | None = None

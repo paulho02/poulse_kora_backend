@@ -68,6 +68,52 @@ class TestRegister:
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"] == "register_user_already_exists"
 
+    async def test_duplicate_username_is_a_structured_error(self, client: AsyncClient):
+        """`User.username` is unique, so this used to reach Postgres and come back
+        as a bare 500 - the register form could only say "something went wrong"
+        about the one field the user could have fixed themselves."""
+        username = generate_random_string(15)
+        payload = {
+            "email": f"{generate_random_string(20)}@{generate_random_string(10)}.com",
+            "password": "Sup3rSecret!23",
+            "username": username,
+        }
+        resp = await client.post(settings.API_PATH + "/auth/register", json=payload)
+        assert resp.status_code == 201, resp.text
+
+        payload["email"] = (
+            f"{generate_random_string(20)}@{generate_random_string(10)}.com"
+        )
+        resp = await client.post(settings.API_PATH + "/auth/register", json=payload)
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error"] == "username_taken"
+
+    async def test_username_race_lost_at_the_constraint_is_the_same_error(
+        self, client: AsyncClient, monkeypatch
+    ):
+        """The pre-check is a probe, not a reservation: two signups claiming one
+        name in the same instant both pass it and one loses at the unique index.
+        Forcing the probe to always answer "free" is what that race looks like from
+        here, and the answer has to be the same refusal rather than a 500."""
+        username = generate_random_string(15)
+        payload = {
+            "email": f"{generate_random_string(20)}@{generate_random_string(10)}.com",
+            "password": "Sup3rSecret!23",
+            "username": username,
+        }
+        resp = await client.post(settings.API_PATH + "/auth/register", json=payload)
+        assert resp.status_code == 201, resp.text
+
+        monkeypatch.setattr(
+            users_module, "is_username_taken", AsyncMock(return_value=False)
+        )
+        payload["email"] = (
+            f"{generate_random_string(20)}@{generate_random_string(10)}.com"
+        )
+        resp = await client.post(settings.API_PATH + "/auth/register", json=payload)
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error"] == "username_taken"
+
     async def test_weak_password_is_rejected_with_a_reason(
         self, client: AsyncClient, monkeypatch
     ):
@@ -251,6 +297,89 @@ class TestUpdateMe:
             settings.API_PATH + "/users/me", headers=get_jwt_header(user)
         )
         assert resp.json()["onboarding_completed"] is True
+
+
+class TestUsernameConflicts:
+    """A taken username is refused with a code the client can put under the field,
+    on both writers (see app/deps/users.py: UserManager)."""
+
+    async def _set_username(self, client: AsyncClient, user, username: str):
+        return await client.patch(
+            settings.API_PATH + "/users/me",
+            json={"username": username},
+            headers=get_jwt_header(user),
+        )
+
+    async def test_taking_someone_elses_username_is_a_structured_error(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        username = generate_random_string(15)
+        holder = await create_user()
+        assert (await self._set_username(client, holder, username)).status_code == 200
+
+        other = await create_user()
+        resp = await self._set_username(client, other, username)
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error"] == "username_taken"
+
+    async def test_refusal_leaves_the_account_usable(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        """The refusal must not poison the session or half-apply the PATCH: the
+        next request has to work, and the old username has to still be there."""
+        username = generate_random_string(15)
+        holder = await create_user()
+        assert (await self._set_username(client, holder, username)).status_code == 200
+
+        other = await create_user()
+        mine = generate_random_string(15)
+        assert (await self._set_username(client, other, mine)).status_code == 200
+        assert (await self._set_username(client, other, username)).status_code == 409
+
+        resp = await client.get(
+            settings.API_PATH + "/users/me", headers=get_jwt_header(other)
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["username"] == mine
+
+    async def test_race_lost_at_the_constraint_leaves_the_account_usable(
+        self, client: AsyncClient, create_user: Callable, monkeypatch
+    ):
+        """Same race as on register, on the UPDATE side - where the rollback also
+        has to undo the username already assigned to the in-memory user."""
+        username = generate_random_string(15)
+        holder = await create_user()
+        assert (await self._set_username(client, holder, username)).status_code == 200
+
+        other = await create_user()
+        mine = generate_random_string(15)
+        assert (await self._set_username(client, other, mine)).status_code == 200
+
+        monkeypatch.setattr(
+            users_module, "is_username_taken", AsyncMock(return_value=False)
+        )
+        resp = await self._set_username(client, other, username)
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error"] == "username_taken"
+
+        monkeypatch.undo()
+        resp = await client.get(
+            settings.API_PATH + "/users/me", headers=get_jwt_header(other)
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["username"] == mine
+
+    async def test_resending_your_own_username_is_not_a_conflict(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        """The onboarding step PATCHes what the server already has when the user
+        edits and then reverts - that must not read as a clash with themselves."""
+        username = generate_random_string(15)
+        user = await create_user()
+        assert (await self._set_username(client, user, username)).status_code == 200
+        resp = await self._set_username(client, user, username)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["username"] == username
 
 
 class TestProfilePicture:

@@ -8,6 +8,7 @@ here, and confirms/edits it during onboarding (the app's username step).
 
 import re
 import secrets
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,18 +42,31 @@ async def generate_unique_username(session: AsyncSession, *, seed: str) -> str:
 
     for attempt in range(_SEQUENTIAL_ATTEMPTS):
         candidate = base if attempt == 0 else f"{base[: MAX_LENGTH - 2]}{attempt + 1}"
-        if not await _taken(session, candidate):
+        if not await is_username_taken(session, candidate):
             return candidate
 
     # A popular base name. Stop probing one at a time and jump somewhere sparse.
     while True:
         candidate = f"{base[: MAX_LENGTH - 6]}{secrets.randbelow(1_000_000):06d}"
-        if not await _taken(session, candidate):
+        if not await is_username_taken(session, candidate):
             return candidate
 
 
-async def _taken(session: AsyncSession, username: str) -> bool:
-    result = await session.execute(
-        select(User.id).where(User.username == username).limit(1)
-    )
+async def is_username_taken(
+    session: AsyncSession, username: str, *, exclude_user_id: uuid.UUID | None = None
+) -> bool:
+    """Whether another account already holds `username`.
+
+    Matched exactly, the way the unique constraint does - answering "taken" for a
+    name Postgres would in fact accept would be a lie the user cannot act on.
+    `exclude_user_id` is for updates, so re-sending your own name is not a clash.
+
+    Like `generate_unique_username`, this is a probe and not a reservation: the
+    INSERT/UPDATE can still lose a race, which is why every caller also treats the
+    IntegrityError as the same refusal (see app/deps/users.py).
+    """
+    query = select(User.id).where(User.username == username).limit(1)
+    if exclude_user_id is not None:
+        query = query.where(User.id != exclude_user_id)
+    result = await session.execute(query)
     return result.first() is not None
