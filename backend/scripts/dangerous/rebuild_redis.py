@@ -15,7 +15,7 @@ posts they had already reviewed.
 Idempotent — safe to re-run (e.g. after a Redis flush, or to reconcile drift).
 
 Usage (inside the backend container):
-    docker compose exec backend python rebuild_redis.py
+    docker compose exec backend python -m scripts.dangerous.rebuild_redis
 """
 
 import asyncio

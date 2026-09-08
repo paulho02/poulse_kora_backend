@@ -8,12 +8,12 @@ use), so bulk runs never get blocked on token balance / post price the way a
 regular user would.
 
 Usage (inside the backend container):
-    docker compose exec backend python bulk_create_posts.py <channel> <amount>
+    docker compose exec backend python -m scripts.dangerous.bulk_create_posts <channel> <amount>
 
 <channel> is a channel ID (e.g. 3) or exact channel name (e.g. General).
 
 Example:
-    docker compose exec backend python bulk_create_posts.py General 20
+    docker compose exec backend python -m scripts.dangerous.bulk_create_posts General 20
 """
 
 import argparse

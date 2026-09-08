@@ -274,7 +274,7 @@ class TestSeenSeeding:
 
         stats = await service.rebuild_from_pg(redis, db)
         assert await redis.sismember(keys.seen(post.id), str(user.id))
-        # rebuild_redis.py / seed_dev_data.py print this key.
+        # scripts/dangerous/{rebuild_redis,seed_dev_data}.py print this key.
         assert stats["seen_seeded"] >= 1
 
     async def test_rebuild_does_not_backfill_own_posts(

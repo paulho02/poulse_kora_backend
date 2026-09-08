@@ -40,7 +40,7 @@ The feed is distributed across **Postgres**, **Redis** and an **object bucket** 
   are answered by something that actually streams. See `app/core/storage.py`.
 
 Everything in Redis is either derivable from Postgres (and rebuildable — see
-`rebuild_redis.py`) or durable via Redis AOF. Postgres never depends on Redis, and the
+`scripts/dangerous/rebuild_redis.py`) or durable via Redis AOF. Postgres never depends on Redis, and the
 bucket never depends on either.
 
 ### Redis key catalogue
@@ -145,7 +145,7 @@ Tokens are a **posting throttle, not a durable currency.** A new account starts 
 `FEED_STARTING_TOKENS` (see `app/core/config.py`) so signing up is enough to publish a first
 post; after that, you earn 1 per review and spend a congestion-scaled price to post — when the
 system is busy, posting costs more and requires more reviewing to afford. Balances live only in
-Redis and are **not** journaled in Postgres — `rebuild_redis.py` reseeds them from
+Redis and are **not** journaled in Postgres — `scripts/dangerous/rebuild_redis.py` reseeds them from
 `FEED_STARTING_TOKENS + reviewed_count`, so a rebuild discards spend history but keeps the
 starting grant. That's acceptable precisely because tokens are friction, not money. Don't build
 product features that assume the balance is authoritative or persistent.
@@ -190,7 +190,7 @@ did) — a cosmetic ordering change. Tune the wait with `FEED_RETRY_INTERVAL_SEC
 
 ### Rebuild / reconcile
 
-`rebuild_redis.py` (→ `service.rebuild_from_pg`) repopulates the **derivable** Redis state
+`scripts/dangerous/rebuild_redis.py` (→ `service.rebuild_from_pg`) repopulates the **derivable** Redis state
 from Postgres: channel subscriber sets, `free_queue`, token balances (from `reviewed_count`),
 and per-user queue backfills. It does **not** touch `feed:ops` / `ops:retry` (those aren't
 derivable and rely on AOF). Idempotent — safe to re-run after a Redis flush or a Postgres
@@ -329,7 +329,7 @@ docker compose exec postgres createdb apptest -U postgres
 ```
 
 `down -v` removes the `app-db-data` and `redis-data` volumes, so both come back empty.
-Re-run `seed_dev_data.py` afterwards (see below) if you want dev data back.
+Re-run the seed script afterwards (see below) if you want dev data back.
 
 ### Regenerate front-end API package
 
@@ -365,9 +365,26 @@ Then you can run tests with this command:
 docker compose run backend pytest --cov --cov-report term-missing
 ```
 
+### Scripts
+
+Operational scripts live under `backend/scripts/`, split by blast radius: `safe/` is
+targeted/reversible/idempotent and fine to point at production (`set_banner`,
+`grant_subscription`, `backfill_post_media`, `shell`), `dangerous/` destroys data, rewrites
+shared economy state, fabricates content or forges credentials (`reset_content`,
+`rebuild_redis`, `seed_dev_data`, `bulk_create_posts`, `pricecheck`, `skew`, `cleanup`).
+See `backend/scripts/README.md` for what each one does and why it sits where it does.
+
+They run as **modules**, not file paths — `python scripts/safe/shell.py` raises
+`ModuleNotFoundError: No module named 'app'`, because the image installs with `poetry
+install --no-root` and only the `/app` working directory puts `app` on `sys.path`:
+
+```bash
+docker compose exec backend python -m scripts.safe.shell
+```
+
 ### Seed dev data
 
-`seed_dev_data.py` creates a handful of fixed "bot" users and tops up every channel with a
+`scripts/dangerous/seed_dev_data.py` creates a handful of fixed "bot" users and tops up every channel with a
 few realistic posts from them, then reconciles the Redis feed state (channel subscriber
 sets, free-queue, token balances, and per-user review queues) from Postgres. This gives a
 real dev/mobile-app account something to review as soon as it subscribes to a channel via
@@ -375,7 +392,7 @@ the app — `get_posts_feed` excludes posts authored by the viewer, so a single 
 would otherwise never see anything in its own feed.
 
 ```bash
-docker compose exec backend python seed_dev_data.py
+docker compose exec backend python -m scripts.dangerous.seed_dev_data
 ```
 
 Safe to re-run: bot users are matched by email, and each channel is only topped up to a
@@ -386,19 +403,19 @@ flushing Redis, or restoring a Postgres backup without matching Redis data), rec
 directly without creating any new posts:
 
 ```bash
-docker compose exec backend python rebuild_redis.py
+docker compose exec backend python -m scripts.dangerous.rebuild_redis
 ```
 
 ### Info banner
 
-`set_banner.py` pushes (or clears) the announcement shown as a compact banner in the mobile
+`scripts/safe/set_banner.py` pushes (or clears) the announcement shown as a compact banner in the mobile
 app on launch — e.g. a maintenance downtime notice. It's stored in Redis with no TTL, so it
 stays until explicitly replaced or cleared, and bypasses the superuser-guarded API entirely
 so it can be run from a terminal without minting a JWT.
 
 ```bash
-docker compose exec backend python set_banner.py "maintenance downtime tonight 10pm-midnight"
-docker compose exec backend python set_banner.py --clear
+docker compose exec backend python -m scripts.safe.set_banner "maintenance downtime tonight 10pm-midnight"
+docker compose exec backend python -m scripts.safe.set_banner --clear
 ```
 
 Each call to set the banner gets a fresh id, so pushing a new message always reaches clients

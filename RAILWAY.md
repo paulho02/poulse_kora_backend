@@ -76,7 +76,7 @@ so whatever scheme Railway's Postgres reference variable uses works unchanged.
   Postgres — so a bad configuration costs a failed deploy, never data.
 - Migrations run automatically on every boot (`entrypoint.sh` → `alembic upgrade head`) — nothing
   manual needed here, including for schema changes on future deploys.
-- **`rebuild_redis.py` does *not* run automatically, and shouldn't.** Normal traffic (register,
+- **`scripts/dangerous/rebuild_redis.py` does *not* run automatically, and shouldn't.** Normal traffic (register,
   subscribe, post, review) already writes Redis state directly as it happens — there's no "initial
   state" that needs deriving from Postgres on a fresh deploy. Run it manually, once, only when:
   1. You turn on `FEED_EXCLUDE_SEEN` against a database that already has post/review history.
@@ -84,9 +84,13 @@ so whatever scheme Railway's Postgres reference variable uses works unchanged.
   3. You're importing pre-existing Postgres data into a Redis that never saw it.
 
   ```bash
-  railway run --service <backend-service-name> python rebuild_redis.py
+  railway run --service <backend-service-name> python -m scripts.dangerous.rebuild_redis
   ```
-  It's idempotent — safe to re-run if unsure whether it already ran.
+  It's idempotent — safe to re-run if unsure whether it already ran. It is filed under
+  `dangerous/` for one reason: it reseeds token balances from `FEED_STARTING_TOKENS +
+  reviewed_count`, so a run **refunds every token spent since the last one**. That is fine for
+  the three cases above and wrong as routine maintenance. Note the `-m` form — scripts are run
+  as modules, not file paths (see `backend/scripts/README.md`).
 - Single `uvicorn` process per replica (matches the existing Dockerfile/compose setup). The feed
   consumer and price-refresher background tasks in `app/factory.py`'s lifespan are already designed
   to be safe across multiple replicas (each joins the Redis Streams consumer group under a unique

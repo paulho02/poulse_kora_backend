@@ -13,7 +13,7 @@ up to TARGET_POSTS_PER_CHANNEL bot-authored posts, so re-running won't pile up
 duplicates.
 
 Usage (inside the backend container):
-    docker compose exec backend python scripts/seed_dev_data.py
+    docker compose exec backend python -m scripts.dangerous.seed_dev_data
 """
 
 import asyncio

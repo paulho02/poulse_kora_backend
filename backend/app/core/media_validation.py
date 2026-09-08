@@ -386,7 +386,7 @@ async def process_video_bytes(
 ) -> ProcessedMedia:
     """The video half of `process_upload`, over bytes already in hand.
 
-    Public because backfill_post_media.py re-runs this same pipeline over clips
+    Public because scripts/safe/backfill_post_media.py re-runs this same pipeline over clips
     already sitting in Postgres - the rows uploaded before posters, dimensions
     and the H.264 transcode existed, which is why an old clip shows as a black
     rectangle instead of a preview frame.

@@ -9,8 +9,8 @@ lifecycle) — a webhook for a manually-granted user would find no matching row 
 just ignore it, which is the intended behavior here.
 
 Usage (inside the backend container):
-    docker compose exec backend python grant_subscription.py user@example.com supporter
-    docker compose exec backend python grant_subscription.py user@example.com supporter --revoke
+    docker compose exec backend python -m scripts.safe.grant_subscription user@example.com supporter
+    docker compose exec backend python -m scripts.safe.grant_subscription user@example.com supporter --revoke
 """
 
 import argparse

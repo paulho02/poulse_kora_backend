@@ -6,9 +6,9 @@ Redis directly, the same way `seed_dev_data.py` talks to Postgres directly: no
 FastAPI request lifecycle involved.
 
 Usage (inside the backend container):
-    docker compose exec backend python set_banner.py "maintenance downtime Friday 10pm-midnight"
-    docker compose exec backend python set_banner.py "maintenance downtime Friday 10pm-midnight" --de "Wartungsausfall Freitag 22-24 Uhr"
-    docker compose exec backend python set_banner.py --clear
+    docker compose exec backend python -m scripts.safe.set_banner "maintenance downtime Friday 10pm-midnight"
+    docker compose exec backend python -m scripts.safe.set_banner "maintenance downtime Friday 10pm-midnight" --de "Wartungsausfall Freitag 22-24 Uhr"
+    docker compose exec backend python -m scripts.safe.set_banner --clear
 """
 
 import argparse

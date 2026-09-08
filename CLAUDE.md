@@ -44,23 +44,29 @@ docker compose exec backend alembic check
 # Rebuild after adding a dependency (pyproject.toml)
 docker compose up -d --build
 
+# Scripts live in backend/scripts/{safe,dangerous}/ and are run as MODULES, not
+# file paths - `python scripts/safe/shell.py` raises ModuleNotFoundError, because
+# the image installs with `poetry install --no-root` and only /app (the working
+# directory) puts `app` on sys.path. See backend/scripts/README.md for the split.
+
 # IPython shell with DB session (app.db) preloaded
-docker compose exec backend python shell.py
+docker compose exec backend python -m scripts.safe.shell
 
 # Seed dev data: bot users + a few posts per channel, so a real dev/mobile-app
 # account has something to see and review (forward/drop) after subscribing to
-# a channel. Idempotent, safe to re-run.
-docker compose exec backend python seed_dev_data.py
+# a channel. Idempotent, safe to re-run - but it posts bot content into every
+# channel, so it is dev-only.
+docker compose exec backend python -m scripts.dangerous.seed_dev_data
 
 # Bulk-create N test posts in a channel (by ID or name), authored by an
 # auto-created superuser bot. Calls the real create_post route function
 # directly, so it always reflects actual post creation behavior.
-docker compose exec backend python bulk_create_posts.py <channel> <amount>
+docker compose exec backend python -m scripts.dangerous.bulk_create_posts <channel> <amount>
 
 # Re-run the current media pipeline over videos stored before poster frames,
 # dimensions and the H.264 transcode existed - those render as a black
 # rectangle in the client. Idempotent; --dry-run just counts.
-docker compose exec backend python backfill_post_media.py [--dry-run]
+docker compose exec backend python -m scripts.safe.backfill_post_media [--dry-run]
 
 # MinIO console for the local media bucket, to eyeball what actually landed.
 # Log in with STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY from .env.
@@ -115,7 +121,7 @@ after cloning).
   (correctness) — it's the choke point every delivery path goes through, so never count a
   refusal as a delivery. Postgres' unique `(user, post)` review constraint remains the
   backstop, so a lost/expired set degrades to a 409 rather than breaking. **Enabling
-  `FEED_EXCLUDE_SEEN` on an existing DB requires `python rebuild_redis.py`** to seed the
+  `FEED_EXCLUDE_SEEN` on an existing DB requires `python -m scripts.dangerous.rebuild_redis`** to seed the
   sets from `post_reviews`. Consequence to know: exclusions make channel *saturation*
   reachable, so `process_operation` now asks `has_eligible_recipient` whether to park or
   abandon — an exhausted channel drops the op instead of retrying it for 10 days. An *empty*
@@ -326,7 +332,7 @@ after cloning).
     already running (falling back to `nearest_orientation` when omitted). Consequence:
     `PostMedia.width/height` stay nullable and a client must treat missing dimensions as
     "unknown, letterbox it" — but rows predating the columns are no longer *left* that
-    way: `python backfill_post_media.py` re-runs the whole pipeline (transcode, crop,
+    way: `python -m scripts.safe.backfill_post_media` re-runs the whole pipeline (transcode, crop,
     measure, poster) over clips already in Postgres, which is the fix for an old video
     rendering as a black rectangle.
   - **Every video carries a poster frame** (`PostMedia.poster_object_key`), its own object so

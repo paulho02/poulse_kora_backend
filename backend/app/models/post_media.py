@@ -36,7 +36,7 @@ class PostMedia(Base):
     (POST_MEDIA_LANDSCAPE_RATIO / POST_MEDIA_PORTRAIT_RATIO), but the ratio columns
     stay nullable and a client must treat missing `width`/`height` as "unknown shape,
     letterbox it" rather than assuming either ratio. Rows written before those columns
-    existed are repairable rather than stuck, though: backfill_post_media.py re-runs the
+    existed are repairable rather than stuck, though: scripts/safe/backfill_post_media.py re-runs the
     upload pipeline over the stored object to fill in the measurements and the poster.
     """
 

@@ -33,8 +33,8 @@ there - and it also means the presigned URL changes, which is what makes clients
 holding the old (unplayable) clip pick up the new one.
 
 Usage (inside the backend container):
-    docker compose exec backend python backfill_post_media.py
-    docker compose exec backend python backfill_post_media.py --dry-run
+    docker compose exec backend python -m scripts.safe.backfill_post_media
+    docker compose exec backend python -m scripts.safe.backfill_post_media --dry-run
 """
 
 import asyncio

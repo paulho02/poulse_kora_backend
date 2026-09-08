@@ -406,6 +406,7 @@ class Settings(BaseSettings):
         if "pytest" in sys.modules:
             return info.data.get("TEST_STORAGE_PUBLIC_ENDPOINT_URL") or v
         return v
+
     # Declared before STORAGE_BUCKET so the validator below can see it: pydantic
     # fills `info.data` in field-definition order.
     TEST_STORAGE_BUCKET: str | None = None

@@ -22,7 +22,7 @@ Kept as-is:
   seeds from `reviewed_count`.
 
 Usage (inside the backend container):
-    docker compose exec backend python reset_content.py [--yes]
+    docker compose exec backend python -m scripts.dangerous.reset_content [--yes]
 """
 
 import argparse
