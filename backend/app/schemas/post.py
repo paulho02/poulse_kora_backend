@@ -89,6 +89,28 @@ class PostRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class FeedEntry(BaseModel):
+    """One slot in the review queue: the post that fills it, or a hole where a
+    post used to be.
+
+    The queue lives in Redis and holds nothing but post ids, so an author erasing
+    their posts (see app/core/account_deletion.py) leaves ids behind in every
+    reader's queue that still had one. Finding them would mean scanning every
+    queue in the deployment; answering honestly costs nothing, because this route
+    is already resolving those ids against Postgres.
+
+    `post` is null for exactly that case. It is a separate envelope rather than a
+    nullable field bolted onto `PostRead` because a vanished post genuinely has no
+    channel, no author and no creation time - anything `PostRead` could carry for
+    one would be invented. The client renders a ghost card the reader can dismiss
+    (`DELETE /posts/feed/{post_id}`), and dismiss is all it can do: there is
+    nothing left to forward.
+    """
+
+    post_id: int
+    post: PostRead | None
+
+
 class PostCreateResult(BaseModel):
     """Result of publishing an original post: the post plus what it cost.
 

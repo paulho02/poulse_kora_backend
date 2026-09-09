@@ -559,6 +559,74 @@ async def is_queued(redis: Redis, user_id: str, post_id: int) -> bool:
     return await redis.lpos(keys.queue(user_id), str(post_id)) is not None
 
 
+# --- erasure ---------------------------------------------------------------
+
+async def mark_posts_deleted(redis: Redis, post_ids: Sequence[int]) -> None:
+    """Record that these posts no longer exist, and forget who had them.
+
+    Two effects, both about work that is already in flight. The tombstones
+    (`keys.deleted_post`) are what stop the worker manufacturing new ghost
+    entries out of operations minted before the deletion - it never reads
+    Postgres, so this is the only place it can learn. Dropping the `seen:*` sets
+    is just housekeeping: the guard they implement is meaningless for a post
+    nobody can be handed any more, and they are the largest keys involved.
+
+    Nothing here touches the queues those ids already sit in. That is deliberate
+    (and the whole reason the ghost card exists): finding them would mean
+    scanning every reader's queue, and the feed answers the question correctly
+    the next time it is asked anyway.
+    """
+    if not post_ids:
+        return
+    pipe = redis.pipeline()
+    for post_id in post_ids:
+        pipe.set(
+            keys.deleted_post(post_id), 1, ex=settings.FEED_RETRY_MAX_AGE_SECONDS
+        )
+        pipe.delete(keys.seen(post_id))
+    await pipe.execute()
+
+
+async def is_post_deleted(redis: Redis, post_id: int) -> bool:
+    """Whether `post_id` has been erased (see `mark_posts_deleted`).
+
+    False for a post erased longer ago than FEED_RETRY_MAX_AGE_SECONDS, which is
+    fine: no operation can still be chasing it by then.
+    """
+    return bool(await redis.exists(keys.deleted_post(post_id)))
+
+
+async def purge_user(
+    redis: Redis, user_id: str, channel_ids: Sequence[int] = ()
+) -> None:
+    """Erase every trace of a user from the distribution state.
+
+    Called after the account's rows are committed away (see
+    app/core/account_deletion.py). `channel_ids` are the channels they were
+    subscribed to, read from Postgres *before* the delete - the subscription
+    rows are gone by the time this runs, and `subs:total` is a running counter
+    that would drift permanently if a departure went unrecorded.
+
+    The rate-limit and email-verification keys are left to expire on their own:
+    both are short-lived by construction, and neither means anything once no
+    token can authenticate as this id again.
+    """
+    pipe = redis.pipeline()
+    pipe.delete(keys.queue(user_id))
+    pipe.delete(keys.tokens(user_id))
+    pipe.srem(keys.FREE_QUEUE, user_id)
+    pipe.zrem(keys.ACTIVE_USERS, user_id)
+    for channel_id in channel_ids:
+        pipe.srem(keys.channel(channel_id), user_id)
+    results = await pipe.execute()
+    # Only the memberships that were actually there may decrement the running
+    # total - the same rule `sync_unsubscribe` follows, and for the same reason:
+    # a re-run must not drive the denominator of the price formula negative.
+    removed = sum(int(r) for r in results[4:])
+    if removed:
+        await redis.decrby(keys.SUBS_TOTAL, removed)
+
+
 # --- recipient selection ---------------------------------------------------
 
 async def select_recipients(
@@ -722,7 +790,12 @@ async def backfill_queue(
         # The fan-out path skips the author via the stream entry, which this path has
         # no equivalent of — filter in SQL instead, or a rebuild would hand authors
         # back their own posts that live delivery had correctly withheld.
-        filters.append(Post.author_id != user_id)
+        #
+        # IS DISTINCT FROM, not `!=`: a post whose author deleted their account
+        # carries a NULL author_id (see app/core/account_deletion.py), and
+        # `NULL != <uuid>` is NULL, so a plain inequality would quietly drop every
+        # authorless post from every rebuild instead of keeping it in circulation.
+        filters.append(Post.author_id.is_distinct_from(user_id))
     post_ids = (
         (
             await session.execute(

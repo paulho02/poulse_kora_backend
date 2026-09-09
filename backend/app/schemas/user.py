@@ -49,6 +49,24 @@ class PasswordChange(BaseModel):
     new_password: str
 
 
+class AccountDelete(BaseModel):
+    """Body of `DELETE /users/me` - the two things the confirmation flow asks.
+
+    `delete_posts` is the choice made on the dialog's first slide, and it is
+    required rather than defaulted: the two outcomes differ in whether other
+    people keep seeing this person's posts, which is not a decision to make on
+    a client's behalf when the field is missing.
+
+    `current_password` is the second slide, and only for password accounts - a
+    Google account's stored hash is a random value nobody holds (see
+    app/api/google_auth.py), so there is nothing it could prove. See the route
+    for why proving anything is asked for at all.
+    """
+
+    delete_posts: bool
+    current_password: str | None = None
+
+
 class GoogleAuthRequest(BaseModel):
     id_token: str
     #: Second pass of the two-step upgrade. False the first time: if the address

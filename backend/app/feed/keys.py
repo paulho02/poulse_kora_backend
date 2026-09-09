@@ -82,6 +82,26 @@ def tokens(user_id: str) -> str:
     return f"tokens:{user_id}"
 
 
+def deleted_post(post_id: int) -> str:
+    """Tombstone marking a post whose row has been erased (see
+    app/core/account_deletion.py).
+
+    The worker is deliberately pure-Redis - it fans out from the stream entry
+    alone and never opens a Postgres session - so "has this post been deleted?"
+    has to be answerable from here or not at all. Without it, every operation
+    already in the stream or parked in `ops:retry` when an author erased their
+    posts would keep placing ids that resolve to nothing, manufacturing fresh
+    ghost cards in strangers' feeds for up to FEED_RETRY_MAX_AGE_SECONDS.
+
+    TTL is exactly FEED_RETRY_MAX_AGE_SECONDS: no op can be minted for a post
+    that no longer exists (creating and forwarding both read the row first), so
+    the last op that could still chase this id is one parked immediately before
+    the deletion, whose own deadline is that far out. Expiring with it leaves
+    nothing behind.
+    """
+    return f"deleted:{post_id}"
+
+
 def seen(post_id: int) -> str:
     """Set of user_ids a post has already been delivered to (the re-delivery guard).
 

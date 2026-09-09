@@ -81,6 +81,58 @@ class TestProcessOperation:
         assert counts[channel_id] == 0
 
 
+class TestDeletedPosts:
+    """An op minted before its post was erased (app/core/account_deletion.py).
+
+    The worker never opens a Postgres session, so the tombstone is the only way
+    it can find out - and without it, a post's remaining ops would keep pushing
+    an id that resolves to nothing into strangers' queues for up to
+    FEED_RETRY_MAX_AGE_SECONDS.
+    """
+
+    async def test_op_for_a_deleted_post_is_abandoned(self, redis: Redis):
+        channel_id = 31
+        users = [str(uuid.uuid4()) for _ in range(3)]
+        for u in users:
+            await service.sync_subscribe(redis, u, channel_id)
+        await service.mark_posts_deleted(redis, [900])
+
+        placed = await process_operation(redis, post_id=900, channel_id=channel_id)
+
+        assert placed == 0
+        for u in users:
+            assert await service.render_queue_ids(redis, u, 10) == []
+        # Terminal, so it stops counting against the channel's price - and it is
+        # not parked, which is what would otherwise retry it for ten days.
+        assert await redis.zcard(keys.OPS_RETRY) == 0
+
+    async def test_abandoning_retires_the_outstanding_counter(self, redis: Redis):
+        channel_id = 32
+        await service.sync_subscribe(redis, str(uuid.uuid4()), channel_id)
+        await service.enqueue_operation(redis, 901, channel_id)
+        assert await service.channel_outstanding_ops(redis, [channel_id]) == {
+            channel_id: 1
+        }
+        await service.mark_posts_deleted(redis, [901])
+
+        await consume_once(redis, CONSUMER, timeout=2.0)
+
+        assert await service.channel_outstanding_ops(redis, [channel_id]) == {
+            channel_id: 0
+        }
+
+    async def test_a_live_post_is_unaffected(self, redis: Redis):
+        channel_id = 33
+        user = str(uuid.uuid4())
+        await service.sync_subscribe(redis, user, channel_id)
+        await service.mark_posts_deleted(redis, [902])
+
+        placed = await process_operation(redis, post_id=903, channel_id=channel_id)
+
+        assert placed == 1
+        assert await service.render_queue_ids(redis, user, 10) == [903]
+
+
 class TestConsumeOnce:
     async def test_processes_enqueued_operation(self, redis: Redis):
         channel_id = 8

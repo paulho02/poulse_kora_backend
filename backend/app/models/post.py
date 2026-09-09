@@ -24,7 +24,20 @@ class Post(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
-    author_id: Mapped[UUID] = mapped_column(GUID, ForeignKey("users.id"))
+    # NULL once the author has deleted their account but chose to leave their
+    # posts in circulation (see app/core/account_deletion.py). Genuine erasure
+    # rather than a tombstone user row: the account and its username are gone,
+    # and the post renders with no author at all - `_serialize_post` in
+    # app/api/posts.py answers the same empty `PostAuthor` it already answers
+    # for an anonymous post, so nothing reader-side had to learn a third case.
+    #
+    # `ondelete="SET NULL"` is the backstop, not the mechanism: the deletion
+    # path nulls these rows explicitly before it deletes the user, because the
+    # *other* branch (erase the posts too) has to run first and neither branch
+    # can be expressed as a single DB rule. Same shape as `Feedback.user_id`.
+    author_id: Mapped[UUID | None] = mapped_column(
+        GUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
     is_anonymous: Mapped[bool] = mapped_column(default=False, server_default="false")
 
@@ -44,7 +57,7 @@ class Post(Base):
     )
 
     channel: Mapped["Channel"] = relationship(back_populates="posts")
-    author: Mapped["User"] = relationship(back_populates="posts")
+    author: Mapped["User | None"] = relationship(back_populates="posts")
     reviews: Mapped[list["PostReview"]] = relationship(
         back_populates="post", cascade="all, delete"
     )

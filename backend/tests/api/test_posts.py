@@ -18,6 +18,7 @@ from app.feed.worker import consume_once
 from app.models.channel import Channel
 from app.models.post import Post
 from app.models.post_media import PostMedia
+from app.models.post_review import PostReview
 from app.models.user import User
 from tests.utils import get_jwt_header, grant_subscription, review, subscribe
 
@@ -139,6 +140,17 @@ def _media_blocks(post_json: dict) -> list[dict]:
     return [b["media"] for b in post_json["blocks"] if b["type"] == "media"]
 
 
+def _feed_posts(body: list[dict]) -> list[dict]:
+    """The readable posts in a `GET /posts/feed` body.
+
+    The route answers a list of `FeedEntry` envelopes rather than bare posts, so
+    that a queue slot whose post has been erased can be reported as a hole rather
+    than silently skipped (see TestFeedMissingPosts). Every test that only cares
+    about the posts goes through here.
+    """
+    return [entry["post"] for entry in body if entry["post"] is not None]
+
+
 class TestPostsFeed:
     async def test_feed_empty_with_empty_queue(
         self, client: AsyncClient, create_user
@@ -169,7 +181,7 @@ class TestPostsFeed:
             settings.API_PATH + "/posts/feed", headers=get_jwt_header(user)
         )
         assert resp.status_code == 200, resp.text
-        ids = [p["id"] for p in resp.json()]
+        ids = [p["id"] for p in _feed_posts(resp.json())]
         # LPUSH ⇒ most recently placed is at the head.
         assert ids == [post_b.id, post_a.id]
 
@@ -191,7 +203,7 @@ class TestPostsFeed:
             settings.API_PATH + "/posts/feed", headers=get_jwt_header(viewer)
         )
         assert resp.status_code == 200, resp.text
-        [data] = [p for p in resp.json() if p["id"] == post.id]
+        [data] = [p for p in _feed_posts(resp.json()) if p["id"] == post.id]
         assert data["author"]["id"] is None
         assert data["author"]["username"] is None
         assert data["author"]["profile_picture_url"] is None
@@ -220,7 +232,7 @@ class TestPostsFeed:
             settings.API_PATH + "/posts/feed", headers=get_jwt_header(viewer)
         )
         assert resp.status_code == 200, resp.text
-        [data] = [p for p in resp.json() if p["id"] == post.id]
+        [data] = [p for p in _feed_posts(resp.json()) if p["id"] == post.id]
         url = data["author"]["profile_picture_url"]
         assert url is not None
         # Presigned bucket URL, not a route back into this API - and it resolves
@@ -256,7 +268,7 @@ class TestPostsFeed:
             settings.API_PATH + "/posts/feed", headers=get_jwt_header(viewer)
         )
         assert resp.status_code == 200, resp.text
-        [data] = [p for p in resp.json() if p["id"] == post.id]
+        [data] = [p for p in _feed_posts(resp.json()) if p["id"] == post.id]
         assert data["author"]["profile_picture_url"] is None
 
     async def test_feed_filtered_by_channel_id(
@@ -281,7 +293,7 @@ class TestPostsFeed:
             headers=get_jwt_header(user),
         )
         assert resp.status_code == 200, resp.text
-        ids = [p["id"] for p in resp.json()]
+        ids = [p["id"] for p in _feed_posts(resp.json())]
         assert ids == [post_a.id]
 
     async def test_feed_channel_filter_pages_the_filtered_result(
@@ -313,7 +325,7 @@ class TestPostsFeed:
             headers=get_jwt_header(user),
         )
         assert resp.status_code == 200, resp.text
-        assert [p["id"] for p in resp.json()] == [wanted[1].id]
+        assert [p["id"] for p in _feed_posts(resp.json())] == [wanted[1].id]
 
         resp = await client.get(
             settings.API_PATH + "/posts/feed",
@@ -321,7 +333,146 @@ class TestPostsFeed:
             headers=get_jwt_header(user),
         )
         assert resp.status_code == 200, resp.text
-        assert [p["id"] for p in resp.json()] == [wanted[0].id]
+        assert [p["id"] for p in _feed_posts(resp.json())] == [wanted[0].id]
+
+
+class TestFeedMissingPosts:
+    """A queue slot whose post no longer exists - what an author erasing their
+    account leaves behind in everybody else's queue (app/core/account_deletion.py).
+
+    Nothing goes looking for those ids at deletion time; the feed is where they
+    are noticed, and the reader is given a way to clear the slot.
+    """
+
+    async def test_feed_reports_the_hole_rather_than_skipping_it(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        alive: Post = await create_post(channel=channel)
+        doomed: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), alive.id)
+        await service.place_post(redis, str(user.id), doomed.id)
+        await db.delete(doomed)
+        await db.commit()
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed", headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert [e["post_id"] for e in body] == [doomed.id, alive.id]
+        assert body[0]["post"] is None
+        assert body[1]["post"]["id"] == alive.id
+
+    async def test_a_channel_filter_hides_holes(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        """An erased post has no channel left, so it cannot honestly be claimed
+        for the one being filtered on - and 'not in this channel' and 'gone' are
+        indistinguishable once the row is missing."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        alive: Post = await create_post(channel=channel)
+        doomed: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), alive.id)
+        await service.place_post(redis, str(user.id), doomed.id)
+        await db.delete(doomed)
+        await db.commit()
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed",
+            params={"channel_id": channel.id},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert [e["post_id"] for e in resp.json()] == [alive.id]
+
+    async def test_dismissing_frees_the_slot(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        doomed: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), doomed.id)
+        await db.delete(doomed)
+        await db.commit()
+
+        resp = await client.delete(
+            settings.API_PATH + f"/posts/feed/{doomed.id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 204, resp.text
+        assert await service.render_queue_ids(redis, str(user.id), 20) == []
+        # The slot is genuinely back: dismissing has to make the reader reachable
+        # by fan-out again, exactly as a review does.
+        assert await redis.sismember(keys.FREE_QUEUE, str(user.id)) == 1
+
+    async def test_dismissing_earns_nothing_and_records_no_review(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        """Not a verdict: nobody read anything, and a PostReview row would point
+        at a post that is gone."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        doomed: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), doomed.id)
+        await db.delete(doomed)
+        await db.commit()
+        before = await service.token_balance(redis, str(user.id))
+
+        resp = await client.delete(
+            settings.API_PATH + f"/posts/feed/{doomed.id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 204, resp.text
+        assert await service.token_balance(redis, str(user.id)) == before
+        assert await db.scalar(
+            select(func.count()).select_from(PostReview).where(
+                PostReview.user_id == user.id
+            )
+        ) == 0
+
+    async def test_refused_while_the_post_still_exists(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel,
+        create_post,
+    ):
+        """Otherwise this is a way to clear a post without judging it."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel)
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.delete(
+            settings.API_PATH + f"/posts/feed/{post.id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "post_available"
+        assert await service.render_queue_ids(redis, str(user.id), 20) == [post.id]
+
+    async def test_refused_when_it_was_never_queued(
+        self, client: AsyncClient, db: AsyncSession, create_user, create_channel,
+        create_post,
+    ):
+        """A deleted post nobody was holding is not this reader's slot to reclaim."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        doomed: Post = await create_post(channel=channel)
+        post_id = doomed.id
+        await db.delete(doomed)
+        await db.commit()
+
+        resp = await client.delete(
+            settings.API_PATH + f"/posts/feed/{post_id}",
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "not_in_queue"
 
 
 class TestFeedStatus:
@@ -1766,7 +1917,7 @@ class TestReviewPost:
             settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(user)
         )
         assert detail.status_code == 200, detail.text
-        for body in (queued.json()[0], detail.json()):
+        for body in (_feed_posts(queued.json())[0], detail.json()):
             assert "forwarded_count" not in body
             assert "dropped_count" not in body
 

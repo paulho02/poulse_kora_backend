@@ -28,7 +28,10 @@ needed; `operation_queue_len` (XLEN) is therefore a fair congestion signal for p
 
 Fan-out itself is pure Redis: the entry carries the channel_id, recipients are a random
 sample of the channel's subscribers filtered to those with a free slot (see
-service.select_recipients) — no Postgres access needed.
+service.select_recipients) — no Postgres access needed. That property is why a post
+erased by its author is announced *into Redis* (`service.mark_posts_deleted`) rather
+than checked for in Postgres here: it is the only way this loop can know, and it costs
+one EXISTS per op.
 """
 
 import asyncio
@@ -60,6 +63,23 @@ async def process_operation(
     `author_id` is the post's author, skipped when FEED_EXCLUDE_OWN_POSTS is on. None on
     ops written before the field existed, which simply fan out to everyone as before.
     """
+    if await service.is_post_deleted(redis, post_id):
+        # The author erased this post after the op was minted. Placing it would
+        # hand a reader an id that resolves to nothing - a ghost card they then
+        # have to clear by hand - so the op dies here instead. Terminal, and it
+        # stops counting against the channel's price like any other terminal
+        # outcome.
+        await service.retire_operation(redis, channel_id)
+        # INFO for the same reason as `channel_exhausted` below: it is reach the
+        # author paid tokens for being given up on, and it is rare.
+        log.info(
+            "feed.op_abandoned",
+            post_id=post_id,
+            channel_id=channel_id,
+            reason="post_deleted",
+        )
+        return 0
+
     recipients = await service.select_recipients(
         redis, channel_id, settings.FEED_FANOUT, post_id=post_id, author_id=author_id
     )

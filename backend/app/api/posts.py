@@ -26,6 +26,7 @@ from app.models.post_review import PostReview
 from app.models.user import User
 from app.models.user_subscription import UserSubscription
 from app.schemas.post import (
+    FeedEntry,
     FeedStatus,
     PostAuthor,
     PostBlockIn,
@@ -70,7 +71,12 @@ async def post_create_form(
 
 
 def _serialize_post(post: Post, viewer: User) -> PostRead:
-    reveal_author = (
+    # `post.author is not None` is the account-deleted case (see
+    # app/core/account_deletion.py): the row survived, the person did not.
+    # Folding it into the existing anonymity branch is the whole handling - to a
+    # reader it is the same post with no name on it, and nothing downstream had
+    # to learn a third shape.
+    reveal_author = post.author is not None and (
         not post.is_anonymous
         or post.author_id == viewer.id
         or viewer.is_superuser
@@ -179,7 +185,7 @@ async def _get_post_with_relations(session: CurrentAsyncSession, post_id: int) -
     )
 
 
-@router.get("/feed", response_model=list[PostRead])
+@router.get("/feed", response_model=list[FeedEntry])
 async def get_posts_feed(
     session: CurrentAsyncSession,
     user: CurrentVerifiedUser,
@@ -207,6 +213,14 @@ async def get_posts_feed(
     whole queue and can tell a genuine arrival from something it simply never asked
     for. A page size hardcoded client-side would quietly stop topping up the day the
     cap is raised past it.
+
+    An id in the queue with no row behind it is answered as an empty `FeedEntry`
+    rather than dropped, so the reader can clear the slot (see
+    `dismiss_missing_post`). Silently skipping it - what this used to do - left a
+    queue slot occupied by something the reader could neither see nor review, and
+    the only symptom was a feed that stopped topping up. Only when no channel
+    filter is applied, though: a vanished post has no channel left to belong to,
+    so claiming it belongs to the one being filtered for would be an invention.
     """
     limit = settings.FEED_QUEUE_MAX_SLOTS if limit is None else limit
     await service.mark_active(redis, str(user.id))
@@ -240,15 +254,30 @@ async def get_posts_feed(
         .all()
     )
     by_id = {p.id: p for p in posts}
-    ordered = [by_id[pid] for pid in queue_ids if pid in by_id]
+    # `by_id` is the *filtered* result, so a missing id means one of two things:
+    # the post is gone, or it belongs to another channel. Only the unfiltered
+    # view can tell those apart, which is why only it reports holes.
+    ordered = [
+        (pid, by_id.get(pid))
+        for pid in queue_ids
+        if pid in by_id or channel_id is None
+    ]
     page = ordered[skip : skip + limit]
+    missing = sum(1 for _, post in page if post is None)
     log.debug(
         "feed.served",
         queued=len(queue_ids),
         returned=len(page),
+        missing=missing,
         channel_id=channel_id,
     )
-    return [_serialize_post(p, user) for p in page]
+    return [
+        FeedEntry(
+            post_id=pid,
+            post=_serialize_post(post, user) if post is not None else None,
+        )
+        for pid, post in page
+    ]
 
 
 @router.get("/feed/status", response_model=FeedStatus)
@@ -270,6 +299,39 @@ async def get_feed_status(user: CurrentVerifiedUser, redis: CurrentRedis):
         redis, str(user.id), settings.FEED_QUEUE_MAX_SLOTS
     )
     return FeedStatus(post_ids=post_ids, capacity=settings.FEED_QUEUE_MAX_SLOTS)
+
+
+@router.delete("/feed/{post_id}", status_code=204)
+async def dismiss_missing_post(
+    post_id: int,
+    session: CurrentAsyncSession,
+    user: CurrentVerifiedUser,
+    redis: CurrentRedis,
+):
+    """Clear a queue slot whose post no longer exists - the ghost card's one
+    button.
+
+    Not a review, and deliberately not routed through `POST /{post_id}/review`:
+    a `PostReview` row has a foreign key to a post that is gone, there is no
+    verdict to record about something nobody read, and nothing is earned for it.
+    The reader is only taking back a slot that an author's account deletion left
+    occupied.
+
+    Refuses while the post is still there (`post_available`), so this cannot
+    become a way to skip a post without judging it. That check is also what makes
+    the route safe to leave outside the interaction budget: a whole queue of
+    ghosts is up to FEED_QUEUE_MAX_SLOTS of them, which at
+    INTERACTION_RATE_LIMIT would throttle a reader for the better part of a
+    minute over a mess somebody else made.
+    """
+    if await session.get(Post, post_id) is not None:
+        raise api_error(409, "post_available")
+    removed = await service.claim_from_queue(redis, str(user.id), post_id)
+    if removed == 0:
+        raise api_error(409, "not_in_queue")
+    # INFO, and rare by construction: it takes an account deletion to produce
+    # one. A run of them is how "posts are vanishing from my feed" gets a cause.
+    log.info("feed.ghost_dismissed", post_id=post_id)
 
 
 @router.post(
@@ -643,9 +705,14 @@ async def review_post(
 
     if review_in.kind == "forward":
         # The author travels with the post, not with whoever forwarded it — a forward
-        # must still never land back on the person who wrote it.
+        # must still never land back on the person who wrote it. None once they have
+        # deleted their account, which is the same as the pre-exclusions ops the
+        # worker already tolerates: there is nobody left to withhold it from.
         await service.enqueue_operation(
-            redis, post_id, post.channel_id, author_id=str(post.author_id)
+            redis,
+            post_id,
+            post.channel_id,
+            author_id=str(post.author_id) if post.author_id else None,
         )
     log.info(
         "post.reviewed",

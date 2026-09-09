@@ -68,12 +68,12 @@ so whatever scheme Railway's Postgres reference variable uses works unchanged.
 
 ## 3. First deploy checklist
 
-- **Set the `STORAGE_*` variables before the deploy that carries migration `b3f7a1c92e64`.** That
-  migration copies every profile picture and every post's media out of Postgres and into the bucket
-  before dropping the byte columns, so it is the first thing that needs bucket credentials. It is
-  deliberately all-in-one: if the bucket is unreachable or misconfigured the upload raises, the
-  transaction rolls back, nothing is dropped, and the deploy fails with the media still in
-  Postgres — so a bad configuration costs a failed deploy, never data.
+- **Set the `STORAGE_*` variables before the first deploy.** Media lives in the bucket and not in
+  Postgres (`app/core/storage.py`), so an upload route raises without them — there is no
+  degraded mode that stores bytes in the database. Nothing in the migrations needs them: the
+  data migration that used to copy existing media out of Postgres was squashed away along with
+  the byte columns it dropped, so `0001_initial_schema` creates the object-key columns directly
+  and never touches the bucket.
 - Migrations run automatically on every boot (`entrypoint.sh` → `alembic upgrade head`) — nothing
   manual needed here, including for schema changes on future deploys.
 - **`scripts/dangerous/rebuild_redis.py` does *not* run automatically, and shouldn't.** Normal traffic (register,
