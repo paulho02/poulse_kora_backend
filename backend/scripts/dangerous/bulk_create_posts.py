@@ -40,6 +40,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("channel", help="Channel ID or exact channel name")
     parser.add_argument("amount", type=int, help="Number of posts to create")
+    parser.add_argument(
+        "--language",
+        default="en",
+        help=(
+            "Content language to publish under (default: en). Use this to fill one "
+            "language route and watch the other stay empty."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -93,6 +101,11 @@ async def main():
                         text=f"This post is auto generated. {run_stamp}-{i}",
                     )
                 ],
+                # English because the generated text is English. Not UNSPECIFIED,
+                # which the route would refuse anyway for a post carrying text, and
+                # which would otherwise route this filler to every reader regardless
+                # of what they asked to be shown.
+                language=args.language,
             )
             # create_post's Form(...)/File(...) defaults only resolve through
             # FastAPI's request handling, not a direct coroutine call - post_in and

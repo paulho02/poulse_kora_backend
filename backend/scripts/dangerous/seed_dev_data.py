@@ -142,6 +142,11 @@ async def _top_up_channel(session, channel: Channel, bots: list[User]) -> int:
             channel_id=channel.id,
             author_id=random.choice(bots).id,
             is_anonymous=is_anonymous,
+            # The seed corpus is English prose, so it is tagged as such rather than
+            # left UNSPECIFIED - a dev whose own account reads only German should see
+            # the language filter working, not a feed full of English marked "no
+            # language" and therefore delivered to everyone regardless.
+            language="en",
         )
         session.add(post)
         await session.flush()  # need post.id for the PostBlock FK below

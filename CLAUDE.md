@@ -60,13 +60,19 @@ docker compose exec backend python -m scripts.dangerous.seed_dev_data
 
 # Bulk-create N test posts in a channel (by ID or name), authored by an
 # auto-created superuser bot. Calls the real create_post route function
-# directly, so it always reflects actual post creation behavior.
-docker compose exec backend python -m scripts.dangerous.bulk_create_posts <channel> <amount>
+# directly, so it always reflects actual post creation behavior. --language
+# (default en) fills one content route so another can be watched staying empty.
+docker compose exec backend python -m scripts.dangerous.bulk_create_posts <channel> <amount> [--language de]
 
 # Re-run the current media pipeline over videos stored before poster frames,
 # dimensions and the H.264 transcode existed - those render as a black
 # rectangle in the client. Idempotent; --dry-run just counts.
 docker compose exec backend python -m scripts.safe.backfill_post_media [--dry-run]
+
+# Rebuild the Redis distribution state from Postgres. Required after the
+# 0003_content_languages migration and after adding a CONTENT_LANGUAGES entry:
+# the migration adds the columns, this creates the per-language audience sets.
+docker compose exec backend python -m scripts.dangerous.rebuild_redis
 
 # MinIO console for the local media bucket, to eyeball what actually landed.
 # Log in with STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY from .env.
@@ -112,6 +118,70 @@ after cloning).
   OpenAPI `operationId` (enforced unique by `use_route_names_as_operation_ids` in `factory.py`) —
   this matters because a frontend API client can be generated from the OpenAPI schema
   (`yarn genapi`, only relevant if the React Admin frontend is revived).
+- **Language routing** (`backend/app/core/languages.py`, `app/feed/keys.py`): a post is
+  written in **one** language, a reader accepts a **set** of them, and fan-out delivers
+  only where the two meet. The whole feature is `keys.audience(channel_id, language)`:
+  the audience of an operation is a Redis set that **already exists** before the post
+  does, so `select_recipients` still does one `SRANDMEMBER` and language costs the
+  delivery path *nothing*. Subscribing writes one membership per (channel × accepted
+  language) — the cost is concentrated in a rare write instead of spread over every
+  fan-out. Filtering the sample by language afterwards was rejected: with a sample of
+  `FEED_FANOUT × FEED_FANOUT_SAMPLE_MULTIPLIER` = 12, a language read by a tenth of a
+  channel yields ~1 usable candidate, so nearly every op would park, retry and inflate
+  the admission price for everyone. **The generalizable rule** if another axis is ever
+  added: an axis belongs in the *key* when it partitions strongly and its values are a
+  small closed set (language, a content rating); it belongs in a post-sample
+  `SMISMEMBER` when it merely trims (an opt-out 5% of people use). Freeform tags belong
+  in neither — each key axis multiplies the number of audience sets. Six things are
+  load-bearing:
+  - **`LANGUAGE_UNSPECIFIED` ("und") routes through the plain `channel:{id}` set**,
+    which is already exactly the union of that channel's language slices — so "no
+    language" needs no set of its own, and the plain set stays for three jobs nothing
+    else answers (the UNSPECIFIED audience, the subscriber count a channel is priced
+    by, and what `sync_unsubscribe`/`purge_user` clear without knowing which languages
+    a reader accepted when they subscribed). Accepted only for a post with **no text
+    blocks**, because that is the one part of the claim the server can check.
+    Deliberately *not* the converse: a text-free post may still declare a real
+    language, since a video can be spoken German.
+  - **Cheap-and-universal is a feature, not an arbitrage.** An UNSPECIFIED post has the
+    largest audience, so it parks least, so it prices lowest — normally the shape of an
+    exploit. It isn't, because **forwarding is free**: tokens buy `FEED_FANOUT`
+    deliveries and everything after is earned, so mislabelling buys cheap reach to
+    people who drop it. And it is the mitigation for language routing's worst side
+    effect — a reader of a minority language whose feed would otherwise be structurally
+    empty. The residual hole is text *baked into an image*, which is unfalsifiable
+    server-side; the answer is a metric (the drop rate of UNSPECIFIED posts against
+    tagged ones), not a mechanism.
+  - **`has_eligible_recipient` measures the route, never the channel.** Asking the
+    channel set would let a German post whose twenty German readers have all seen it
+    observe five thousand English subscribers, conclude it still had an audience, and
+    park for ten days — inflating every price in the channel to chase readers it can
+    never reach. Language also makes exhaustion **ordinary** rather than an edge case:
+    a small route runs out after a handful of forwards, so `feed.op_abandoned` with
+    `reason="route_exhausted"` is now the normal end of a post's life.
+  - **Language is self-declared and unverifiable.** The server cannot read the post
+    without doing the work that detection-in-the-client exists to avoid, so the client
+    detects (on-device, no API call) and *prefills*; the author can always override.
+    The forward/drop economy is the correction.
+  - **Ops degrade, exactly like `author_id` and `expires_at`.** A stream entry or
+    `ops:retry` payload written before this existed carries no language and is read as
+    UNSPECIFIED — the audience it was minted against — so a backlog crossing the deploy
+    is delivered as intended rather than narrowed. No need to drain the stream.
+  - **`User.content_languages` is a Postgres array, never empty, and has its own
+    route** (`PUT /users/me/content-languages`) rather than riding `PATCH /users/me`:
+    the column is half the change, the Redis memberships are the other half, and
+    fastapi-users' router knows nothing about the second. It writes the **absolute**
+    set rather than a diff, so re-running repairs drift instead of compounding it. Note
+    this does *not* contradict "no persisted `User.locale`" below — that is about the
+    language the API answers a request *in*, before login; this is content preference,
+    only meaningful signed-in. New accounts are narrowed to their request locale in
+    `on_after_register`; the *column* default is every language, so a row arriving
+    without passing through registration (a migration, a fixture) keeps the feed it
+    already had.
+  **Deploying it takes two steps, not one**: `alembic upgrade head` adds the columns,
+  and `python -m scripts.dangerous.rebuild_redis` creates the per-language audience
+  sets. Between them, a newly created language-tagged post finds an empty audience and
+  parks. Same after adding a language to `CONTENT_LANGUAGES`.
 - **Delivery exclusions** (`backend/app/feed/`): two independent guards behind two flags.
   `FEED_EXCLUDE_OWN_POSTS` carries `author_id` on the stream entry so the worker skips the
   post's author — no stored state, no extra round trip. `FEED_EXCLUDE_SEEN` keeps a per-post
@@ -122,8 +192,9 @@ after cloning).
   refusal as a delivery. Postgres' unique `(user, post)` review constraint remains the
   backstop, so a lost/expired set degrades to a 409 rather than breaking. **Enabling
   `FEED_EXCLUDE_SEEN` on an existing DB requires `python -m scripts.dangerous.rebuild_redis`** to seed the
-  sets from `post_reviews`. Consequence to know: exclusions make channel *saturation*
-  reachable, so `process_operation` now asks `has_eligible_recipient` whether to park or
+  sets from `post_reviews`. Consequence to know: exclusions make route *saturation*
+  reachable (and language routing makes it common — see above), so `process_operation`
+  asks `has_eligible_recipient` whether to park or
   abandon — an exhausted channel drops the op instead of retrying it for 10 days. An *empty*
   channel is still parked (that backlog is how a new channel reaches its first subscriber).
   `FEED_RETRY_MAX_AGE_SECONDS` is the one knob for how long a post keeps looking for an
@@ -526,10 +597,57 @@ after cloning).
     the last entry is the one our own hop wrote and the first is the caller's to invent — and
     a setting for this would be one whose wrong value degrades in silence. See RAILWAY.md for the operational side (queries worth saving, and what
     Railway does and does not offer for monitoring — `SENTRY_DSN` is still an unwired setting).
+- **Admission pricing is per *route*, and the client shows a range**
+  (`backend/app/feed/pricing.py`, `service.route_prices`): a channel is several routes
+  (one per content language, plus the no-language one), each scaled from the shared
+  base price by its own congestion, so a channel can no longer quote one number.
+  `ChannelRead` carries `post_price_min`/`post_price_max`, `GET /posts/economy` the
+  same for the whole deployment, and `GET /posts/price?channel_id=&language=` the exact
+  charge once an author has picked both — that last one is a *quote*, guaranteed until
+  `expires_at`, because it and `create_post` read the same cached route price. Three
+  things worth knowing:
+  - **This is congestion pricing, not compensation for a small audience.** Easy to
+    confuse now that routes differ in size, but a post's tokens buy `FEED_FANOUT`
+    deliveries whichever route it takes, and forwarding is free — so a
+    minority-language author already pays the same for the same *guaranteed* reach.
+    What they get less of is upside, which no admission price can hand back. What
+    `route_factor` protects is a small route's **queue**.
+  - **The range is observed, not enumerated.** Answering "what is the cheapest route
+    right now" exactly would need the price refresher to enumerate channels out of
+    Postgres every window — work proportional to channels × languages, done whether or
+    not anyone is looking. Instead every route price computed for a real request widens
+    `keys.PRICE_RANGE` (a Lua-guarded min/max hash stamped with the window), and
+    `GET /channels` prices every route of the channels it was already listing, so the
+    range converges on the first channel-list load of each window at no background
+    cost. **A window that has observed nothing of its own carries the previous one's
+    spread across**, rescaled by how far the base price moved (the hash stores the base
+    each spread was measured against, and `_rescale_range` also widens the result to
+    include the current base, so it can never be narrower than the fallback it
+    replaces). Collapsing to base-price-at-both-ends instead — what this used to do —
+    was a bug with a 60-second period: any client refreshing before the window's first
+    `GET /channels` saw the composer's range turn into a single number, and a number
+    *lower* than `create_post` would charge it. `read_price_range` still returns
+    **None**, and callers still fall back to the base price at both ends, but only
+    where nothing has ever been observed.
+  - **`FEED_PRICE_CHANNEL_BAND` is what makes the range mean anything**, and it was
+    widened from 0.25 to **0.5** when this landed. At ±25% the whole spread across the
+    deployment rounded down to one or two tokens — correct arithmetic, useless display,
+    and an under-reaction to routes that genuinely differ in capacity. At ±50% a base
+    price of 4 spans 2-6. It still collapses at the bottom of the scale (±50% of 1
+    rounds back to 1), which stays correct: a price that low means the system wants
+    content. Note this is a real economy lever, not a display knob — a congested route
+    now costs half again the shared price and a quiet one half of it.
+  Note `keys.SUBS_TOTAL` changed meaning with this: it counts **audience memberships**
+  (the channel set plus one per accepted language), not subscriptions, because
+  `route_factor` divides a single route's audience by it — counting subscriptions would
+  compare a slice against a whole and make every language route look under-subscribed.
 - **Localization**: `SUPPORTED_LOCALES`/`DEFAULT_LOCALE` in `app/core/config.py` (English + German
   today). Locale is resolved per-request from `Accept-Language` (`app/core/locale.py`,
   `app/deps/locale.py`'s `CurrentLocale` dependency) — deliberately no persisted `User.locale`
-  column, since the pre-login banner endpoint has no user yet. **New user-facing backend strings
+  column, since the pre-login banner endpoint has no user yet. Not to be confused with
+  `CONTENT_LANGUAGES`/`User.content_languages` (see Language routing above): this is the
+  language the API *answers a request in*, that is the language a post is *written in*.
+  The two lists are free to diverge and are separate settings for that reason. **New user-facing backend strings
   must not be hardcoded English prose** — almost everything already follows the `api_error(status,
   "some_code")` contract (`app/core/errors.py`): the code is stable, and the Flutter client's
   `lib/l10n/*.arb` supplies the actual copy for it (see that repo's CLAUDE.md). Only two things on

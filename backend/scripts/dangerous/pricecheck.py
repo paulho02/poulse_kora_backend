@@ -23,6 +23,7 @@ import json
 from fastapi_users.jwt import generate_jwt
 from sqlalchemy import select
 
+from app.core import languages
 from app.db import async_session_maker
 from app.deps.users import get_jwt_strategy
 from app.feed import service
@@ -45,8 +46,13 @@ async def main():
     print("channels in db:", [(c.id, c.name) for c in channels])
     snap = await service.get_price_snapshot(redis_client)
     print("snapshot:", json.dumps(snap))
-    prices = await service.channel_prices(redis_client, [c.id for c in channels])
-    print("channel_prices:", prices)
+    routes = [
+        (c.id, lang) for c in channels for lang in languages.post_languages()
+    ]
+    prices = await service.route_prices(redis_client, routes)
+    for (cid, lang), price in sorted(prices.items()):
+        print(f"  route {cid}/{lang}: {price}")
+    print("observed range:", await service.read_price_range(redis_client))
     print("subs_total:", await service.subscription_total(redis_client))
     print("ops_total:", await service.outstanding_ops_total(redis_client))
 

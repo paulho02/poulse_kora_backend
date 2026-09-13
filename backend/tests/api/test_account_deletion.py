@@ -374,11 +374,13 @@ class TestDeleteAccountSideTables:
         channel: Channel = await create_channel()
         other: Post = await create_post(channel=channel)
         await subscribe(db, user, channel)
-        await service.sync_subscribe(redis, str(user.id), channel.id)
+        await service.sync_subscribe(redis, str(user.id), channel.id, ["en"])
         await service.place_post(redis, str(user.id), other.id)
         await service.earn_token(redis, str(user.id), 3)
         await service.mark_active(redis, str(user.id))
-        assert await redis.get(keys.SUBS_TOTAL) == "1"
+        # Two memberships from one subscription: the channel set and the one language
+        # this reader accepts (see keys.SUBS_TOTAL).
+        assert await redis.get(keys.SUBS_TOTAL) == "2"
 
         resp = await client.request(
             "DELETE", DELETE_ME,
@@ -392,6 +394,9 @@ class TestDeleteAccountSideTables:
         assert await redis.sismember(keys.FREE_QUEUE, str(user.id)) == 0
         assert await redis.zscore(keys.ACTIVE_USERS, str(user.id)) is None
         assert await redis.sismember(keys.channel(channel.id), str(user.id)) == 0
+        # Every language slice too, not only the channel set - a membership left
+        # behind here would keep fan-out selecting an account that no longer exists.
+        assert await redis.sismember(keys.audience(channel.id, "en"), str(user.id)) == 0
         # The running denominator of the price formula: a departure that went
         # unrecorded here would overstate subscriptions forever.
         assert await redis.get(keys.SUBS_TOTAL) == "0"

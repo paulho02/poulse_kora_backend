@@ -2,10 +2,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from fastapi_users_db_sqlalchemy import SQLAlchemyBaseUserTableUUID
-from sqlalchemy import DateTime
+from sqlalchemy import ARRAY, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.functions import func
 
+from app.core.config import settings
 from app.core.storage import storage
 from app.db import Base
 from app.models.oauth_account import GOOGLE_OAUTH_NAME
@@ -32,6 +33,32 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     username: Mapped[str | None] = mapped_column(unique=True)
     bio: Mapped[str | None]
     dark_mode: Mapped[bool] = mapped_column(default=False, server_default="false")
+
+    # Languages this reader accepts posts in - the other half of the feed's routing
+    # key (see app/feed/keys.py: audience, and app/core/languages.py). Mirrored into
+    # Redis as one audience-set membership per (subscribed channel x language), which
+    # is what keeps fan-out's recipient sampling O(sample) instead of an intersection
+    # per operation.
+    #
+    # A Postgres array rather than a join table: it is read whole or not at all,
+    # nothing ever queries "who accepts German" (Redis answers that), and a table
+    # would add a row to unwind in account deletion for no query it enables. Never
+    # empty - an empty set is an audience of nowhere and so a permanently empty feed;
+    # `sanitize_reading_languages` is the one writer and refuses to produce one.
+    #
+    # Not in SETTINGS_FIELDS, because it is not written through `UserManager._update`:
+    # changing it has to rewrite Redis memberships, so it has its own route
+    # (PUT /users/me/content-languages) which bumps `settings_revision` itself.
+    #
+    # The column default is the *widest* set, which is the opposite of what a new
+    # account gets (`default_reading_languages`, one language, narrowed in
+    # `on_after_register`). Deliberate: a row that reaches the database without going
+    # through registration - a migration backfilling accounts that predate this
+    # column, a script, a fixture - is one whose owner never chose, and the safe
+    # answer for them is the feed they already had rather than a silently narrowed one.
+    content_languages: Mapped[list[str]] = mapped_column(
+        ARRAY(String(8)), default=lambda: list(settings.CONTENT_LANGUAGES)
+    )
 
     # Object key in the media bucket, not the image itself (see app/core/storage.py;
     # PROFILE_PICTURE_* in app/core/config.py holds the size/type limits enforced on

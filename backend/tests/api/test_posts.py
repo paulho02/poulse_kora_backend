@@ -524,7 +524,9 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            data={"channel_id": channel.id, "blocks": _blocks_json(_text_block("hi"))},
+            data={"channel_id": channel.id, "language": "en", "blocks": _blocks_json(
+                _text_block("hi")
+            )},
         )
         assert resp.status_code == 402, resp.text
         body = resp.json()["detail"]
@@ -544,6 +546,7 @@ class TestCreatePost:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("unlocked post")),
             },
         )
@@ -571,6 +574,7 @@ class TestCreatePost:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("superuser post")),
             },
         )
@@ -585,7 +589,9 @@ class TestCreatePost:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            data={"channel_id": 10**6, "blocks": _blocks_json(_text_block("hi"))},
+            data={"channel_id": 10**6, "language": "en", "blocks": _blocks_json(
+                _text_block("hi")
+            )},
         )
         assert resp.status_code == 404
 
@@ -602,6 +608,7 @@ class TestCreatePost:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("supporter post")),
             },
         )
@@ -620,6 +627,7 @@ class TestCreatePost:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("free post")),
             },
         )
@@ -640,6 +648,7 @@ class TestCreatePost:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("supporter post")),
             },
         )
@@ -670,6 +679,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("with a photo"), _media_block(0)),
             },
             files=[("files", ("photo.jpg", _make_test_jpeg(), "image/jpeg"))],
@@ -696,6 +706,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("tagged"), _media_block(0)),
             },
             files=[
@@ -723,6 +734,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("with a clip"), _media_block(0)),
             },
             files=[("files", ("clip.mp4", clip, "video/mp4"))],
@@ -759,6 +771,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0)),
             },
             files=[("files", ("clip.mp4", clip, "video/mp4"))],
@@ -786,6 +799,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0)),
             },
             files=[("files", ("clip.mp4", clip, "video/mp4"))],
@@ -814,6 +828,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0)),
             },
             files=[("files", ("photo.jpg", _make_test_jpeg(400, 300), "image/jpeg"))],
@@ -835,6 +850,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0)),
             },
             files=[("files", ("photo.jpg", _make_test_jpeg(80, 100), "image/jpeg"))],
@@ -859,6 +875,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0)),
             },
             files=[("files", ("square.jpg", _make_test_jpeg(64, 64), "image/jpeg"))],
@@ -888,6 +905,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0)),
             },
             files=[("files", ("rotated.jpg", photo, "image/jpeg"))],
@@ -916,6 +934,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0), _media_block(1)),
             },
             files=[
@@ -946,6 +965,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0, orientation="portrait")),
             },
             files=[("files", ("clip.mp4", clip, "video/mp4"))],
@@ -972,6 +992,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0)),
             },
             files=[("files", ("clip.mp4", clip, "video/mp4"))],
@@ -997,6 +1018,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0, orientation="landscape")),
             },
             files=[("files", ("clip.mp4", clip, "video/mp4"))],
@@ -1033,6 +1055,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(author),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0)),
             },
             files=[("files", ("clip.mp4", _make_test_video(duration=1.0), "video/mp4"))],
@@ -1060,6 +1083,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0, orientation="landscape")),
             },
             files=[
@@ -1092,6 +1116,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(
                     _text_block("too many"),
                     *[_media_block(i) for i in range(count)],
@@ -1117,6 +1142,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("big"), _media_block(0)),
             },
             files=[("files", ("photo.jpg", _make_test_jpeg(), "image/jpeg"))],
@@ -1138,6 +1164,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("long clip"), _media_block(0)),
             },
             files=[("files", ("clip.mp4", clip, "video/mp4"))],
@@ -1157,6 +1184,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("not an image"), _media_block(0)),
             },
             files=[("files", ("notes.txt", b"just text", "text/plain"))],
@@ -1178,6 +1206,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("fake"), _media_block(0)),
             },
             files=[("files", ("fake.jpg", b"not-really-a-jpeg", "image/jpeg"))],
@@ -1203,6 +1232,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(
                     _text_block("two photos"), _media_block(0), _media_block(1)
                 ),
@@ -1224,6 +1254,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("bomb"), _media_block(0)),
             },
             files=[("files", ("bomb.png", _make_decompression_bomb_png(), "image/png"))],
@@ -1248,6 +1279,7 @@ class TestCreatePostMedia:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(
                     _text_block("intro"),
                     _media_block(0),
@@ -1275,7 +1307,7 @@ class TestCreatePostBlocks:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            data={"channel_id": channel.id, "blocks": _blocks_json()},
+            data={"channel_id": channel.id, "language": "en", "blocks": _blocks_json()},
         )
         assert resp.status_code == 400, resp.text
         assert resp.json()["detail"]["error"] == "post_blocks_empty"
@@ -1293,6 +1325,7 @@ class TestCreatePostBlocks:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(*[_text_block(f"p{i}") for i in range(4)]),
             },
         )
@@ -1311,6 +1344,7 @@ class TestCreatePostBlocks:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("hi"), _media_block(0)),
             },
             # No files attached at all - file_index 0 is out of range.
@@ -1330,6 +1364,7 @@ class TestCreatePostBlocks:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0), _media_block(0)),
             },
             files=[("files", ("a.jpg", _make_test_jpeg(), "image/jpeg"))],
@@ -1349,7 +1384,9 @@ class TestCreatePostBlocks:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            data={"channel_id": channel.id, "blocks": _blocks_json(_text_block("hi"))},
+            data={"channel_id": channel.id, "language": "en", "blocks": _blocks_json(
+                _text_block("hi")
+            )},
             files=[("files", ("a.jpg", _make_test_jpeg(), "image/jpeg"))],
         )
         assert resp.status_code == 400, resp.text
@@ -1365,7 +1402,9 @@ class TestCreatePostBlocks:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            data={"channel_id": channel.id, "blocks": _blocks_json(_media_block(0))},
+            data={"channel_id": channel.id, "language": "en", "blocks": _blocks_json(
+                _media_block(0)
+            )},
             files=[("files", ("a.jpg", _make_test_jpeg(), "image/jpeg"))],
         )
         assert resp.status_code == 201, resp.text
@@ -1383,6 +1422,7 @@ class TestCreatePostBlocks:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(
                     _text_block("first paragraph"), _text_block("second paragraph")
                 ),
@@ -1402,7 +1442,9 @@ class TestCreatePostBlocks:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            data={"channel_id": channel.id, "blocks": _blocks_json(_text_block("   "))},
+            data={"channel_id": channel.id, "language": "en", "blocks": _blocks_json(
+                _text_block("   ")
+            )},
         )
         assert resp.status_code == 400, resp.text
         assert resp.json()["detail"]["error"] == "post_blocks_invalid"
@@ -1417,7 +1459,7 @@ class TestCreatePostBlocks:
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
-            data={"channel_id": channel.id, "blocks": "not json"},
+            data={"channel_id": channel.id, "language": "en", "blocks": "not json"},
         )
         assert resp.status_code == 400, resp.text
         assert resp.json()["detail"]["error"] == "post_blocks_invalid"
@@ -1436,6 +1478,7 @@ class TestCreatePostBlocks:
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_media_block(0), _media_block(0)),
             },
             files=[("files", ("a.jpg", _make_test_jpeg(), "image/jpeg"))],
@@ -1475,7 +1518,9 @@ class TestPostEconomy:
         data1 = resp1.json()
 
         for i in range(settings.FEED_PRICE_TARGET_MIN_ITEMS * 3):
-            await service.enqueue_operation(redis, post_id=i, channel_id=1)
+            await service.enqueue_operation(
+                redis, post_id=i, channel_id=1, language="en"
+            )
 
         resp2 = await client.get(
             settings.API_PATH + "/posts/economy", headers=get_jwt_header(user)
@@ -1955,14 +2000,16 @@ class TestDeliveryExclusions:
         author: User = await create_user()
         channel: Channel = await create_channel()
         await subscribe(db, author, channel)
-        await service.sync_subscribe(redis, str(author.id), channel.id)
+        await service.sync_subscribe(redis, str(author.id), channel.id, ["en"])
         await service.earn_token(redis, str(author.id), settings.FEED_PRICE_MAX)
         header = get_jwt_header(author)
 
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=header,
-            data={"channel_id": channel.id, "blocks": _blocks_json(_text_block("mine"))},
+            data={"channel_id": channel.id, "language": "en", "blocks": _blocks_json(
+                _text_block("mine")
+            )},
         )
         assert resp.status_code == 201, resp.text
 
@@ -1986,7 +2033,7 @@ class TestDeliveryExclusions:
         channel: Channel = await create_channel()
         post: Post = await create_post(channel=channel)
         await subscribe(db, user, channel)
-        await service.sync_subscribe(redis, str(user.id), channel.id)
+        await service.sync_subscribe(redis, str(user.id), channel.id, ["en"])
         await service.place_post(redis, str(user.id), post.id)
         header = get_jwt_header(user)
 
@@ -2065,6 +2112,7 @@ class TestInteractionRateLimit:
             headers=header,
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": _blocks_json(_text_block("one too many")),
             },
         )

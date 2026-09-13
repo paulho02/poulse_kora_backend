@@ -26,9 +26,11 @@ Self-trimming: a fully processed entry is `XDEL`'d and `XACK`'d, so the stream r
 only outstanding work (undelivered backlog + in-flight). No separate trim janitor is
 needed; `operation_queue_len` (XLEN) is therefore a fair congestion signal for pricing.
 
-Fan-out itself is pure Redis: the entry carries the channel_id, recipients are a random
-sample of the channel's subscribers filtered to those with a free slot (see
-service.select_recipients) — no Postgres access needed. That property is why a post
+Fan-out itself is pure Redis: the entry carries the routing key (channel_id +
+language), recipients are a random sample of that route's audience filtered to those
+with a free slot (see service.select_recipients) — no Postgres access needed. That
+property is why the language travels on the entry rather than being read off the post,
+and why a post
 erased by its author is announced *into Redis* (`service.mark_posts_deleted`) rather
 than checked for in Postgres here: it is the only way this loop can know, and it costs
 one EXISTS per op.
@@ -41,6 +43,7 @@ from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
 from app.core.config import settings
+from app.core.languages import UNSPECIFIED
 from app.core.logger import get_logger, new_request_context, reset_request_context
 from app.feed import keys, service
 
@@ -51,10 +54,16 @@ async def process_operation(
     redis: Redis,
     post_id: int,
     channel_id: int,
+    language: str,
     expires_at: float | None = None,
     author_id: str | None = None,
 ) -> int:
     """Fan `post_id` out to up to FEED_FANOUT eligible recipients. Returns the count.
+
+    `language` and `channel_id` together are the routing key: they name the audience
+    set this post may be delivered into (see service.select_recipients). Neither is
+    looked up here — the worker never opens a Postgres session, so everything needed to
+    decide where a post goes has to arrive on the stream entry.
 
     `expires_at` is the retry deadline carried by an op that has already been parked at
     least once; it is passed straight back to `schedule_retry` so re-parking does not
@@ -69,19 +78,25 @@ async def process_operation(
         # have to clear by hand - so the op dies here instead. Terminal, and it
         # stops counting against the channel's price like any other terminal
         # outcome.
-        await service.retire_operation(redis, channel_id)
-        # INFO for the same reason as `channel_exhausted` below: it is reach the
+        await service.retire_operation(redis, channel_id, language)
+        # INFO for the same reason as `route_exhausted` below: it is reach the
         # author paid tokens for being given up on, and it is rare.
         log.info(
             "feed.op_abandoned",
             post_id=post_id,
             channel_id=channel_id,
+            language=language,
             reason="post_deleted",
         )
         return 0
 
     recipients = await service.select_recipients(
-        redis, channel_id, settings.FEED_FANOUT, post_id=post_id, author_id=author_id
+        redis,
+        channel_id,
+        language,
+        settings.FEED_FANOUT,
+        post_id=post_id,
+        author_id=author_id,
     )
     # A placement can still be refused after selection (a concurrent worker got there
     # first), so count what actually landed rather than what we intended to send.
@@ -90,8 +105,8 @@ async def process_operation(
         if await service.place_post(redis, user_id, post_id) != service.PLACE_REFUSED:
             delivered += 1
     if delivered:
-        # Terminal outcome: stop counting this op against the channel's price.
-        await service.retire_operation(redis, channel_id)
+        # Terminal outcome: stop counting this op against the route's price.
+        await service.retire_operation(redis, channel_id, language)
         # The happy path, and the highest-frequency event in the system (every
         # post and every forward passes through here), so DEBUG - `post.created`
         # and `post.reviewed` already record at INFO that the work exists. What
@@ -100,16 +115,24 @@ async def process_operation(
             "feed.op_delivered",
             post_id=post_id,
             channel_id=channel_id,
+            language=language,
             delivered=delivered,
             selected=len(recipients),
         )
         return delivered
 
-    if await service.has_eligible_recipient(redis, channel_id, post_id, author_id):
+    if await service.has_eligible_recipient(
+        redis, channel_id, language, post_id, author_id
+    ):
         # Nobody has a free slot right now: park for retry rather than discarding.
         # Delivered once any subscriber frees a slot or a new one arrives.
         await service.schedule_retry(
-            redis, post_id, channel_id, expires_at=expires_at, author_id=author_id
+            redis,
+            post_id,
+            channel_id,
+            language,
+            expires_at=expires_at,
+            author_id=author_id,
         )
         # DEBUG on purpose. A parked op re-parks every
         # FEED_RETRY_INTERVAL_SECONDS (20s) for up to FEED_RETRY_MAX_AGE_SECONDS
@@ -121,24 +144,33 @@ async def process_operation(
             "feed.op_parked",
             post_id=post_id,
             channel_id=channel_id,
+            language=language,
             retry_in=settings.FEED_RETRY_INTERVAL_SECONDS,
         )
     else:
-        # Every subscriber has already had this post (or the only one left is its
-        # author). Parking it would cycle it through the stream every
+        # Everyone in this route's audience has already had this post (or the only one
+        # left is its author). Parking it would cycle it through the stream every
         # FEED_RETRY_INTERVAL_SECONDS for up to FEED_RETRY_MAX_AGE_SECONDS, inflating
         # the admission price the whole time, to serve only the chance that someone new
-        # subscribes. We give that chance up: a post whose channel has already read it
-        # is not what a new subscriber needs. Note this is strictly narrower than an
-        # *empty* channel, which is still parked — that backlog is worth keeping.
-        await service.retire_operation(redis, channel_id)
+        # subscribes. We give that chance up: a post everyone who could read it has
+        # already read is not what a new subscriber needs. Note this is strictly
+        # narrower than an *empty* audience, which is still parked — that backlog is
+        # worth keeping.
+        #
+        # Language routing made this the *ordinary* end of a post's life rather than an
+        # edge case: a route with twenty readers is exhausted after a handful of
+        # forwards, where the undivided channel would have kept finding new ones. Which
+        # is why `has_eligible_recipient` must measure the route and not the channel -
+        # asking the channel here would park every minority-language post for ten days.
+        await service.retire_operation(redis, channel_id, language)
         # Terminal and rare, and it is reach an author paid tokens for that is
         # being given up on - so it stays at INFO however busy the stream gets.
         log.info(
             "feed.op_abandoned",
             post_id=post_id,
             channel_id=channel_id,
-            reason="channel_exhausted",
+            language=language,
+            reason="route_exhausted",
         )
     return 0
 
@@ -175,7 +207,14 @@ async def _fan_out_and_retire(
     # Absent on ops enqueued before FEED_EXCLUDE_OWN_POSTS existed — tolerated, like
     # `expires_at`, so a deploy doesn't have to drain the stream first.
     author_id = fields.get("author_id")
-    await process_operation(redis, post_id, channel_id, expires_at, author_id)
+    # Likewise absent on ops enqueued before language routing. UNSPECIFIED routes
+    # through the whole channel, which is the audience such an op was minted against,
+    # so a backlog crossing the deploy is delivered as originally intended rather than
+    # narrowed to one language's readers.
+    language = fields.get("language") or UNSPECIFIED
+    await process_operation(
+        redis, post_id, channel_id, language, expires_at, author_id
+    )
     await redis.xdel(keys.STREAM, entry_id)
     await redis.xack(keys.STREAM, keys.STREAM_GROUP, entry_id)
     return {"post_id": post_id, "channel_id": channel_id}

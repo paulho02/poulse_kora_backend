@@ -17,11 +17,13 @@ from redis.exceptions import ResponseError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import languages as languages_module
 from app.core.config import settings
+from app.core.languages import UNSPECIFIED
 from app.core.logger import get_logger
 from app.feed import keys
-from app.feed.pricing import channel_price as compute_channel_price
 from app.feed.pricing import compute_price
+from app.feed.pricing import route_price as compute_route_price
 from app.feed.scripts import get_scripts
 from app.models.channel_subscription import ChannelSubscription
 from app.models.post import Post
@@ -56,15 +58,21 @@ async def _add_to_stream(
     redis: Redis,
     post_id: int,
     channel_id: int,
+    language: str,
     expires_at: float | None = None,
     author_id: str | None = None,
 ) -> None:
     """Append a fan-out operation to the stream, and *only* that.
 
     Split from `enqueue_operation` because re-adding a parked op is not new work: the
-    channel's outstanding count was incremented when the op was first minted and has
+    route's outstanding count was incremented when the op was first minted and has
     stayed up through the whole park/retry cycle, so counting it again here would
-    inflate a stalled channel's price once per retry.
+    inflate a stalled route's price once per retry.
+
+    `language` is the other half of the routing key (see keys.audience). Carried on the
+    entry rather than looked up, for the same reason `author_id` is: the worker never
+    opens a Postgres session, so everything fan-out needs to decide *where* a post goes
+    has to travel with the operation.
 
     `expires_at` is carried only by ops coming back from `ops:retry`; it preserves the
     original retry deadline across the stream round-trip so re-parking cannot reset it
@@ -76,7 +84,11 @@ async def _add_to_stream(
     `ops:retry` across the deploy) simply carry no author and are fanned out as before,
     exactly like `expires_at` degrades.
     """
-    fields = {"post_id": str(post_id), "channel_id": str(channel_id)}
+    fields = {
+        "post_id": str(post_id),
+        "channel_id": str(channel_id),
+        "language": language,
+    }
     if expires_at is not None:
         fields["expires_at"] = str(expires_at)
     if author_id is not None:
@@ -88,21 +100,22 @@ async def enqueue_operation(
     redis: Redis,
     post_id: int,
     channel_id: int,
+    language: str,
     author_id: str | None = None,
 ) -> None:
     """Mint a *new* fan-out operation for `post_id` (a publish or a forward).
 
-    Also counts it against the channel (see keys.OPS_OUTSTANDING), which is what makes
-    per-channel pricing possible: this is where work enters the system, and
+    Also counts it against the route (see keys.OPS_OUTSTANDING), which is what makes
+    per-route pricing possible: this is where work enters the system, and
     `retire_operation` is the only place it leaves. Ops re-added from `ops:retry` go
     through `_add_to_stream` instead, which skips the count.
     """
-    await _add_to_stream(redis, post_id, channel_id, author_id=author_id)
-    await redis.hincrby(keys.OPS_OUTSTANDING, str(channel_id), 1)
+    await _add_to_stream(redis, post_id, channel_id, language, author_id=author_id)
+    await redis.hincrby(keys.OPS_OUTSTANDING, keys.route(channel_id, language), 1)
 
 
-async def retire_operation(redis: Redis, channel_id: int) -> int:
-    """Drop one outstanding op from the channel's count. Returns the new count.
+async def retire_operation(redis: Redis, channel_id: int, language: str) -> int:
+    """Drop one outstanding op from the route's count. Returns the new count.
 
     Called at a *terminal* outcome only — the post reached a recipient, or was abandoned
     — never when an op is merely parked for retry, which leaves it outstanding by
@@ -111,7 +124,7 @@ async def retire_operation(redis: Redis, channel_id: int) -> int:
     """
     return int(
         await get_scripts(redis).retire(
-            keys=[keys.OPS_OUTSTANDING], args=[str(channel_id)]
+            keys=[keys.OPS_OUTSTANDING], args=[keys.route(channel_id, language)]
         )
     )
 
@@ -139,24 +152,27 @@ async def outstanding_ops_total(redis: Redis) -> int:
     return sum(max(0, int(v)) for v in values)
 
 
-async def channel_outstanding_ops(
-    redis: Redis, channel_ids: Sequence[int]
-) -> dict[int, int]:
-    """Outstanding op count per channel, in one round trip. Missing ⇒ 0."""
-    if not channel_ids:
+async def route_outstanding_ops(
+    redis: Redis, routes: Sequence[tuple[int, str]]
+) -> dict[tuple[int, str], int]:
+    """Outstanding op count per (channel, language) route, in one round trip.
+    Missing ⇒ 0."""
+    if not routes:
         return {}
-    raw = await redis.hmget(keys.OPS_OUTSTANDING, [str(c) for c in channel_ids])
+    raw = await redis.hmget(
+        keys.OPS_OUTSTANDING, [keys.route(cid, lang) for cid, lang in routes]
+    )
     return {
-        cid: max(0, int(v)) if v is not None else 0
-        for cid, v in zip(channel_ids, raw, strict=True)
+        route: max(0, int(v)) if v is not None else 0
+        for route, v in zip(routes, raw, strict=True)
     }
 
 
 async def subscription_total(redis: Redis) -> int:
-    """Total channel subscriptions (see keys.SUBS_TOTAL). Clamped at 0.
+    """Total audience memberships (see keys.SUBS_TOTAL). Clamped at 0.
 
     A running counter, so it can drift below the truth if Redis loses the key while
-    keeping the channel sets. It only ever scales a price within the channel band, and
+    keeping the audience sets. It only ever scales a price within the channel band, and
     `rebuild_from_pg` resets it from Postgres.
     """
     raw = await redis.get(keys.SUBS_TOTAL)
@@ -269,75 +285,195 @@ async def maybe_refresh_price_snapshot(redis: Redis, now: float | None = None) -
     return current
 
 
-async def channel_prices(
-    redis: Redis, channel_ids: Sequence[int], now: float | None = None
-) -> dict[int, int]:
-    """Admission price for each of `channel_ids`, frozen for the current price window.
+async def route_prices(
+    redis: Redis, routes: Sequence[tuple[int, str]], now: float | None = None
+) -> dict[tuple[int, str], int]:
+    """Admission price for each (channel, language) route, frozen for the current
+    price window.
 
-    Each price is the global snapshot's price scaled by that channel's own congestion
-    (see `pricing.channel_factor`), then cached under `keys.channel_price` stamped with
-    the *snapshot's* `expires_at`. So a channel's price is guaranteed for exactly as
-    long as the base price it came from, and both roll over on the same tick — which is
-    what lets a channel list quote a number that `create_post` will still charge.
+    Each price is the global snapshot's price scaled by that route's own congestion
+    (see `pricing.route_factor`), then cached under `keys.route_price` stamped with the
+    *snapshot's* `expires_at`. So a route's price is guaranteed for exactly as long as
+    the base price it came from, and both roll over on the same tick — which is what
+    lets a channel list quote a number that `create_post` will still charge.
 
-    Computed lazily per channel rather than for every channel on the refresher tick: the
+    Computed lazily per route rather than for every route on the refresher tick: the
     refresher has no way to enumerate channels without either a Postgres session or a
-    `SCAN` over the keyspace, and only channels somebody actually looks at need a price.
+    `SCAN` over the keyspace, and only routes somebody actually looks at need a price.
+    Language multiplied the number of prices by CONTENT_LANGUAGES + 1 without changing
+    that arithmetic — and it is why the deployment-wide range is *observed* from these
+    computations rather than calculated from an enumeration (see keys.PRICE_RANGE).
 
-    At most three round trips whatever the page size — the cached reads, then the two
-    counters for whatever missed, then the write-back.
+    Three batched round trips whatever the page size — the cached reads, the subscriber
+    counts for whatever missed, and the write-back — so pricing every route of six
+    channels costs the same trips as pricing one. `observe_prices` then adds one call
+    per channel plus one global, but only for routes that actually missed the cache,
+    which is once per route per window: the steady state, where every route on the page
+    is cached, is a single MGET.
     """
-    if not channel_ids:
+    if not routes:
         return {}
     if now is None:
         now = time.time()
 
-    wanted = list(dict.fromkeys(channel_ids))
-    cached = await redis.mget([keys.channel_price(c) for c in wanted])
+    wanted = list(dict.fromkeys(routes))
+    cached = await redis.mget([keys.route_price(c, lang) for c, lang in wanted])
 
-    prices: dict[int, int] = {}
-    missing: list[int] = []
-    for channel_id, raw in zip(wanted, cached, strict=True):
+    prices: dict[tuple[int, str], int] = {}
+    missing: list[tuple[int, str]] = []
+    for route, raw in zip(wanted, cached, strict=True):
         entry = json.loads(raw) if raw is not None else None
         if entry is not None and now < entry["expires_at"]:
-            prices[channel_id] = entry["price"]
+            prices[route] = entry["price"]
         else:
-            missing.append(channel_id)
+            missing.append(route)
     if not missing:
         return prices
 
     snapshot = await get_price_snapshot(redis)
-    # Absent from a snapshot published before per-channel pricing existed, which can
+    # Absent from a snapshot published before per-route pricing existed, which can
     # still be live for up to FEED_PRICE_TTL_SECONDS after the deploy. Zeroes make
-    # `channel_factor` neutral, so those channels price at the flat global rate for one
+    # `route_factor` neutral, so those routes price at the flat global rate for one
     # window instead of raising.
     ops_total = snapshot.get("ops_total", 0)
     subs_total = snapshot.get("subs_total", 0)
-    ops_by_channel = await channel_outstanding_ops(redis, missing)
+    ops_by_route = await route_outstanding_ops(redis, missing)
 
     pipe = redis.pipeline(transaction=False)
-    for channel_id in missing:
-        pipe.scard(keys.channel(channel_id))
+    for channel_id, language in missing:
+        pipe.scard(keys.audience(channel_id, language))
     subscriber_counts = await pipe.execute()
 
     pipe = redis.pipeline(transaction=False)
-    for channel_id, subscribers in zip(missing, subscriber_counts, strict=True):
-        price = compute_channel_price(
+    computed: dict[int, list[int]] = {}
+    for route, subscribers in zip(missing, subscriber_counts, strict=True):
+        channel_id, language = route
+        price = compute_route_price(
             snapshot["price"],
-            ops_by_channel[channel_id],
+            ops_by_route[route],
             subscribers,
             ops_total,
             subs_total,
             settings,
         )
-        prices[channel_id] = price
+        prices[route] = price
+        computed.setdefault(channel_id, []).append(price)
         pipe.set(
-            keys.channel_price(channel_id),
+            keys.route_price(channel_id, language),
             json.dumps({"price": price, "expires_at": snapshot["expires_at"]}),
             ex=settings.FEED_PRICE_TTL_SECONDS,
         )
     await pipe.execute()
+
+    await observe_prices(
+        redis, computed, snapshot["expires_at"], base=snapshot["price"]
+    )
     return prices
+
+
+async def observe_prices(
+    redis: Redis,
+    prices_by_channel: dict[int, list[int]],
+    expires_at: float,
+    *,
+    base: int,
+) -> None:
+    """Fold freshly computed route prices into the observed ranges (keys.PRICE_RANGE).
+
+    Only prices that were actually *computed* are observed, never ones served from
+    cache. A route's price is computed once per window, so that first computation is
+    the only observation there is to make; re-observing a cached read would add round
+    trips to every later request to re-assert a fact already recorded.
+
+    Only the extremes of each group are sent. The script folds a list, and the min and
+    max of a list widen a range by exactly as much as every element would.
+
+    The window is the snapshot's `expires_at` truncated to a whole second — see the
+    `price_range` script for why it has to be an integer compared as a string. `base`
+    is that window's shared price, recorded so a reader in a *later* window can rescale
+    this spread instead of throwing it away (see `read_price_range`).
+
+    The key outlives its own window by a whole window, because the window after it
+    reads it as a fallback: a TTL of only FEED_PRICE_TTL_SECONDS would drop the spread
+    exactly when nobody had looked for a while, which is the case the fallback is for.
+    """
+    if not prices_by_channel:
+        return
+    window = str(int(expires_at))
+    ttl = settings.FEED_PRICE_TTL_SECONDS + settings.FEED_PRICE_REFRESH_SECONDS
+    price_range = get_scripts(redis).price_range
+    everything = [p for prices in prices_by_channel.values() for p in prices]
+    await price_range(
+        keys=[keys.PRICE_RANGE],
+        args=[window, ttl, base, min(everything), max(everything)],
+    )
+    for channel_id, prices in prices_by_channel.items():
+        await price_range(
+            keys=[keys.channel_price_range(channel_id)],
+            args=[window, ttl, base, min(prices), max(prices)],
+        )
+
+
+def _rescale_range(
+    low: int, high: int, base: int, current_base: int
+) -> tuple[int, int]:
+    """Carry a spread observed against `base` over to `current_base`.
+
+    A route price is the window's base price times that route's own congestion factor,
+    and the factor is the half that barely moves from one window to the next — traffic
+    does not reshape itself in a minute, while the base price is by definition the half
+    that just changed. So what carries over is the *shape* of the spread, rescaled onto
+    the new base.
+
+    Widened to include `current_base` too, so a carried range can never be narrower or
+    further from the truth than the base-price-at-both-ends fallback it replaces: a
+    route with neutral congestion is charged exactly the base price, so that point
+    always belongs in the range.
+    """
+    factor = current_base / base
+    low, high = round(low * factor), round(high * factor)
+    low, high = min(low, current_base), max(high, current_base)
+    return max(settings.FEED_PRICE_MIN, low), min(settings.FEED_PRICE_MAX, high)
+
+
+async def read_price_range(
+    redis: Redis, channel_id: int | None = None
+) -> tuple[int, int] | None:
+    """The observed price range, or None if nothing has ever been observed.
+
+    `channel_id` scopes it to one channel's routes; omitted, it covers every route
+    anyone has priced.
+
+    Exact within the current window — every route price computed in it widens this. A
+    spread left over from an *earlier* window is not reported as-is, since it was
+    measured against a base price that has moved, but rescaled onto the current base by
+    `_rescale_range`. That is a much better answer than the base price at both ends,
+    which claims every route costs the same: the composer's range would collapse to a
+    single number about once per window — whenever a client refreshed before that
+    window's first channel-list load — and then quote one *lower* than what
+    `create_post` would actually charge.
+
+    None is still a real answer every caller has to handle: a deployment where nobody
+    has priced a route since the key was last evicted has observed nothing at all, and
+    there the base price at both ends is the only thing left to say.
+    """
+    key = (
+        keys.PRICE_RANGE
+        if channel_id is None
+        else keys.channel_price_range(channel_id)
+    )
+    window, low, high, base = await redis.hmget(key, ["window", "min", "max", "base"])
+    if window is None or low is None or high is None:
+        return None
+    snapshot = await get_price_snapshot(redis)
+    if window == str(int(snapshot["expires_at"])):
+        return int(low), int(high)
+    # An earlier window's spread. `base` is absent from one written before it was
+    # recorded, and without it there is nothing to say what those numbers were relative
+    # to — so that single window degrades to the old behaviour rather than guessing.
+    if base is None or int(base) <= 0:
+        return None
+    return _rescale_range(int(low), int(high), int(base), snapshot["price"])
 
 
 async def run_price_refresher(redis: Redis) -> None:
@@ -364,6 +500,7 @@ async def schedule_retry(
     redis: Redis,
     post_id: int,
     channel_id: int,
+    language: str,
     delay: float | None = None,
     expires_at: float | None = None,
     author_id: str | None = None,
@@ -381,8 +518,9 @@ async def schedule_retry(
     retried again. It is set once, on the first park (`now + FEED_RETRY_MAX_AGE_SECONDS`),
     and thereafter passed back in by the caller so repeated parking cannot extend it.
 
-    `author_id` rides along the same way, so a parked op still knows to skip its author
-    when it is eventually re-added to the stream.
+    `author_id` and `language` ride along the same way, so a parked op still knows both
+    where to route and whose author to skip when it is eventually re-added to the
+    stream.
     """
     if delay is None:
         delay = settings.FEED_RETRY_INTERVAL_SECONDS
@@ -393,6 +531,7 @@ async def schedule_retry(
         {
             "post_id": post_id,
             "channel_id": channel_id,
+            "language": language,
             "expires_at": expires_at,
             "author_id": author_id,
         }
@@ -419,6 +558,11 @@ async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
     for member in due:
         _, _, payload = member.partition(":")
         op = json.loads(payload)
+        # Parked before language routing existed. UNSPECIFIED is the honest reading of
+        # an op that never chose: it routes through the whole channel, which is exactly
+        # the audience the op was minted against, so a backlog crossing the deploy is
+        # delivered as originally intended rather than narrowed to one language slice.
+        language = op.get("language") or UNSPECIFIED
         expires_at = op.get("expires_at")
         if expires_at is None:
             # Parked before deadlines existed. Stamp one from now: the upgrade neither
@@ -427,12 +571,13 @@ async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
         elif expires_at <= now:
             await redis.zrem(keys.OPS_RETRY, member)
             # Terminal: this op will never be delivered, so it stops counting against
-            # the channel's price.
-            await retire_operation(redis, op["channel_id"])
+            # the route's price.
+            await retire_operation(redis, op["channel_id"], language)
             log.info(
                 "feed.op_abandoned",
                 post_id=op["post_id"],
                 channel_id=op["channel_id"],
+                language=language,
                 reason="retry_deadline",
                 max_age_seconds=settings.FEED_RETRY_MAX_AGE_SECONDS,
             )
@@ -442,11 +587,12 @@ async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
         # handling) rather than silently lost.
         #
         # `_add_to_stream`, not `enqueue_operation`: this op is already counted against
-        # its channel and has been throughout its time parked here.
+        # its route and has been throughout its time parked here.
         await _add_to_stream(
             redis,
             op["post_id"],
             op["channel_id"],
+            language,
             expires_at,
             op.get("author_id"),
         )
@@ -616,8 +762,16 @@ async def purge_user(
     pipe.delete(keys.tokens(user_id))
     pipe.srem(keys.FREE_QUEUE, user_id)
     pipe.zrem(keys.ACTIVE_USERS, user_id)
+    # Every audience set of every channel they were in, not just the ones their
+    # `content_languages` named: the account's rows are already committed away by the
+    # time this runs, so there is nothing left to read a current language set from,
+    # and a missed membership would keep fanning posts at a user id that no longer
+    # exists. SREM of a non-member is free, and the loop is bounded by
+    # CONTENT_LANGUAGES.
     for channel_id in channel_ids:
         pipe.srem(keys.channel(channel_id), user_id)
+        for language in languages_module.reading_languages():
+            pipe.srem(keys.audience(channel_id, language), user_id)
     results = await pipe.execute()
     # Only the memberships that were actually there may decrement the running
     # total - the same rule `sync_unsubscribe` follows, and for the same reason:
@@ -632,25 +786,33 @@ async def purge_user(
 async def select_recipients(
     redis: Redis,
     channel_id: int,
+    language: str,
     k: int,
     post_id: int | None = None,
     author_id: str | None = None,
 ) -> list[str]:
-    """Pick up to `k` distinct random user_ids subscribed to the channel *and* free.
+    """Pick up to `k` distinct random user_ids in this route's audience *and* free.
 
     Sample-then-filter, not intersect: `SRANDMEMBER` a bounded random sample of the
-    channel's subscribers (`k * FEED_FANOUT_SAMPLE_MULTIPLIER`), then keep those in
+    route's audience (`k * FEED_FANOUT_SAMPLE_MULTIPLIER`), then keep those in
     `free_queue` via a single `SMISMEMBER`. Both calls are O(sample), independent of
-    channel size — unlike a per-op `SINTERSTORE(channel, free_queue)`, which scans a
+    audience size — unlike a per-op `SINTERSTORE(channel, free_queue)`, which scans a
     set proportional to the whole channel (or the global free set) and blocks the
     single-threaded server for that long on *every* operation.
 
-    Trade-off: for a channel large enough that the sample is a strict subset, this is
+    **Language is part of the key, not one of the filters** (see keys.audience), and
+    that is what keeps this function's cost unchanged by language routing. Filtering
+    the sample by language instead would have been a fourth `SMISMEMBER` and looked
+    cheaper, but it samples from the wrong population: a language read by a tenth of a
+    channel leaves roughly one usable candidate out of the twelve drawn, so nearly
+    every op would park and retry while the backlog inflated everyone's price.
+
+    Trade-off: for an audience large enough that the sample is a strict subset, this is
     probabilistic — if free subscribers are rare, the sample may miss them and the op
-    is parked for retry (correct: the channel is genuinely congested). For channels at
+    is parked for retry (correct: the route is genuinely congested). For audiences at
     or below the sample size the whole set is drawn, so selection is exact, matching
     the old behaviour. Oversampling (the multiplier) keeps the miss rate low until a
-    channel is heavily saturated.
+    route is heavily saturated.
 
     `post_id`/`author_id` apply the delivery exclusions. Both are optional so an op that
     predates them still fans out. The order of the three filters is deliberate: drop the
@@ -663,7 +825,9 @@ async def select_recipients(
     burning fan-out attempts on recipients that would be refused.
     """
     sample_size = k * settings.FEED_FANOUT_SAMPLE_MULTIPLIER
-    candidates = await redis.srandmember(keys.channel(channel_id), sample_size)
+    candidates = await redis.srandmember(
+        keys.audience(channel_id, language), sample_size
+    )
     if not candidates:
         return []
 
@@ -683,9 +847,14 @@ async def select_recipients(
 
 
 async def has_eligible_recipient(
-    redis: Redis, channel_id: int, post_id: int, author_id: str | None = None
+    redis: Redis,
+    channel_id: int,
+    language: str,
+    post_id: int,
+    author_id: str | None = None,
 ) -> bool:
-    """Could *any* subscriber still receive this post, ignoring queue capacity?
+    """Could *any* member of this route's audience still receive this post, ignoring
+    queue capacity?
 
     Separates "undeliverable right now" from "undeliverable forever". Before exclusions
     existed every subscriber was always a valid target, so an empty recipient list only
@@ -697,38 +866,54 @@ async def has_eligible_recipient(
     pays. That arithmetic is why this gate got *more* valuable when the deadline was
     doubled, not less.
 
-    Cheap gate first. Exhaustion requires the seen set to cover every subscriber bar at
-    most the author, so `seen + 1 < subscribers` rules it out with two O(1) SCARDs — the
-    common "everyone is merely full" case never pays more than that. Only when the gate
-    passes do we spend the O(channel) SDIFF, and a confirmed exhaustion abandons the op,
-    so that scan does not recur for the same post.
+    **It measures the route's audience, never the channel's**, and that distinction is
+    load-bearing rather than tidy. Asking the channel set would let a German post whose
+    twenty German readers have all seen it observe five thousand English subscribers,
+    conclude it still had an audience, and park itself for ten days — inflating the
+    price of every post in the channel to chase readers it can never be delivered to.
+    Language routing is also what makes exhaustion *ordinary*: a small route runs out
+    after a handful of forwards, so this path went from a rare edge case to the normal
+    end of a post's life.
 
-    A channel with *no* subscribers is deliberately treated as still-eligible. Subscribing
+    Cheap gate first. Exhaustion requires the seen set to cover every member bar at
+    most the author, so `seen + 1 < audience` rules it out with two O(1) SCARDs — the
+    common "everyone is merely full" case never pays more than that. Only when the gate
+    passes do we spend the O(audience) SDIFF, and a confirmed exhaustion abandons the
+    op, so that scan does not recur for the same post.
+
+    Note the seen set is per *post*, not per route, so a post that has been read in one
+    route counts those readers here too. That is correct rather than incidental: a
+    reader is excluded because they have already had this post, whichever audience set
+    delivered it — which is what keeps an UNSPECIFIED post from being handed to someone
+    twice through two different routes.
+
+    An audience with *no* members is deliberately treated as still-eligible. Subscribing
     pulls no history, so a parked op is the only way a brand-new channel's backlog ever
-    reaches its first subscriber (see tests/feed/test_worker.py::TestBacklogDelivery).
-    Exhaustion is the narrower claim: subscribers exist, and every one of them is already
-    excluded.
+    reaches its first subscriber (see tests/feed/test_worker.py::TestBacklogDelivery),
+    and the same now goes for the first reader to opt into a language.
+    Exhaustion is the narrower claim: an audience exists, and every one of them is
+    already excluded.
     """
     if not (settings.FEED_EXCLUDE_SEEN or settings.FEED_EXCLUDE_OWN_POSTS):
         return True
 
-    channel_key = keys.channel(channel_id)
-    subscribers = await redis.scard(channel_key)
-    if subscribers == 0:
+    audience_key = keys.audience(channel_id, language)
+    audience_size = await redis.scard(audience_key)
+    if audience_size == 0:
         return True
 
     seen_count = (
         await redis.scard(keys.seen(post_id)) if settings.FEED_EXCLUDE_SEEN else 0
     )
-    # +1 covers the author, who may be a subscriber but is never in the seen set
+    # +1 covers the author, who may be in the audience but is never in the seen set
     # (they are excluded before delivery, so they never get placed).
-    if seen_count + 1 < subscribers:
+    if seen_count + 1 < audience_size:
         return True
 
     if settings.FEED_EXCLUDE_SEEN:
-        remaining = await redis.sdiff([channel_key, keys.seen(post_id)])
+        remaining = await redis.sdiff([audience_key, keys.seen(post_id)])
     else:
-        remaining = await redis.smembers(channel_key)
+        remaining = await redis.smembers(audience_key)
     if author_id is not None and settings.FEED_EXCLUDE_OWN_POSTS:
         remaining.discard(author_id)
     return bool(remaining)
@@ -736,16 +921,28 @@ async def has_eligible_recipient(
 
 # --- subscription sync -----------------------------------------------------
 
-async def sync_subscribe(redis: Redis, user_id: str, channel_id: int) -> None:
-    """Reflect a subscription: add to the channel set, ensure reachable via free_queue.
+async def sync_subscribe(
+    redis: Redis, user_id: str, channel_id: int, languages: Sequence[str]
+) -> None:
+    """Reflect a subscription: join every audience set this reader belongs in for the
+    channel, and ensure they are reachable via free_queue.
 
-    The running subscription total (keys.SUBS_TOTAL) moves only when the SADD actually
+    One subscription is several memberships — the plain channel set (which is both the
+    UNSPECIFIED audience and the union used for counting) plus one set per language the
+    reader accepts. That fan-out of writes is the entire cost of language routing, and
+    it is paid here, on a rare action, rather than on every delivery.
+
+    The running membership total (keys.SUBS_TOTAL) moves by however many SADDs actually
     added — subscribing twice must not inflate it, and the endpoint is deliberately
     idempotent.
     """
-    added = await redis.sadd(keys.channel(channel_id), user_id)
+    pipe = redis.pipeline()
+    pipe.sadd(keys.channel(channel_id), user_id)
+    for language in languages:
+        pipe.sadd(keys.audience(channel_id, language), user_id)
+    added = sum(int(r) for r in await pipe.execute())
     if added:
-        await redis.incr(keys.SUBS_TOTAL)
+        await redis.incrby(keys.SUBS_TOTAL, added)
     await get_scripts(redis).ensure_free(
         keys=[keys.queue(user_id), keys.FREE_QUEUE],
         args=[user_id, settings.FEED_QUEUE_MAX_SLOTS],
@@ -753,14 +950,80 @@ async def sync_subscribe(redis: Redis, user_id: str, channel_id: int) -> None:
 
 
 async def sync_unsubscribe(redis: Redis, user_id: str, channel_id: int) -> None:
-    """Reflect an unsubscription: remove the user from the channel set."""
-    removed = await redis.srem(keys.channel(channel_id), user_id)
+    """Reflect an unsubscription: remove the user from every one of the channel's
+    audience sets.
+
+    Clears *all* configured languages rather than the ones the reader currently
+    accepts, deliberately. Their accepted set may have changed since they subscribed,
+    or a rebuild may have written memberships from a different set, and a leftover
+    membership is not benign: it keeps delivering posts from a channel the reader has
+    left. `SREM` of a non-member is free, and the loop is bounded by CONTENT_LANGUAGES,
+    so over-clearing costs a few no-ops and closes the whole class of drift.
+
+    Only memberships that were really there may decrement the total, for the same
+    reason `purge_user` follows that rule: a re-run must not drive the denominator of
+    the price formula negative.
+    """
+    pipe = redis.pipeline()
+    pipe.srem(keys.channel(channel_id), user_id)
+    for language in languages_module.reading_languages():
+        pipe.srem(keys.audience(channel_id, language), user_id)
+    removed = sum(int(r) for r in await pipe.execute())
     if removed:
-        await redis.decr(keys.SUBS_TOTAL)
+        await redis.decrby(keys.SUBS_TOTAL, removed)
+
+
+async def sync_content_languages(
+    redis: Redis,
+    user_id: str,
+    channel_ids: Sequence[int],
+    languages: Sequence[str],
+) -> None:
+    """Rewrite a reader's language memberships across every channel they subscribe to.
+
+    Called when `User.content_languages` changes. Cost is `channels x languages` SADD/
+    SREM in one pipeline — bounded, rare, and the reason the delivery path pays nothing:
+    the expense of language routing is concentrated in this one infrequent write rather
+    than spread across every fan-out.
+
+    Sets the accepted languages and clears the rest in the same pass, rather than
+    diffing against the previous value. The previous value is what the *database* said,
+    not necessarily what Redis holds (a failed sync, a partial rebuild, a deploy that
+    changed CONTENT_LANGUAGES), and a diff propagates that drift forever while an
+    absolute rewrite ends it. The plain channel set is untouched — it is membership in
+    the channel, not in a language.
+    """
+    accepted = set(languages)
+    plan = [
+        (keys.audience(channel_id, language), language in accepted)
+        for channel_id in channel_ids
+        for language in languages_module.reading_languages()
+    ]
+    if not plan:
+        return
+
+    pipe = redis.pipeline()
+    for key, keep in plan:
+        pipe.sadd(key, user_id) if keep else pipe.srem(key, user_id)
+    results = await pipe.execute()
+
+    # SADD and SREM both answer "how many members actually changed", so one signed sum
+    # over the plan gives the net membership delta: an add that found the user already
+    # there returns 0 and moves nothing, which is what makes re-running this a no-op.
+    delta = sum(
+        int(changed) if keep else -int(changed)
+        for (_key, keep), changed in zip(plan, results, strict=True)
+    )
+    if delta:
+        await redis.incrby(keys.SUBS_TOTAL, delta)
 
 
 async def backfill_queue(
-    redis: Redis, session: AsyncSession, user_id: uuid.UUID, channel_id: int
+    redis: Redis,
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    channel_id: int,
+    languages: Sequence[str],
 ) -> int:
     """Fill a subscriber's free queue slots with recent un-reviewed channel posts.
 
@@ -785,6 +1048,14 @@ async def backfill_queue(
         Post.id.notin_(already_reviewed),
         # Skip posts already queued so re-runs don't duplicate (idempotent).
         Post.id.notin_(current_ids) if current_ids else True,
+        # The live path never has to filter by language - it samples from an audience
+        # set that is already the right population - but this one queries Postgres
+        # directly and has no such set to lean on. Without it a rebuild would hand a
+        # reader every post in the channel regardless of language, undoing the routing
+        # for exactly the users a rebuild is meant to restore. UNSPECIFIED is always
+        # included: those posts route through the whole channel, so every subscriber
+        # is in their audience.
+        Post.language.in_([*languages, UNSPECIFIED]),
     ]
     if settings.FEED_EXCLUDE_OWN_POSTS:
         # The fan-out path skips the author via the stream entry, which this path has
@@ -846,8 +1117,12 @@ async def seed_seen_from_reviews(redis: Redis, session: AsyncSession) -> int:
 
 
 async def reseed_outstanding_ops(redis: Redis) -> int:
-    """Recount the per-channel outstanding-op counters from the ops actually in flight
+    """Recount the per-route outstanding-op counters from the ops actually in flight
     (the stream plus `ops:retry`). Returns the total counted.
+
+    Also the migration path onto route keying: the hash is deleted and rewritten, so
+    entries left behind under bare channel ids by a pre-routing deploy are cleared
+    rather than lingering as backlog no route can ever retire.
 
     These counters are incremented and decremented by three different processes and
     survive nothing, so unlike the rest of the feed's Redis state they can be *wrong*
@@ -862,11 +1137,15 @@ async def reseed_outstanding_ops(redis: Redis) -> int:
     for _entry_id, fields in await redis.xrange(keys.STREAM):
         channel_id = fields.get("channel_id")
         if channel_id is not None:
-            counts[channel_id] = counts.get(channel_id, 0) + 1
+            # Entries predating language routing carry no language and are counted
+            # under UNSPECIFIED - the same route they will actually be fanned out on.
+            route = keys.route(channel_id, fields.get("language") or UNSPECIFIED)
+            counts[route] = counts.get(route, 0) + 1
     for member in await redis.zrange(keys.OPS_RETRY, 0, -1):
         _, _, payload = member.partition(":")
-        channel_id = str(json.loads(payload)["channel_id"])
-        counts[channel_id] = counts.get(channel_id, 0) + 1
+        op = json.loads(payload)
+        route = keys.route(op["channel_id"], op.get("language") or UNSPECIFIED)
+        counts[route] = counts.get(route, 0) + 1
 
     await redis.delete(keys.OPS_OUTSTANDING)
     if counts:
@@ -898,6 +1177,7 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
     """
     subs = (await session.execute(select(ChannelSubscription))).scalars().all()
     users = (await session.execute(select(User))).scalars().all()
+    languages_by_user = {user.id: user.content_languages for user in users}
 
     # Before the backfill: it places posts, and placement consults these sets.
     seen_seeded = await seed_seen_from_reviews(redis, session)
@@ -914,15 +1194,24 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
         )
 
     backfilled = 0
+    memberships = 0
     for sub in subs:
+        languages = languages_by_user.get(sub.user_id) or []
         await redis.sadd(keys.channel(sub.channel_id), str(sub.user_id))
+        for language in languages:
+            await redis.sadd(
+                keys.audience(sub.channel_id, language), str(sub.user_id)
+            )
+        # The plain channel set plus one per accepted language - the same arithmetic
+        # `sync_subscribe` does incrementally, which is what SUBS_TOTAL counts.
+        memberships += 1 + len(languages)
         backfilled += await backfill_queue(
-            redis, session, sub.user_id, sub.channel_id
+            redis, session, sub.user_id, sub.channel_id, languages
         )
 
     # Set from Postgres rather than summing what SADD just added: a rebuild over sets
     # that already held most members would otherwise count only the new ones.
-    await redis.set(keys.SUBS_TOTAL, len(subs))
+    await redis.set(keys.SUBS_TOTAL, memberships)
     outstanding = await reseed_outstanding_ops(redis)
 
     return {

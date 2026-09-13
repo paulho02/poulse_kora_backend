@@ -21,6 +21,40 @@ BACKEND_CORS_ORIGINS='["http://localhost:3000","http://127.0.0.1:3000"]'
 ENVIRONMENT=development
 LOG_LEVEL=INFO
 
+# --- reviewing the price range locally ---
+# The client shows what a post costs as a range, because every (channel,
+# language) route is priced separately. On a quiet dev deployment there is no
+# congestion, so the base price sits at FEED_PRICE_MIN and +-50% of 1 rounds
+# back to 1 - every route prices the same and the range correctly collapses to a
+# single number. That is the formula working, not a bug, but it does mean the
+# range is invisible until there is traffic. To see it locally, raise the floor
+# for a session:
+#   FEED_PRICE_MIN=8
+# and reload the channel list once (that is what prices every route and so what
+# the deployment-wide range is observed from). Revert when you are done - this
+# is an economy setting, not a display one.
+
+# --- content languages ---
+# The languages a *post* can be written in, and so the language half of the feed's
+# routing key: a post declares one, a reader accepts a set (User.content_languages),
+# and fan-out only delivers where the two meet. Defaults to ["en","de"], which is why
+# it is commented out here - set it only to change the list.
+#
+# Deliberately separate from SUPPORTED_LOCALES (the language the API *answers* in):
+# a language people post in needs no translated error catalogue, and a locale we
+# translate into need not become a content bucket the day its .arb file lands.
+#
+# Adding one is additive and safe: no existing post or reader changes meaning, the
+# new language's audience sets simply start empty. Run
+# `python -m scripts.dangerous.rebuild_redis` afterwards so readers who had already
+# subscribed get memberships in it. Removing one is NOT the inverse - posts and
+# readers keep the value in Postgres, and it degrades to "routes to nobody" rather
+# than to an error.
+#
+# "und" is reserved (it means "no language at all", which routes through the whole
+# channel) and is rejected here at startup.
+# CONTENT_LANGUAGES='["en","de"]'
+
 # --- object storage (media bucket) ---
 # Local dev/CI use the MinIO container in docker-compose.yml; production uses a
 # Railway Bucket. The backend speaks the same S3+SigV4 protocol to both, so only

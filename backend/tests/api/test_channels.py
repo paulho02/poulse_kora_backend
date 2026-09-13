@@ -47,7 +47,7 @@ class TestListChannels:
 
 
 class TestChannelPostPrice:
-    async def test_list_quotes_a_price_per_channel(
+    async def test_list_quotes_a_price_range_per_channel(
         self, client: AsyncClient, create_user, create_channel
     ):
         user: User = await create_user()
@@ -58,39 +58,61 @@ class TestChannelPostPrice:
         )
         assert resp.status_code == 200, resp.text
         by_id = {c["id"]: c for c in resp.json()}
-        price = by_id[channel.id]["post_price"]
-        assert settings.FEED_PRICE_MIN <= price <= settings.FEED_PRICE_MAX
+        low = by_id[channel.id]["post_price_min"]
+        high = by_id[channel.id]["post_price_max"]
+        assert settings.FEED_PRICE_MIN <= low <= high <= settings.FEED_PRICE_MAX
 
     async def test_quoted_price_is_what_creating_a_post_charges(
         self, client: AsyncClient, redis: Redis, create_user, create_channel
     ):
-        """The whole reason per-channel prices are cached per window: someone can watch
-        the price on the channel list while they review to afford it, and the number
-        they were shown has to be the number they are charged."""
+        """The whole reason route prices are cached per window: someone can watch the
+        price while they review to afford it, and the number they were shown has to be
+        the number they are charged. `GET /posts/price` is what shows it, now that a
+        channel alone cannot name one number."""
         user: User = await create_user()
         channel: Channel = await create_channel()
         await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
 
-        listing = await client.get(
-            settings.API_PATH + "/channels", headers=get_jwt_header(user)
+        quote = await client.get(
+            settings.API_PATH + "/posts/price",
+            params={"channel_id": channel.id, "language": "en"},
+            headers=get_jwt_header(user),
         )
-        quoted = {c["id"]: c["post_price"] for c in listing.json()}[channel.id]
+        assert quote.status_code == 200, quote.text
+        quoted = quote.json()["price"]
 
         # Congestion moves underneath them while they read the list.
-        await redis.hset(keys.OPS_OUTSTANDING, str(channel.id), 10_000)
+        await redis.hset(keys.OPS_OUTSTANDING, keys.route(channel.id, "en"), 10_000)
 
         resp = await client.post(
             settings.API_PATH + "/posts",
             headers=get_jwt_header(user),
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": '[{"type": "text", "text": "priced"}]',
             },
         )
         assert resp.status_code == 201, resp.text
         assert resp.json()["price"] == quoted
 
-    async def test_subscribe_response_carries_the_price(
+    async def test_price_quote_rejects_an_unknown_language(
+        self, client: AsyncClient, create_user, create_channel
+    ):
+        """Quoting whatever it is given would price a route at the neutral factor and
+        hand back a plausible number for a post that could never be created."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/price",
+            params={"channel_id": channel.id, "language": "kl"},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_language_invalid"
+
+    async def test_subscribe_response_carries_the_price_range(
         self, client: AsyncClient, create_user, create_channel
     ):
         user: User = await create_user()
@@ -101,7 +123,9 @@ class TestChannelPostPrice:
             headers=get_jwt_header(user),
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["post_price"] >= settings.FEED_PRICE_MIN
+        body = resp.json()
+        assert body["post_price_min"] >= settings.FEED_PRICE_MIN
+        assert body["post_price_max"] >= body["post_price_min"]
 
 
 class TestSubscribeChannel:

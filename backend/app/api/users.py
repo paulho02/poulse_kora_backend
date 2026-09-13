@@ -3,6 +3,7 @@ from fastapi.routing import APIRouter
 from sqlalchemy import func, select
 from starlette.responses import Response
 
+from app.core import languages
 from app.core.account_deletion import delete_account
 from app.core.errors import api_error
 from app.core.logger import get_logger
@@ -12,8 +13,10 @@ from app.deps.db import CurrentAsyncSession
 from app.deps.rate_limit import limit_password_change
 from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentSuperuser, CurrentUser, UserManager, get_user_manager
+from app.feed import service
+from app.models.channel_subscription import ChannelSubscription
 from app.models.user import User
-from app.schemas.user import AccountDelete, UserRead
+from app.schemas.user import AccountDelete, ContentLanguagesUpdate, UserRead
 
 log = get_logger(__name__)
 
@@ -92,6 +95,80 @@ async def delete_profile_picture(session: CurrentAsyncSession, user: CurrentUser
     if previous_key:
         await storage.delete_object(previous_key)
     log.info("user.profile_picture_removed", had_picture=bool(previous_key))
+    return user
+
+
+@router.put("/users/me/content-languages", response_model=UserRead)
+async def set_content_languages(
+    payload: ContentLanguagesUpdate,
+    session: CurrentAsyncSession,
+    user: CurrentUser,
+    redis: CurrentRedis,
+):
+    """Set which languages this reader accepts posts in.
+
+    Its own route rather than a field on `PATCH /users/me`, because the column is only
+    half the change: the other half is rewriting one Redis audience membership per
+    (subscribed channel x language), which is what fan-out actually samples. The
+    fastapi-users update router would write the column and know nothing about the rest,
+    leaving the database saying one thing and delivery doing another.
+
+    Order is Postgres first, Redis second, and the residual failure is deliberate: a
+    commit followed by a failed sync leaves memberships that a re-run of this route -
+    or `rebuild_from_pg` - corrects, because `sync_content_languages` writes the
+    absolute set rather than a diff. The reverse order could leave Redis delivering by
+    a preference the database never recorded, which nothing would ever reconcile.
+
+    Idempotent. Re-sending the same set is a no-op down to the `settings_revision`
+    bump, which is skipped when the canonical form is unchanged - so a client that
+    re-asserts its preference on every launch does not manufacture a settings conflict
+    for the user's other devices.
+    """
+    requested = payload.languages
+    if not requested:
+        # An empty set is an audience of nowhere: no route would ever select this
+        # reader, and their feed would be permanently empty with nothing to explain it.
+        raise api_error(400, "content_languages_empty")
+    unknown = [code for code in requested if code not in languages.reading_languages()]
+    if unknown:
+        # Refused rather than filtered. A client sending a language this deployment
+        # does not have is out of date or wrong, and silently storing the subset would
+        # leave it believing a preference the server never accepted.
+        raise api_error(400, "content_languages_invalid")
+
+    cleaned = languages.sanitize_reading_languages(requested)
+    changed = cleaned != user.content_languages
+    if changed:
+        user.content_languages = cleaned
+        # Bumped here rather than by UserManager._update, which this route bypasses.
+        # It is a settings change like any other: another device holding a stale value
+        # has to be able to tell that someone else moved it.
+        user.settings_revision += 1
+        await session.commit()
+
+    channel_ids = (
+        (
+            await session.execute(
+                select(ChannelSubscription.channel_id).filter(
+                    ChannelSubscription.user_id == user.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Run even when nothing changed: this is the one route that reconciles a reader's
+    # memberships, so a client re-asserting its preference is also the cheapest repair
+    # for a sync that failed half-way last time.
+    await service.sync_content_languages(
+        redis, str(user.id), list(channel_ids), cleaned
+    )
+    log.info(
+        "user.content_languages_set",
+        languages=cleaned,
+        channels=len(channel_ids),
+        changed=changed,
+    )
     return user
 
 

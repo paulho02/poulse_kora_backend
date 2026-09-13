@@ -77,6 +77,7 @@ class TestErrorEnvelope:
             f"{settings.API_PATH}/posts",
             data={
                 "channel_id": channel.id,
+                "language": "en",
                 "blocks": '[{"type": "text", "text": "costs tokens"}]',
             },
             headers=get_jwt_header(user),

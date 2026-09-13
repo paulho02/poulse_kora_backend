@@ -36,6 +36,7 @@ running any of them.
 | Script | Why it's here |
 | --- | --- |
 | `reset_content.py` | Deletes **every** post, review and subscription, plus their bucket media. Prompts unless `--yes`. |
+| `reset_database.py` | Drops the entire Postgres schema and Redis, then re-runs migrations - a completely fresh database, users included. Prompts unless `--yes`. |
 | `rebuild_redis.py` | Rebuilds derivable Redis state from Postgres — but reseeds token balances, so it **refunds every token spent** since the last run. Legitimate for reconciliation; not routine. |
 | `seed_dev_data.py` | Creates bot users and posts them into every channel. On a live app that is fake content in real feeds. |
 | `bulk_create_posts.py` | Creates N real posts via the real route, fanned out to real queues. |

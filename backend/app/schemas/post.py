@@ -25,6 +25,18 @@ class PostCreate(BaseModel):
     channel_id: int
     blocks: list[PostBlockIn]
     is_anonymous: bool = False
+    # The language the post is written in, and with `channel_id` the routing key that
+    # decides who can receive it (see app/models/post.py: Post.language). One of
+    # `Settings.CONTENT_LANGUAGES`, or LANGUAGE_UNSPECIFIED for a post with no
+    # language - which is accepted only when the post has no text blocks.
+    #
+    # Required rather than defaulted to the request locale. A default would be silent
+    # and wrong on exactly the posts that matter: someone writing German on a
+    # phone set to English would have it routed to English readers, who cannot read
+    # it, drop it, and end its life. The client picks the value (its own detector
+    # prefills the field), so making it explicit here costs a form field and removes
+    # a whole class of misroute.
+    language: str
 
 
 class PostMediaRead(BaseModel):
@@ -74,6 +86,12 @@ class PostRead(BaseModel):
     id: int
     channel_id: int
     channel_name: str
+    # What the post is written in. Not used for filtering client-side - delivery has
+    # already done that, and a post reaching a reader is by construction in a language
+    # they accept or in none at all - but it is what lets the client label a card and,
+    # more usefully, offer "this is not the language it claims" as a report reason.
+    # That report is the only correction available for a self-declared field.
+    language: str
     blocks: list[PostBlockRead]
     is_anonymous: bool
     author: PostAuthor
@@ -124,15 +142,42 @@ class PostCreateResult(BaseModel):
 
 
 class PostEconomy(BaseModel):
-    """The viewer's current posting economy — spendable tokens and the shared price
-    to publish one original post. The price is a periodic snapshot (see
-    app/feed/service.py: get_price_snapshot), not computed live, so it is the same
-    for every viewer until `post_price_expires_at` — creating a post before then is
-    charged this exact price."""
+    """The viewer's current posting economy — spendable tokens and what publishing one
+    original post costs across the deployment.
+
+    `post_price` is the shared *base* price: a periodic snapshot (see
+    app/feed/service.py: get_price_snapshot), the same for every viewer until
+    `post_price_expires_at`. It is no longer what anyone is charged, because every
+    (channel, language) route scales it by its own congestion — it is the number the
+    range is centred on and the fallback both ends collapse to when nothing has been
+    observed yet.
+
+    `post_price_min`/`post_price_max` bracket every route anyone has priced (see
+    keys.PRICE_RANGE). Observed rather than enumerated, so they are exact once this
+    window's routes have been priced and an estimate — the previous window's spread,
+    rescaled onto `post_price` — before that. They are equal to `post_price` only where
+    nothing has ever been observed. The exact charge for one post comes from
+    `GET /posts/price`.
+    """
 
     token_balance: int
     post_price: int
+    post_price_min: int
+    post_price_max: int
     post_price_expires_at: datetime
+
+
+class PostPrice(BaseModel):
+    """The exact admission price for one (channel, language) route.
+
+    This is a quote, not an estimate: `POST /posts` charges this number for this route
+    until `expires_at`, which is the same instant the base price the quote came from
+    stops being guaranteed. The client asks for it once the author has chosen both a
+    channel and a language, which is the first moment an exact price exists.
+    """
+
+    price: int
+    expires_at: datetime
 
 
 class FeedStatus(BaseModel):

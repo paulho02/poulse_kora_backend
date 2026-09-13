@@ -6,6 +6,18 @@ from pydantic import Field, HttpUrl, PostgresDsn, RedisDsn, field_validator
 from pydantic.networks import AnyHttpUrl
 from pydantic_settings import BaseSettings
 
+# The language value carried by a post that has none - a photo, a video, a
+# caption-free meme. ISO 639-2's "undetermined" code, chosen so it can never
+# collide with a real ISO 639-1 entry in CONTENT_LANGUAGES.
+#
+# A module constant rather than a setting, and it lives here rather than in
+# app/core/languages.py only to keep that module free to import `settings`:
+# every branch that treats this value specially (routing through the whole
+# channel instead of one language's slice of it, being the one value a text-free
+# post may carry) is code, not configuration, so a deployment that changed the
+# string could only break things.
+LANGUAGE_UNSPECIFIED = "und"
+
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Poulse Kora Backend"
@@ -105,12 +117,23 @@ class Settings(BaseSettings):
     # target would hunt between two adjacent values forever (+1, -1, +1, ...) even
     # though it's already about as close as a single-item queue metric can get.
     FEED_PRICE_DEADBAND_RATIO: float = 0.1
-    # How far a single channel's price may stray from the global one, as a fraction
-    # (0.25 ⇒ 75%-125% of the base price). Each channel is priced by nudging the shared
+    # How far a single route's price may stray from the global one, as a fraction
+    # (0.5 ⇒ 50%-150% of the base price). Each route is priced by nudging the shared
     # global price, never by running its own controller — see app/feed/pricing.py:
-    # channel_factor. The band is the entire stability mechanism: the factor is
+    # route_factor. The band is the entire stability mechanism: the factor is
     # stateless, so unlike the global price it cannot wander, it can only be clamped.
-    FEED_PRICE_CHANNEL_BAND: float = 0.25
+    #
+    # Widened from 0.25 when language routing landed. At ±25% the whole spread across
+    # every route in the deployment collapsed to one or two tokens once rounded to
+    # integers — correct arithmetic, but it made the range the client shows
+    # uninformative, and it under-reacted to routes that genuinely differ in capacity
+    # (a language with twenty readers absorbing the same posting rate as one with five
+    # thousand). At ±50% a base price of 4 spans 2-6, which a reader can act on.
+    #
+    # It is a real economy lever, not a display setting: a congested route now costs
+    # half again as much as the shared price and a quiet one half as much, so raising
+    # it further trades price stability for responsiveness.
+    FEED_PRICE_CHANNEL_BAND: float = 0.5
     # The price above is expensive to keep consistent if computed live on every
     # request (two calls a few seconds apart can see different queue lengths). Instead
     # a background task recomputes it on a timer and publishes one shared snapshot that
@@ -217,6 +240,53 @@ class Settings(BaseSettings):
     # for adding a language - no other backend code changes.
     SUPPORTED_LOCALES: list[str] = ["en", "de"]
     DEFAULT_LOCALE: str = "en"
+
+    # --- content languages ---
+    # The languages a *post* can be written in, and so the language half of the
+    # feed's routing key (see app/feed/keys.py: audience). A post declares exactly
+    # one; a reader accepts a set of them (User.content_languages); fan-out delivers
+    # a post only into the intersection.
+    #
+    # Deliberately its own setting rather than a reuse of SUPPORTED_LOCALES, which is
+    # about the language the API answers a *request* in. The two are free to diverge:
+    # a language people write posts in does not need a translated error catalogue,
+    # and a locale we translate into does not have to become a content bucket the day
+    # its .arb file lands. ISO 639-1 codes.
+    #
+    # Adding one is: this list, a stopword list in the client's detector, and a
+    # `python -m scripts.dangerous.rebuild_redis` so the new language's audience sets
+    # exist. Removing one is *not* symmetric - see app/core/languages.py.
+    CONTENT_LANGUAGES: list[str] = ["en", "de"]
+
+    @field_validator("CONTENT_LANGUAGES")
+    @classmethod
+    def validate_content_languages(cls, value: list[str]) -> list[str]:
+        """Reject the three ways this list can be wrong in a way nothing else would
+        catch until posts had already been routed by it.
+
+        A *field* validator, like `require_token_for_lettermint` and for the same
+        reason: pydantic quotes the validated input back in the error it raises, and a
+        model validator's input is the whole settings dict â€” so a crash here would
+        print SECRET_KEY into the log on its way out.
+        """
+        cleaned = [code.strip().lower() for code in value if code.strip()]
+        if not cleaned:
+            # Every post would have to be UNSPECIFIED, and every reader's accepted
+            # set would be empty, so nothing could ever route anywhere.
+            raise ValueError("CONTENT_LANGUAGES must not be empty")
+        if len(set(cleaned)) != len(cleaned):
+            # A duplicate would double-count in `subs:total` (one membership per
+            # language per subscription), quietly skewing every channel's price.
+            raise ValueError("CONTENT_LANGUAGES must not contain duplicates")
+        if LANGUAGE_UNSPECIFIED in cleaned:
+            # "und" is the *absence* of a language and routes through the whole
+            # channel. As a real entry it would also be a language slice, and a post
+            # declaring it would take one branch here and the other there.
+            raise ValueError(
+                f"CONTENT_LANGUAGES must not contain {LANGUAGE_UNSPECIFIED!r} "
+                "(the reserved 'no language' value)"
+            )
+        return cleaned
 
     # --- password policy ---
     # Off: fastapi-users applies no length/composition rule at all (see

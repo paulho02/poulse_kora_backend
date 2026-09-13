@@ -30,9 +30,11 @@ class TestProcessOperation:
         channel_id = 7
         users = [str(uuid.uuid4()) for _ in range(5)]
         for u in users:
-            await service.sync_subscribe(redis, u, channel_id)
+            await service.sync_subscribe(redis, u, channel_id, ["en"])
 
-        placed = await process_operation(redis, post_id=100, channel_id=channel_id)
+        placed = await process_operation(
+            redis, post_id=100, channel_id=channel_id, language="en"
+        )
         assert placed == settings.FEED_FANOUT
 
         recipients = [
@@ -42,43 +44,55 @@ class TestProcessOperation:
 
     async def test_no_eligible_recipients_schedules_retry(self, redis: Redis):
         # No subscribers to this channel ⇒ undeliverable, parked for retry, no error.
-        assert await process_operation(redis, post_id=1, channel_id=999) == 0
+        assert await process_operation(
+            redis, post_id=1, channel_id=999, language="en"
+        ) == 0
         assert await redis.zcard(keys.OPS_RETRY) == 1
 
     async def test_delivery_retires_the_op(self, redis: Redis):
         channel_id = 71
-        await service.sync_subscribe(redis, str(uuid.uuid4()), channel_id)
-        await service.enqueue_operation(redis, post_id=1, channel_id=channel_id)
+        await service.sync_subscribe(redis, str(uuid.uuid4()), channel_id, ["en"])
+        await service.enqueue_operation(
+            redis, post_id=1, channel_id=channel_id, language="en"
+        )
 
-        await process_operation(redis, post_id=1, channel_id=channel_id)
-        counts = await service.channel_outstanding_ops(redis, [channel_id])
-        assert counts[channel_id] == 0
+        await process_operation(redis, post_id=1, channel_id=channel_id, language="en")
+        counts = await service.route_outstanding_ops(redis, [(channel_id, "en")])
+        assert counts[(channel_id, "en")] == 0
 
     async def test_parked_op_stays_outstanding(self, redis: Redis):
         """A post that can't reach anyone is exactly what should make a channel look
         congested, so parking must not discount it — only a terminal outcome does."""
         channel_id = 72
-        await service.enqueue_operation(redis, post_id=1, channel_id=channel_id)
+        await service.enqueue_operation(
+            redis, post_id=1, channel_id=channel_id, language="en"
+        )
 
-        assert await process_operation(redis, post_id=1, channel_id=channel_id) == 0
+        assert await process_operation(
+            redis, post_id=1, channel_id=channel_id, language="en"
+        ) == 0
         assert await redis.zcard(keys.OPS_RETRY) == 1
-        counts = await service.channel_outstanding_ops(redis, [channel_id])
-        assert counts[channel_id] == 1
+        counts = await service.route_outstanding_ops(redis, [(channel_id, "en")])
+        assert counts[(channel_id, "en")] == 1
 
     async def test_exhausted_channel_retires_the_op(self, redis: Redis):
         """Abandoned is terminal too: the op will never be delivered, so it stops
         counting against the channel's price."""
         channel_id = 73
         user = str(uuid.uuid4())
-        await service.sync_subscribe(redis, user, channel_id)
-        await service.enqueue_operation(redis, post_id=1, channel_id=channel_id)
+        await service.sync_subscribe(redis, user, channel_id, ["en"])
+        await service.enqueue_operation(
+            redis, post_id=1, channel_id=channel_id, language="en"
+        )
         # The sole subscriber has already seen it ⇒ nobody left to deliver to.
         await redis.sadd(keys.seen(1), user)
 
-        assert await process_operation(redis, post_id=1, channel_id=channel_id) == 0
+        assert await process_operation(
+            redis, post_id=1, channel_id=channel_id, language="en"
+        ) == 0
         assert await redis.zcard(keys.OPS_RETRY) == 0
-        counts = await service.channel_outstanding_ops(redis, [channel_id])
-        assert counts[channel_id] == 0
+        counts = await service.route_outstanding_ops(redis, [(channel_id, "en")])
+        assert counts[(channel_id, "en")] == 0
 
 
 class TestDeletedPosts:
@@ -94,10 +108,12 @@ class TestDeletedPosts:
         channel_id = 31
         users = [str(uuid.uuid4()) for _ in range(3)]
         for u in users:
-            await service.sync_subscribe(redis, u, channel_id)
+            await service.sync_subscribe(redis, u, channel_id, ["en"])
         await service.mark_posts_deleted(redis, [900])
 
-        placed = await process_operation(redis, post_id=900, channel_id=channel_id)
+        placed = await process_operation(
+            redis, post_id=900, channel_id=channel_id, language="en"
+        )
 
         assert placed == 0
         for u in users:
@@ -108,26 +124,28 @@ class TestDeletedPosts:
 
     async def test_abandoning_retires_the_outstanding_counter(self, redis: Redis):
         channel_id = 32
-        await service.sync_subscribe(redis, str(uuid.uuid4()), channel_id)
-        await service.enqueue_operation(redis, 901, channel_id)
-        assert await service.channel_outstanding_ops(redis, [channel_id]) == {
-            channel_id: 1
+        await service.sync_subscribe(redis, str(uuid.uuid4()), channel_id, ["en"])
+        await service.enqueue_operation(redis, 901, channel_id, "en")
+        assert await service.route_outstanding_ops(redis, [(channel_id, "en")]) == {
+            (channel_id, "en"): 1
         }
         await service.mark_posts_deleted(redis, [901])
 
         await consume_once(redis, CONSUMER, timeout=2.0)
 
-        assert await service.channel_outstanding_ops(redis, [channel_id]) == {
-            channel_id: 0
+        assert await service.route_outstanding_ops(redis, [(channel_id, "en")]) == {
+            (channel_id, "en"): 0
         }
 
     async def test_a_live_post_is_unaffected(self, redis: Redis):
         channel_id = 33
         user = str(uuid.uuid4())
-        await service.sync_subscribe(redis, user, channel_id)
+        await service.sync_subscribe(redis, user, channel_id, ["en"])
         await service.mark_posts_deleted(redis, [902])
 
-        placed = await process_operation(redis, post_id=903, channel_id=channel_id)
+        placed = await process_operation(
+            redis, post_id=903, channel_id=channel_id, language="en"
+        )
 
         assert placed == 1
         assert await service.render_queue_ids(redis, user, 10) == [903]
@@ -137,8 +155,10 @@ class TestConsumeOnce:
     async def test_processes_enqueued_operation(self, redis: Redis):
         channel_id = 8
         user = str(uuid.uuid4())
-        await service.sync_subscribe(redis, user, channel_id)
-        await service.enqueue_operation(redis, post_id=55, channel_id=channel_id)
+        await service.sync_subscribe(redis, user, channel_id, ["en"])
+        await service.enqueue_operation(
+            redis, post_id=55, channel_id=channel_id, language="en"
+        )
 
         op = await consume_once(redis, CONSUMER, timeout=2.0)
         assert op == {"post_id": 55, "channel_id": channel_id}
@@ -177,8 +197,8 @@ class TestConsumeOnce:
         assert await consume_once(redis, CONSUMER, timeout=1.0) is None
 
     async def test_success_retires_entry(self, redis: Redis):
-        await service.sync_subscribe(redis, str(uuid.uuid4()), 8)
-        await service.enqueue_operation(redis, post_id=55, channel_id=8)
+        await service.sync_subscribe(redis, str(uuid.uuid4()), 8, ["en"])
+        await service.enqueue_operation(redis, post_id=55, channel_id=8, language="en")
 
         await consume_once(redis, CONSUMER, timeout=2.0)
         # Processed entry is XDEL'd + XACK'd ⇒ stream self-trims, none left pending.
@@ -195,8 +215,10 @@ class TestReliableQueue:
         # and completed by another consumer.
         channel_id = 3
         user = str(uuid.uuid4())
-        await service.sync_subscribe(redis, user, channel_id)
-        await service.enqueue_operation(redis, post_id=77, channel_id=channel_id)
+        await service.sync_subscribe(redis, user, channel_id, ["en"])
+        await service.enqueue_operation(
+            redis, post_id=77, channel_id=channel_id, language="en"
+        )
 
         async def boom(*args, **kwargs):
             raise RuntimeError("crash mid-fanout")
@@ -264,8 +286,10 @@ class TestRunConsumer:
     async def test_processes_ops_and_stops_cleanly_on_cancel(self, redis: Redis):
         channel_id = 90
         user = str(uuid.uuid4())
-        await service.sync_subscribe(redis, user, channel_id)
-        await service.enqueue_operation(redis, post_id=900, channel_id=channel_id)
+        await service.sync_subscribe(redis, user, channel_id, ["en"])
+        await service.enqueue_operation(
+            redis, post_id=900, channel_id=channel_id, language="en"
+        )
 
         task = asyncio.create_task(run_consumer(redis, "loop-consumer"))
         try:
@@ -321,10 +345,12 @@ class TestBacklogDelivery:
         channel_id = 11
         user = str(uuid.uuid4())
 
-        assert await process_operation(redis, post_id=90, channel_id=channel_id) == 0
+        assert await process_operation(
+            redis, post_id=90, channel_id=channel_id, language="en"
+        ) == 0
         assert await redis.zcard(keys.OPS_RETRY) == 1
 
-        await service.sync_subscribe(redis, user, channel_id)
+        await service.sync_subscribe(redis, user, channel_id, ["en"])
 
         assert await service.reschedule_due_retries(redis, now=time.time() + 3600) == 1
         assert await consume_once(redis, CONSUMER, timeout=2.0) == {
@@ -340,7 +366,9 @@ class TestBacklogDelivery:
         # Each failed attempt re-parks the op. The deadline must be carried through the
         # stream round-trip rather than recomputed, or FEED_RETRY_MAX_AGE_SECONDS would
         # renew on every attempt and the op would retry forever.
-        await service.schedule_retry(redis, post_id=31, channel_id=404, delay=-1)
+        await service.schedule_retry(
+            redis, post_id=31, channel_id=404, language="en", delay=-1
+        )
         original = await _retry_deadline(redis)
 
         for _ in range(2):

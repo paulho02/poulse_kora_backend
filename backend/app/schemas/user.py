@@ -25,6 +25,26 @@ class UserRead(schemas.BaseUser[uuid.UUID]):
     # set via PUT/DELETE /users/me/profile-picture (app/api/users.py), not this
     # PATCH, since it's a binary upload rather than a JSON field.
     profile_picture_url: str | None
+    # Languages this reader accepts posts in. Read-only here and absent from
+    # UserUpdate: changing it has to rewrite Redis audience memberships, so it has its
+    # own route (PUT /users/me/content-languages) rather than riding the generic PATCH,
+    # where fastapi-users' router would write the column with no way to sync Redis.
+    content_languages: list[str]
+
+
+class ContentLanguagesUpdate(BaseModel):
+    """Body of `PUT /users/me/content-languages`.
+
+    The whole set, not a delta: the route rewrites audience memberships absolutely
+    rather than diffing, so sending the desired end state is both what the server needs
+    and what makes the call idempotent.
+
+    Must be non-empty and a subset of `Settings.CONTENT_LANGUAGES` — an empty set is an
+    audience of nowhere and therefore a permanently empty feed, which is never what a
+    client means to ask for and is refused rather than stored.
+    """
+
+    languages: list[str]
 
 
 class UserCreate(schemas.BaseUserCreate):

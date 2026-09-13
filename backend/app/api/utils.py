@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.core import languages
 from app.core.config import settings
 from app.schemas.app_config import PublicAppConfig
 from app.schemas.msg import Msg
@@ -11,9 +12,10 @@ router = APIRouter()
 def get_public_config():
     """Feature flags the client needs before it can know how to behave: whether
     email verification is enforced (whether to show the code-entry step at all,
-    since is_verified can legitimately stay false forever with the flag off) and
-    the password rule to hint client-side. The server remains the source of truth
-    either way - this only avoids the client guessing or hardcoding either."""
+    since is_verified can legitimately stay false forever with the flag off), the
+    password rule to hint client-side, and the content languages a post may declare.
+    The server remains the source of truth either way - this only avoids the client
+    guessing or hardcoding any of it."""
     return PublicAppConfig(
         require_email_verification=settings.REQUIRE_EMAIL_VERIFICATION,
         require_strong_password=settings.REQUIRE_STRONG_PASSWORD,
@@ -23,6 +25,8 @@ def get_public_config():
             settings.EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS
         ),
         google_oauth_enabled=settings.GOOGLE_OAUTH_ENABLED,
+        content_languages=languages.reading_languages(),
+        language_unspecified=languages.UNSPECIFIED,
     )
 
 

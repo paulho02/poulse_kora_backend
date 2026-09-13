@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
+from app.core import languages
 from app.core.config import settings
 from app.core.errors import api_error
 from app.core.logger import get_logger
@@ -34,6 +35,7 @@ from app.schemas.post import (
     PostCreate,
     PostCreateResult,
     PostEconomy,
+    PostPrice,
     PostMediaRead,
     PostRead,
 )
@@ -56,6 +58,7 @@ _MEDIA_CACHE_CONTROL = "private, max-age=86400, immutable"
 async def post_create_form(
     channel_id: int = Form(...),
     blocks: str = Form(...),
+    language: str = Form(...),
     is_anonymous: bool = Form(False),
 ) -> PostCreate:
     """`POST /posts` is multipart (it accepts files), so its non-file fields arrive
@@ -67,7 +70,12 @@ async def post_create_form(
         parsed_blocks = _blocks_adapter.validate_json(blocks)
     except ValidationError:
         raise api_error(400, "post_blocks_invalid") from None
-    return PostCreate(channel_id=channel_id, blocks=parsed_blocks, is_anonymous=is_anonymous)
+    return PostCreate(
+        channel_id=channel_id,
+        blocks=parsed_blocks,
+        language=language,
+        is_anonymous=is_anonymous,
+    )
 
 
 def _serialize_post(post: Post, viewer: User) -> PostRead:
@@ -94,6 +102,7 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
         id=post.id,
         channel_id=post.channel_id,
         channel_name=post.channel.name,
+        language=post.language,
         blocks=[
             PostBlockRead(
                 type=b.block_type,
@@ -366,16 +375,24 @@ async def create_post(
     any resulting error raised - before the channel-existence check's price is
     charged, so a bad upload never costs tokens.
 
-    The price charged is this *channel's* price for the current window (see
-    service.channel_prices), not a fresh live computation — the same number
-    `GET /channels` quoted for it, rather than one that could have drifted in the
-    seconds or minutes between browsing and posting.
+    The price charged is this *route's* price for the current window (see
+    service.route_prices), not a fresh live computation — the same number
+    `GET /posts/price` quoted for this channel and language, rather than one that could
+    have drifted in the seconds or minutes between composing and posting.
+
+    `language` is required and self-declared; the client detects it and lets the author
+    override. Only two things are checked here: that it is a configured content
+    language (or the reserved "no language" value), and that "no language" is not
+    claimed by a post that contains text.
 
     Shares the per-user interaction budget with reviewing (see app/deps/rate_limit.py),
     so a burst of posts and forwards together still can't flood the queue."""
     channel = await session.get(Channel, post_in.channel_id)
     if not channel:
         raise api_error(404, "channel_not_found")
+
+    if not languages.is_post_language(post_in.language):
+        raise api_error(400, "post_language_invalid")
 
     blocks = post_in.blocks
     if not blocks:
@@ -403,6 +420,21 @@ async def create_post(
         # dropping it (it was still charged bandwidth/validation cost for nothing).
         raise api_error(400, "post_blocks_invalid")
 
+    if post_in.language == languages.UNSPECIFIED and any(
+        b.type == "text" for b in blocks
+    ):
+        # "No language" routes through the whole channel rather than one language's
+        # readers, so it is the widest audience a post can reach - which makes it the
+        # thing to claim falsely. Text is the one part of the claim that is checkable
+        # without reading the post, so it is the one part enforced. Text baked into an
+        # image still gets through; the forward/drop economy is what answers that, and
+        # the ratio of dropped UNSPECIFIED posts is the metric that would show it
+        # happening.
+        #
+        # Note the converse is deliberately *not* enforced: a post with no text may
+        # still declare a real language, because a video can be spoken German.
+        raise api_error(400, "post_language_requires_no_text")
+
     # Only a video block's `orientation` is honoured (see PostBlockIn); the map is
     # keyed by file index because that, not block position, is what identifies a
     # file in the parallel `files` list.
@@ -424,9 +456,8 @@ async def create_post(
         processed_by_index[index] = item
     media_ms = round((time.perf_counter() - media_started) * 1000, 1)
 
-    price = (await service.channel_prices(redis, [post_in.channel_id]))[
-        post_in.channel_id
-    ]
+    route = (post_in.channel_id, post_in.language)
+    price = (await service.route_prices(redis, [route]))[route]
     if user.is_superuser:
         token_balance = await service.token_balance(redis, str(user.id))
     else:
@@ -464,6 +495,7 @@ async def create_post(
         channel_id=post_in.channel_id,
         author_id=user.id,
         is_anonymous=post_in.is_anonymous,
+        language=post_in.language,
         subscription_kind="supporter" if is_supporter else None,
     )
     session.add(post)
@@ -505,12 +537,13 @@ async def create_post(
     await session.commit()
 
     await service.enqueue_operation(
-        redis, post.id, post.channel_id, author_id=str(post.author_id)
+        redis, post.id, post.channel_id, post.language, author_id=str(post.author_id)
     )
     log.info(
         "post.created",
         post_id=post.id,
         channel_id=post.channel_id,
+        language=post.language,
         price=price,
         token_balance=token_balance,
         blocks=len(blocks),
@@ -531,19 +564,66 @@ async def create_post(
 
 @router.get("/economy", response_model=PostEconomy)
 async def get_post_economy(user: CurrentVerifiedUser, redis: CurrentRedis):
-    """Current spendable token balance and the shared price to publish a post, plus
-    the instant that price stops being guaranteed (see service.get_price_snapshot).
+    """Current spendable token balance and what publishing costs across the
+    deployment: the shared base price, the observed range around it, and the instant
+    that base price stops being guaranteed (see service.get_price_snapshot).
+
+    The range is *observed*, not enumerated - it covers every route someone has priced
+    (see keys.PRICE_RANGE), and converges on the exact spread at the first `GET
+    /channels` of the window, which the client issues constantly. Until then it is the
+    previous window's spread rescaled onto the current base price; both ends fall back
+    to the base price itself only where nothing has ever been observed, which is also
+    exactly what a deployment with a single route would report.
 
     Declared before `/{post_id}` so the literal path wins the route match.
     """
     snapshot = await service.get_price_snapshot(redis)
     balance = await service.token_balance(redis, str(user.id))
+    observed = await service.read_price_range(redis)
+    low, high = observed if observed else (snapshot["price"], snapshot["price"])
     return PostEconomy(
         token_balance=balance,
         post_price=snapshot["price"],
+        post_price_min=low,
+        post_price_max=high,
         post_price_expires_at=datetime.fromtimestamp(
             snapshot["expires_at"], tz=timezone.utc
         ),
+    )
+
+
+@router.get("/price", response_model=PostPrice)
+async def get_post_price(
+    channel_id: int,
+    language: str,
+    session: CurrentAsyncSession,
+    user: CurrentVerifiedUser,
+    redis: CurrentRedis,
+):
+    """The exact price to publish in one (channel, language) route.
+
+    The counterpart to the range on `GET /channels`: a range is all that can be quoted
+    before an author has chosen a language, and this is the number once they have. It
+    is a quote rather than an estimate - `POST /posts` charges exactly this until
+    `expires_at`, because both read the same cached route price for the same window.
+
+    Validates the channel and the language rather than pricing whatever it is given:
+    an unknown route would otherwise be priced at the neutral factor and quote a
+    plausible number for a post that could never be created.
+
+    Declared before `/{post_id}` so the literal path wins the route match.
+    """
+    if not await session.get(Channel, channel_id):
+        raise api_error(404, "channel_not_found")
+    if not languages.is_post_language(language):
+        raise api_error(400, "post_language_invalid")
+
+    route = (channel_id, language)
+    price = (await service.route_prices(redis, [route]))[route]
+    snapshot = await service.get_price_snapshot(redis)
+    return PostPrice(
+        price=price,
+        expires_at=datetime.fromtimestamp(snapshot["expires_at"], tz=timezone.utc),
     )
 
 
@@ -712,6 +792,10 @@ async def review_post(
             redis,
             post_id,
             post.channel_id,
+            # Re-derived from the post, not carried from the op that delivered it: a
+            # forward is a new operation for the same post, and the post's language is
+            # what decides its audience however many hands it has passed through.
+            post.language,
             author_id=str(post.author_id) if post.author_id else None,
         )
     log.info(

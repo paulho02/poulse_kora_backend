@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 from sqlalchemy.exc import IntegrityError
 
 from app.core import email_verification as ev
+from app.core import languages
 from app.core.config import settings
 from app.core.email import send_email
 from app.core.locale import parse_accept_language
@@ -105,8 +106,20 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         `user_already_exists`). The cooldown is only started once the send
         actually succeeds, so a failed first attempt doesn't lock the user out of
         an immediate retry via `/auth/email-verification/resend`.
+
+        It also narrows the reader's accepted content languages from the column
+        default (every configured language) to the one their request asked for. Done
+        here rather than as a column default because only a request carries an
+        `Accept-Language`, and done as a *narrowing* rather than the other way around
+        so that any row reaching the database without passing through registration -
+        a migration, a script, a fixture - keeps the wide default rather than being
+        silently restricted to a language nobody chose for it.
         """
         await earn_token(self._redis, str(user.id), settings.FEED_STARTING_TOKENS)
+        user.content_languages = languages.default_reading_languages(
+            _locale_of(request)
+        )
+        await self.user_db.update(user, {"content_languages": user.content_languages})
         # Signups are the one number nobody wants to have to query the database
         # for, and this is also where a broken registration path shows up as a
         # gap rather than as an error.
@@ -115,6 +128,7 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
             user_id=str(user.id),
             via="google" if user.oauth_accounts else "password",
             starting_tokens=settings.FEED_STARTING_TOKENS,
+            content_languages=user.content_languages,
         )
         # `not user.is_verified` skips the code for Google signups, which arrive here
         # already verified (oauth_callback with is_verified_by_default) - Google has

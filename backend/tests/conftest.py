@@ -7,6 +7,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
+from app.core.languages import UNSPECIFIED
 from app.db import Base
 from app.deps.users import get_user_manager
 from app.factory import create_app
@@ -188,9 +189,14 @@ def create_post(db: AsyncSession, create_user: Callable, create_channel: Callabl
         text="text",
         is_anonymous=False,
         media: list[dict] | None = None,
+        language=UNSPECIFIED,
     ):
         """`text`, if non-empty, becomes a single leading text block - matching
         every real post's shape (text block(s) then media, see PostBlock).
+        `language` defaults to UNSPECIFIED so a post made by this factory routes
+        through the whole channel - the pre-language behaviour, which is what the
+        tests that predate routing assume. Tests about routing pass a real language.
+
         `media`, if given, is a list of kwargs for PostMedia (media_type,
         content_type, size_bytes, duration_seconds); each becomes a media block
         after the text block, inserted directly and bypassing upload validation,
@@ -210,6 +216,7 @@ def create_post(db: AsyncSession, create_user: Callable, create_channel: Callabl
             channel_id=channel.id,
             author_id=author.id,
             is_anonymous=is_anonymous,
+            language=language,
         )
         db.add(post)
         await db.flush()

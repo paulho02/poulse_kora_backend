@@ -8,6 +8,7 @@ from sqlalchemy.sql.functions import func
 from sqlalchemy.sql.schema import ForeignKey, Index
 from sqlalchemy.sql.sqltypes import DateTime, String
 
+from app.core.config import LANGUAGE_UNSPECIFIED
 from app.db import Base
 
 if TYPE_CHECKING:
@@ -40,6 +41,30 @@ class Post(Base):
     )
 
     is_anonymous: Mapped[bool] = mapped_column(default=False, server_default="false")
+
+    # The language this post is written in, and the other half of its routing key:
+    # fan-out delivers it only to subscribers who accept that language (see
+    # app/feed/keys.py: audience). One value, never a set - a post with two
+    # languages would have to fan out into two audiences off one admission charge,
+    # which is an economy change dressed as a data model.
+    #
+    # `LANGUAGE_UNSPECIFIED` ("und") means the post has no language at all - a photo,
+    # a video, a caption-free meme - and routes through the whole channel instead of
+    # one language's slice. Accepted only for a post with no text blocks (enforced in
+    # api/posts.py:create_post), since that is the one case the claim is checkable.
+    # Note the converse is *not* enforced: a text-free post may still declare a real
+    # language, because a video can be spoken German.
+    #
+    # Self-declared and unverifiable - the server cannot read the post to check, which
+    # is the whole reason detection lives in the client. The forward/drop economy is
+    # what corrects a mislabelled post: it buys FEED_FANOUT deliveries to readers who
+    # cannot read it, they drop it, and it goes no further.
+    #
+    # Deliberately no index. Nothing queries posts by language except `backfill_queue`
+    # on a rebuild, which is already a full pass over the channel.
+    language: Mapped[str] = mapped_column(
+        String(8), default=LANGUAGE_UNSPECIFIED, server_default=LANGUAGE_UNSPECIFIED
+    )
 
     forwarded_count: Mapped[int] = mapped_column(default=0, server_default="0")
     dropped_count: Mapped[int] = mapped_column(default=0, server_default="0")

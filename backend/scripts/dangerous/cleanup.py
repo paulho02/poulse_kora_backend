@@ -19,16 +19,22 @@ Usage (inside the backend container):
 
 import asyncio
 
+from app.core import languages
 from app.feed import keys
 from app.redis import redis_client
 
 
 async def main():
     await redis_client.delete(
-        keys.OPS_OUTSTANDING, keys.SUBS_TOTAL, keys.PRICE_SNAPSHOT
+        keys.OPS_OUTSTANDING, keys.SUBS_TOTAL, keys.PRICE_SNAPSHOT, keys.PRICE_RANGE
     )
     for cid in range(1, 20):
-        await redis_client.delete(keys.channel(cid), keys.channel_price(cid))
+        await redis_client.delete(
+            keys.channel(cid),
+            keys.channel_price_range(cid),
+            *[keys.audience(cid, lang) for lang in languages.reading_languages()],
+            *[keys.route_price(cid, lang) for lang in languages.post_languages()],
+        )
     print("cleared skewed keys - run rebuild_redis to restore real membership")
 
 

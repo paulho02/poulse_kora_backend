@@ -8,8 +8,10 @@ interleave with another consumer/request:
   the delivery in the post's ``seen`` set, and drop them from ``free_queue`` once full.
 - ``claim``: remove a post from a user's queue (the review concurrency guard) and
   re-add them to ``free_queue`` when a slot frees up.
-- ``retire``: decrement a channel's outstanding-op counter without letting it go
+- ``retire``: decrement a route's outstanding-op counter without letting it go
   negative.
+- ``price_range``: widen the observed min/max route price for the current price
+  window (resetting it when the window rolls over).
 
 Scripts are registered against a client (cheap, local — just stores the body/SHA)
 and memoized per client so tests using the DB-1 client get their own handles.
@@ -96,15 +98,15 @@ return 0
 """
 
 
-# KEYS[1]=feed:ops:outstanding  ARGV[1]=channel_id
-# Decrement the channel's outstanding-op count, but never below zero. Returns the new
+# KEYS[1]=feed:ops:outstanding  ARGV[1]=route
+# Decrement the route's outstanding-op count, but never below zero. Returns the new
 # count.
 #
 # The floor is why this is a script rather than a bare HINCRBY. The counter is a pricing
 # hint maintained across three processes, and the feed deliberately tolerates an op
 # being processed twice (see reschedule_due_retries' XADD-before-ZREM, and XAUTOCLAIM
 # reclaiming an entry whose handler already finished) — so double-retires happen. Left
-# unguarded they would drive a channel's count permanently negative, and a channel stuck
+# unguarded they would drive a route's count permanently negative, and a route stuck
 # at "no backlog" would price itself at the floor forever, needing that many mints just
 # to climb back to zero. Clamping on read would hide the symptom and keep the debt.
 _RETIRE = """
@@ -116,6 +118,49 @@ return redis.call('HINCRBY', KEYS[1], ARGV[1], -1)
 """
 
 
+# KEYS[1]=a price-range hash
+# ARGV[1]=window  ARGV[2]=ttl_seconds  ARGV[3..]=one or more observed prices
+# Widen the observed price range for `window` to cover every price given, resetting it
+# first if the stored range belongs to an older window. Returns {min, max}.
+#
+# A script rather than a read-modify-write because several requests price routes
+# concurrently, and a lost update here is not self-correcting: a route's price is
+# observed only when it is computed, which happens once per window, so dropping that
+# one observation means the range under-reports until the window rolls over.
+#
+# Variadic in the prices so a caller that has just priced a page of routes can fold
+# them in with one round trip instead of one per route - which is what keeps the first
+# channel-list request of each window from paying a call per (channel, language) pair.
+#
+# The window is compared as a *string*, and callers pass the snapshot's `expires_at`
+# truncated to a whole second. Floats would round-trip through Lua's number formatting
+# and could fail to compare equal to the value that wrote them, which would reset the
+# range on every single call - a failure that looks like "the range never widens"
+# rather than like an error.
+#
+# The window's *base* price is stored beside the spread, which is what lets a reader
+# in a later window rescale a spread observed in an earlier one rather than discard it
+# (see `service.read_price_range`). Args are therefore
+# [window, ttl, base, price, price, ...].
+_PRICE_RANGE = """
+if redis.call('HGET', KEYS[1], 'window') ~= ARGV[1] then
+  redis.call('DEL', KEYS[1])
+  redis.call('HSET', KEYS[1], 'window', ARGV[1], 'base', tonumber(ARGV[3]),
+             'min', tonumber(ARGV[4]), 'max', tonumber(ARGV[4]))
+end
+local lo = tonumber(redis.call('HGET', KEYS[1], 'min'))
+local hi = tonumber(redis.call('HGET', KEYS[1], 'max'))
+for i = 4, #ARGV do
+  local price = tonumber(ARGV[i])
+  if price < lo then lo = price end
+  if price > hi then hi = price end
+end
+redis.call('HSET', KEYS[1], 'min', lo, 'max', hi)
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return {lo, hi}
+"""
+
+
 @dataclass(frozen=True)
 class FeedScripts:
     spend: AsyncScript
@@ -123,6 +168,7 @@ class FeedScripts:
     claim: AsyncScript
     ensure_free: AsyncScript
     retire: AsyncScript
+    price_range: AsyncScript
 
 
 _cache: dict[Redis, FeedScripts] = {}
@@ -138,6 +184,7 @@ def get_scripts(client: Redis) -> FeedScripts:
             claim=client.register_script(_CLAIM),
             ensure_free=client.register_script(_ENSURE_FREE),
             retire=client.register_script(_RETIRE),
+            price_range=client.register_script(_PRICE_RANGE),
         )
         _cache[client] = scripts
     return scripts
