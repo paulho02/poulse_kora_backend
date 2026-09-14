@@ -227,7 +227,15 @@ class Settings(BaseSettings):
     # INTERACTION_RATE_WINDOW_SECONDS (see app/core/rate_limit.py). One shared budget
     # rather than one per endpoint, so alternating between them doesn't dodge it.
     # Set the limit to 0 to disable rate limiting entirely.
-    INTERACTION_RATE_LIMIT: int = 5
+    #
+    # Sized against a reader working through their queue, not against an abuser:
+    # a forward or a drop is one tap, the card takes ~1.1s to play its score and
+    # slide away, and a reader who already knows what they think of the next post
+    # taps straight through that. At 5 per 10s that reader hit the limit in
+    # ordinary use — the throttle was landing on the behaviour the feed is built
+    # to encourage. Doubled to 10, which still bounds a scripted client to a rate
+    # no thumb reaches.
+    INTERACTION_RATE_LIMIT: int = 13
     INTERACTION_RATE_WINDOW_SECONDS: float = 10.0
 
     # --- localization ---
