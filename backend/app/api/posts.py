@@ -203,7 +203,16 @@ async def get_posts_feed(
     skip: int = 0,
     limit: int | None = None,
 ):
-    """Return the user's review queue, oldest first, rendered from Postgres by ID.
+    """Return the user's review queue, newest delivery first, rendered from Postgres
+    by ID.
+
+    The order is the queue's own and nothing re-sorts it: `place_post` LPUSHes, so
+    index 0 is the most recently *placed* post - which is not quite the most
+    recently authored one, since a forwarded post is placed long after it was
+    written. Clients that append arrivals to the bottom of what is already on
+    screen (the Flutter app does, so nothing jumps under a reader mid-sentence)
+    should therefore treat this order as the starting point rather than as a
+    sort to re-apply on every fetch.
 
     The queue is maintained in Redis by the distribution worker; here we just read
     the post_ids and hydrate them. `place_post` dedupes on insert, so a post appears
