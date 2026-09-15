@@ -8,6 +8,7 @@ from app.models.post import Post
 from app.models.post_block import PostBlock
 from app.models.post_media import PostMedia
 from app.models.post_review import PostReview
+from app.models.probe_response import ProbeResponse
 from app.models.supporter_subscription import SupporterSubscription
 from app.models.user import User
 from app.models.user_subscription import UserSubscription

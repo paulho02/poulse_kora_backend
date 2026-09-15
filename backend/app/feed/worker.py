@@ -57,8 +57,9 @@ async def process_operation(
     language: str,
     expires_at: float | None = None,
     author_id: str | None = None,
+    fanout: int | None = None,
 ) -> int:
-    """Fan `post_id` out to up to FEED_FANOUT eligible recipients. Returns the count.
+    """Fan `post_id` out to up to `fanout` eligible recipients. Returns the count.
 
     `language` and `channel_id` together are the routing key: they name the audience
     set this post may be delivered into (see service.select_recipients). Neither is
@@ -71,7 +72,17 @@ async def process_operation(
 
     `author_id` is the post's author, skipped when FEED_EXCLUDE_OWN_POSTS is on. None on
     ops written before the field existed, which simply fan out to everyone as before.
+
+    `fanout` is how wide this operation is worth going — the forwarder's Reviewer Trust
+    band, decided at forward time and carried here because this loop has no way to score
+    anyone (no Postgres session, by design). None means FEED_FANOUT, which covers three
+    cases at once: an original post, a deployment with TRUST_ENABLED off, and an op
+    minted before this field existed. Clamped to at least 1 so a nonsense value on an
+    entry cannot silently turn an operation into a no-op that still retires.
     """
+    if fanout is None:
+        fanout = settings.FEED_FANOUT
+    fanout = max(1, fanout)
     if await service.is_post_deleted(redis, post_id):
         # The author erased this post after the op was minted. Placing it would
         # hand a reader an id that resolves to nothing - a ghost card they then
@@ -94,7 +105,7 @@ async def process_operation(
         redis,
         channel_id,
         language,
-        settings.FEED_FANOUT,
+        fanout,
         post_id=post_id,
         author_id=author_id,
     )
@@ -118,6 +129,7 @@ async def process_operation(
             language=language,
             delivered=delivered,
             selected=len(recipients),
+            fanout=fanout,
         )
         return delivered
 
@@ -133,6 +145,7 @@ async def process_operation(
             language,
             expires_at=expires_at,
             author_id=author_id,
+            fanout=fanout,
         )
         # DEBUG on purpose. A parked op re-parks every
         # FEED_RETRY_INTERVAL_SECONDS (20s) for up to FEED_RETRY_MAX_AGE_SECONDS
@@ -212,8 +225,12 @@ async def _fan_out_and_retire(
     # so a backlog crossing the deploy is delivered as originally intended rather than
     # narrowed to one language's readers.
     language = fields.get("language") or UNSPECIFIED
+    # Absent on an original post, on a deployment with trust disabled, and on anything
+    # minted before Reviewer Trust existed - all three mean "the standard fan-out".
+    raw_fanout = fields.get("fanout")
+    fanout = int(raw_fanout) if raw_fanout is not None else None
     await process_operation(
-        redis, post_id, channel_id, language, expires_at, author_id
+        redis, post_id, channel_id, language, expires_at, author_id, fanout
     )
     await redis.xdel(keys.STREAM, entry_id)
     await redis.xack(keys.STREAM, keys.STREAM_GROUP, entry_id)

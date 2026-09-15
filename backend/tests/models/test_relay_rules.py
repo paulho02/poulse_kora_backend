@@ -2,7 +2,6 @@ from app.core.config import settings
 from app.core.relay_rules import (
     compute_avg_hops,
     compute_badges,
-    compute_trust_score,
     is_review_gate_unlocked,
 )
 from app.models.user import User
@@ -41,13 +40,6 @@ def test_avg_hops_zero_when_no_reviews():
 def test_avg_hops_ratio_of_forwarded_to_reviewed():
     user = _user(reviewed_count=10, forwarded_count=4)
     assert compute_avg_hops(user) == 0.4
-
-
-def test_trust_score_is_clamped_between_0_and_100():
-    low = _user(dropped_count=1000)
-    high = _user(reviewed_count=1000, forwarded_count=1000)
-    assert compute_trust_score(low) == 0
-    assert compute_trust_score(high) == 100
 
 
 def test_compute_badges_shape_and_thresholds():

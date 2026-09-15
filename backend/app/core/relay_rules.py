@@ -1,10 +1,16 @@
 """Pure MVP heuristics for the Relay feature.
 
 There is no real relay/hop-propagation graph in this MVP (every subscriber of a channel
-sees every post in it — see CLAUDE.md/plan), so `trust_score` and `avg_hops` are simple,
-documented proxies rather than derived from real propagation data. Keep these as pure
-functions (no I/O) so they're shared identically between the review-gate check
-(app/api/posts.py) and the stats display (app/api/stats.py), and are trivially unit-testable.
+sees every post in it — see CLAUDE.md/plan), so `avg_hops` is a simple, documented proxy
+rather than something derived from real propagation data. Keep these as pure functions
+(no I/O) so they're shared identically between the review-gate check (app/api/posts.py)
+and the stats display (app/api/stats.py), and are trivially unit-testable.
+
+The trust score used to live here too, as a lifetime-weighted sum of the three counters
+below. It is now a real measurement with real consequences - it decides how far a
+forward travels - and lives in app/core/trust.py, which needs a window of history rather
+than a row. `compute_badges` takes the score as an argument precisely so this module
+stays I/O-free.
 """
 
 from app.core.config import settings
@@ -21,17 +27,6 @@ def compute_avg_hops(user: User) -> float:
     if user.reviewed_count == 0:
         return 0.0
     return round(user.forwarded_count / user.reviewed_count, 2)
-
-
-def compute_trust_score(user: User) -> int:
-    """Simple weighted heuristic, clamped to 0-100. Not a source of truth to persist."""
-    score = (
-        50
-        + user.reviewed_count * 1.5
-        + user.forwarded_count * 1
-        - user.dropped_count * 0.5
-    )
-    return max(0, min(100, round(score)))
 
 
 def compute_badges(user: User, trust_score: int) -> list[BadgeRead]:

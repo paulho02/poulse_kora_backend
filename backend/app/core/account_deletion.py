@@ -35,6 +35,16 @@ mode is the cheap one: objects nobody references any more.
 half-ran costs a stale queue entry or a slightly wrong price denominator - never
 a resurrected account.
 
+One thing this deliberately cannot reach: a test post still sitting *unanswered* in
+the account's queue. Nothing in Postgres records who a probe was minted for until it
+is answered - the link lives only in the reader's Redis queue, which is about to be
+purged - so such a post is left behind as a row with no personal data attached to it
+and nothing referencing it. That is deliberate rather than a gap: storing the link at
+mint time would mean keeping a record of who was tested for every probe nobody ever
+answered, which is more data about the user, not less. Nothing collects those rows
+afterwards either, because nothing can tell them apart from a probe still sitting in a
+*live* reader's queue, and deleting one of those would hand its reader a ghost card.
+
 One thing is deliberately *not* undone: the forward/drop counters on posts this
 user reviewed. `PostReview` rows are personal data and go, but the aggregate they
 fed says how a post fared at the time, not who is still around to vouch for it -
@@ -48,6 +58,7 @@ from redis.asyncio import Redis
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import probes
 from app.core.logger import get_logger
 from app.core.storage import storage
 from app.feed import service
@@ -58,6 +69,7 @@ from app.models.post import Post
 from app.models.post_block import PostBlock
 from app.models.post_media import PostMedia
 from app.models.post_review import PostReview
+from app.models.probe_response import ProbeResponse
 from app.models.supporter_subscription import SupporterSubscription
 from app.models.user import User
 from app.models.user_subscription import UserSubscription
@@ -121,6 +133,20 @@ async def delete_account(
         .scalars()
         .all()
     )
+    # Test posts this account answered (see app/core/probes.py). A probe is minted for
+    # exactly one reader, so the post is as personal as the response to it - "this
+    # person was tested and got it wrong" is a fact about them, and it goes with them.
+    # Erased regardless of the keep-my-posts choice: that choice is about what this
+    # account *published*, and nobody published these.
+    probe_post_ids = list(
+        (
+            await session.execute(
+                select(ProbeResponse.post_id).where(ProbeResponse.user_id == user_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
 
     object_keys: list[str] = []
     if profile_picture_key:
@@ -157,6 +183,17 @@ async def delete_account(
     # there and nowhere else.
     await session.execute(delete(PostReview).where(PostReview.user_id == user_id))
     await session.execute(
+        delete(ProbeResponse).where(ProbeResponse.user_id == user_id)
+    )
+    if probe_post_ids:
+        # Response rows first (they reference the post), then the block, then the post -
+        # the same child-before-parent ordering the published-post branch above uses. A
+        # probe never carries media, so there is no PostMedia pass and no bucket object.
+        await session.execute(
+            delete(PostBlock).where(PostBlock.post_id.in_(probe_post_ids))
+        )
+        await session.execute(delete(Post).where(Post.id.in_(probe_post_ids)))
+    await session.execute(
         delete(ChannelSubscription).where(ChannelSubscription.user_id == user_id)
     )
     await session.execute(
@@ -173,6 +210,7 @@ async def delete_account(
     # Past the point of no return. Everything below is cleanup of state that
     # merely mirrors what Postgres just stopped saying.
     await service.purge_user(redis, str(user_id), channel_ids)
+    await probes.purge_user(redis, str(user_id))
     if delete_posts:
         await service.mark_posts_deleted(redis, post_ids)
 

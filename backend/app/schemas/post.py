@@ -95,6 +95,16 @@ class PostRead(BaseModel):
     blocks: list[PostBlockRead]
     is_anonymous: bool
     author: PostAuthor
+    # A test post (see app/core/probes.py): content that asks, in its own words, to be
+    # forwarded or dropped, so that Reviewer Trust has one signal a script cannot fake.
+    #
+    # Exposed so the client can render the small marker that gives a reader a fair
+    # chance of recognising one. That disclosure is the point, not a leak: a measurement
+    # nobody is told about is a trick played on the people being measured. What keeps it
+    # from being exploitable is that spotting the marker still requires looking at the
+    # post, and that blind-dropping everything else caps the score anyway (see
+    # app/core/trust.py: anomaly_ceiling).
+    is_probe: bool = False
     # Deliberately no forwarded/dropped counts here. How a post has fared so far is
     # withheld until the viewer has committed to their own verdict - a reader who
     # can see that everyone else forwarded it is voting on the crowd, not on the

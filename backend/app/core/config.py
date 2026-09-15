@@ -238,6 +238,140 @@ class Settings(BaseSettings):
     INTERACTION_RATE_LIMIT: int = 13
     INTERACTION_RATE_WINDOW_SECONDS: float = 10.0
 
+    # --- reviewer trust ---
+    # How far a *forward* travels is scaled by the forwarder's Reviewer Trust score
+    # (see app/core/trust.py for the formula and app/core/probes.py for the test
+    # posts that feed it). Creator trust - a posting discount - is a separate feature
+    # and none of these settings touch it.
+    #
+    # Turning this off leaves every forward at FEED_FANOUT and stops minting test
+    # posts; scores are still computed and displayed, so the switch is about the
+    # economy, not the UI.
+    TRUST_ENABLED: bool = True
+    # Everything the score reads is measured over this trailing window. Nothing is
+    # lifetime, which is the whole reason an account cannot bank trust and coast on
+    # it - and why an absent user returns at neutral rather than keeping either a
+    # good or a bad record. There is no separate inactivity rule because there is
+    # nothing for one to do.
+    TRUST_WINDOW_DAYS: int = 30
+
+    # Weights of the two *additive* components. Test posts dominate because they are
+    # the only ground truth about whether someone actually read: everything else is
+    # a proxy that a machine can imitate. Anomaly is deliberately not in this sum -
+    # see TRUST_ANOMALY_* below.
+    TRUST_WEIGHT_PROBE: float = 0.7
+    TRUST_WEIGHT_VOLUME: float = 0.3
+
+    # --- test posts (probes) ---
+    # Probability that a reader's next queued post is a test rather than a real one,
+    # rolled after each real review. 0 disables minting without disabling scoring.
+    TRUST_PROBE_RATE: float = 0.05
+    # Reviews that must pass between two probes. Without it the roll above can land
+    # twice in a row, which is both annoying and the fastest way to teach someone
+    # what a probe looks like.
+    TRUST_PROBE_MIN_GAP_REVIEWS: int = 5
+    # Probes needed before the probe component is trusted at full weight; below it
+    # the component is shrunk toward neutral in proportion. Sized against
+    # TRUST_PROBE_RATE: at 5% this is roughly 120 reviews, about a month of daily
+    # reading. Low enough that an engaged reader reaches full confidence, high
+    # enough that one unlucky mis-tap cannot decide a band.
+    TRUST_PROBE_CONFIDENCE_N: int = 6
+    # What a reader who never reads scores by chance. Half the probe variants ask to
+    # be forwarded and half to be dropped, so blind answering converges here - and
+    # chance has to map to *zero credit*, not to neutral, or ignoring probes would be
+    # as good as passing them.
+    TRUST_PROBE_CHANCE_RATE: float = 0.5
+    # How many recent variants are remembered per reader, so the same wording does
+    # not recur. Kept in Redis, expiring with the trust window.
+    TRUST_PROBE_RECENT_MEMORY: int = 6
+    # Username/email of the account probes are published as. Created on demand.
+    # A real, named author rather than an anonymous post: if every probe were
+    # anonymous, "anonymous" would itself become the tell, and every genuinely
+    # anonymous post would inherit the suspicion.
+    #
+    # The address is under `example.com`, which RFC 2606 reserves and IANA holds
+    # permanently - so nobody can ever register it and mail to it goes nowhere. Not
+    # a `.invalid` or `.local` address, which express the same intent more clearly
+    # but are rejected outright by the email validator behind `UserRead.email`: this
+    # account is a real row, and a superuser listing users has to be able to
+    # serialize it.
+    TRUST_PROBE_AUTHOR_USERNAME: str = "poulse"
+    TRUST_PROBE_AUTHOR_EMAIL: str = "probes@poulse.example.com"
+
+    # --- volume component ---
+    # Reviews in the window below which volume contributes exactly neutral, and the
+    # count at which it contributes its full weight. Deliberately bonus-only: reading
+    # a lot can lift the score, reading little never lowers it. A casual reader is
+    # quiet, not untrustworthy, and there is no version of this feature where being
+    # busy is what earns someone's forwards a wider audience.
+    TRUST_VOLUME_NEUTRAL_REVIEWS: int = 20
+    TRUST_VOLUME_FULL_REVIEWS: int = 150
+
+    # --- anomaly component ---
+    # Anomaly is a *ceiling* on the above-neutral half of the score, never a term in
+    # the sum (see app/core/trust.py: compute_score). So it can withhold the high
+    # band but can never by itself produce a low one - which is what makes "dropping
+    # a run of bad posts is allowed" a structural property rather than a tuning
+    # value. Only failed test posts can cost a reader reach.
+    #
+    # Reviews in the window before the signal is trusted at all, shrunk in proportion
+    # below it.
+    TRUST_ANOMALY_CONFIDENCE_N: int = 20
+    # A review closer than this to the previous one was not a read. Not a rate limit
+    # (INTERACTION_RATE_LIMIT is that, an order of magnitude faster); this is the
+    # floor below which no human is making a judgement.
+    TRUST_MIN_READ_SECONDS: float = 1.5
+    # Share of reviews allowed under that floor before it counts against anyone.
+    # Generous because real reading is bursty - an obvious duplicate, a post whose
+    # first line settles it, a double-tap - and only a *sustained* rate means
+    # something.
+    TRUST_PACE_TOLERANCE: float = 0.3
+    # How far a reader's forward rate may sit from the deployment's before it counts,
+    # as a fraction of the room available on that side (so 1.0 means "never forwards"
+    # or "always forwards", whatever the population rate happens to be).
+    #
+    # 0.7 is very forgiving on purpose: where the population forwards a quarter of
+    # what it sees, nothing at all is penalised until a reader's drop rate passes
+    # ~92%, and the penalty only reaches full at literally zero forwards in 30 days.
+    # Normalising per side is also what makes the signal asymmetric in the right
+    # direction - blind *forwarding* is caught much harder than blind dropping,
+    # because it spends the system's reach rather than only the dropper's time.
+    TRUST_SKEW_TOLERANCE: float = 0.7
+    # Global reviews needed in the window before a deployment-wide forward rate means
+    # anything. Below it the skew signal is skipped entirely rather than measured
+    # against noise - which is the state a fresh deployment is in.
+    TRUST_FORWARD_RATE_MIN_SAMPLE: int = 200
+
+    # --- bands ---
+    # Score below LOW_MAX is the low band, at or above HIGH_MIN the high band,
+    # anything between is normal reach. The multipliers are applied to FEED_FANOUT
+    # and rounded, so at the default fan-out of 3 the three bands deliver 2 / 3 / 4.
+    #
+    # The low band is reachable only by answering test posts wrongly - anomalous
+    # behaviour bottoms out at exactly 50 by construction (see trust.compute_score),
+    # and volume alone tops out at 65, below HIGH_MIN. So these two numbers set how
+    # much *probe* evidence a band change takes: at 35, an active reader has to be
+    # near chance on probes to lose reach, while a casual one (whose volume component
+    # is sitting at neutral) has to be failing about a third of them. Raising LOW_MAX
+    # makes demotion easier on thin evidence, which is the wrong direction to be
+    # wrong in.
+    TRUST_BAND_LOW_MAX: int = 35
+    TRUST_BAND_HIGH_MIN: int = 70
+    TRUST_REACH_LOW_MULTIPLIER: float = 2 / 3
+    TRUST_REACH_HIGH_MULTIPLIER: float = 4 / 3
+
+    # --- caching ---
+    # The score is computed lazily and cached, rather than recomputed by a background
+    # job: a periodic job costs work proportional to the number of *accounts*, while
+    # this costs work proportional to *activity*, and only an active reader ever
+    # needs a score. Two indexed aggregates behind this TTL is the cheaper of the
+    # two at every deployment size.
+    TRUST_CACHE_TTL_SECONDS: int = 600
+    # The deployment-wide forward rate is one aggregate shared by every reader, so it
+    # is cached far longer than an individual score - it barely moves, and it is the
+    # only part of the computation that scans more than one user's rows.
+    TRUST_FORWARD_RATE_TTL_SECONDS: int = 900
+
     # --- localization ---
     # Locales the API can resolve `Accept-Language` into (app.core.locale), and the
     # set of locales the banner accepts a message for (app.schemas.banner). ISO

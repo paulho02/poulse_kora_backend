@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 class Post(Base):
     __tablename__ = "posts"
-    __table_args__ = (Index("ix_posts_author_created", "author_id", "created"),)
+    __table_args__ = (
+        Index("ix_posts_author_created", "author_id", "created"),
+        Index("ix_posts_probe_created", "is_probe", "created"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
@@ -41,6 +44,26 @@ class Post(Base):
     )
 
     is_anonymous: Mapped[bool] = mapped_column(default=False, server_default="false")
+
+    # A test post: content that asks, in its own words, to be forwarded or dropped, so
+    # that Reviewer Trust has one signal a script cannot fake (see app/core/probes.py).
+    #
+    # A real Post row rather than a synthetic id or a parallel table, because it then
+    # renders, opens, and is reviewed through exactly the paths a real post is - there
+    # is no second serializer to keep in step, and nothing about how it arrives can give
+    # it away. What differs is entirely downstream of this flag: reviewing one writes a
+    # ProbeResponse instead of a PostReview, forwarding one mints no fan-out operation,
+    # and it never appears in GET /posts/reviewed.
+    #
+    # Exposed to the client on PostRead, which is deliberate rather than an oversight.
+    # A test post carries a visible marker so a reader has a fair chance of recognising
+    # one, and hiding the flag while rendering the marker would be obscurity, not
+    # secrecy. See app/core/trust.py: anomaly_ceiling for what stops that disclosure
+    # from being exploitable, and CLAUDE.md for the part of it that remains.
+    #
+    # Indexed together with `created` because every query that touches it is "probes
+    # older than X" (the pruning script) or "exclude probes from this history page".
+    is_probe: Mapped[bool] = mapped_column(default=False, server_default="false")
 
     # The language this post is written in, and the other half of its routing key:
     # fan-out delivers it only to subscribers who accept that language (see

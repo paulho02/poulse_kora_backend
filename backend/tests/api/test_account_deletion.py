@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import probes
 from app.core.config import settings
 from app.core.storage import StorageError, storage
 from app.feed import keys, service
@@ -24,6 +25,7 @@ from app.models.post import Post
 from app.models.post_block import PostBlock
 from app.models.post_media import PostMedia
 from app.models.post_review import PostReview
+from app.models.probe_response import ProbeResponse
 from app.models.user import User
 from tests.utils import (
     generate_random_string,
@@ -400,6 +402,42 @@ class TestDeleteAccountSideTables:
         # The running denominator of the price formula: a departure that went
         # unrecorded here would overstate subscriptions forever.
         assert await redis.get(keys.SUBS_TOTAL) == "0"
+
+    async def test_answered_test_posts_go_with_the_account(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis, create_user,
+        create_channel, default_password,
+    ):
+        """A probe is minted for one named reader, so "this person was tested and got
+        it wrong" is a fact about them and goes when they do - regardless of the
+        keep-my-posts choice, which is about what the account *published*."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await subscribe(db, user, channel)
+        await db.refresh(user)
+        probe = await probes.mint_probe(db, redis, user)
+        assert probe is not None
+        await client.post(
+            settings.API_PATH + f"/posts/{probe.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "drop"},
+        )
+        assert await _count(db, ProbeResponse, user_id=user.id) == 1
+
+        resp = await client.request(
+            "DELETE", DELETE_ME,
+            json={"delete_posts": False, "current_password": default_password},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 204, resp.text
+
+        assert await _count(db, ProbeResponse, user_id=user.id) == 0
+        assert await _count(db, Post, id=probe.id) == 0
+        assert await _count(db, PostBlock, post_id=probe.id) == 0
+        # The probe bookkeeping in Redis too, or a deleted account's successor at the
+        # same id would inherit its gap counter and pending flag.
+        assert await redis.exists(probes._pending_key(str(user.id))) == 0
+        assert await redis.exists(probes._since_key(str(user.id))) == 0
+        assert await redis.exists(probes._recent_key(str(user.id))) == 0
 
     async def test_own_reviews_and_items_go(
         self, client: AsyncClient, db: AsyncSession, create_user, create_channel,

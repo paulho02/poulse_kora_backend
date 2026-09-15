@@ -514,6 +514,87 @@ after cloning).
     `crop_to_ratio=False`. EXIF is still stripped, because a submission can be anonymous.
   Read back via superuser-only `GET /feedback` (there is no per-user view — a submission may
   carry no user to scope one to).
+- **Reviewer trust** (`backend/app/core/trust.py`, `trust_service.py`, `probes.py`): how
+  carefully a reader reads decides how far their *forwards* travel — `⅔ × FEED_FANOUT`
+  (2), the standard 3, or `⁴⁄₃ ×` (4) recipients per forward operation. It never touches
+  an original post: that reach is what the author paid the admission price for, and a
+  posting discount would be *creator* trust, a separate feature that does not exist yet.
+  Why this is economically safe is the same argument language routing rested on —
+  **forwarding is free**, so trimming a low-trust forward takes nothing anyone bought,
+  and the extra reach a high-trust one hands out shows up as more outstanding ops, which
+  congestion pricing already corrects for.
+  `app/core/trust.py` is the formula, pure and I/O-free like `feed/pricing.py`;
+  `trust_service.py` gathers its inputs; `probes.py` produces the strongest of them.
+  Seven things are load-bearing:
+  - **Everything is measured over a trailing `TRUST_WINDOW_DAYS` (30). Nothing is
+    lifetime.** That single choice *is* the inactivity rule: a reader who disappears for
+    a month comes back to an empty window, every component falls back to neutral, and
+    they score exactly what a new account scores. There is deliberately no decay
+    coefficient, no "last active" column and no grace period, because there is nothing
+    left for any of them to do.
+  - **Absence of evidence is never evidence.** Each component is shrunk toward neutral by
+    its own confidence, so a brand-new account scores exactly 50 and lands in the normal
+    band — which is what makes the deploy invisible rather than a step change in
+    everyone's reach.
+  - **Anomaly is a ceiling, not a penalty, and that is arithmetic rather than tuning.**
+    It multiplies only the *above-neutral* half of the score (`compute_score`), so its
+    worst case is exactly neutral: it can withhold the bonus band, it can never produce
+    the low one. Only failed test posts can cost a reader reach. This is the whole answer
+    to "dropping a series of bad posts must stay allowed" — it is not a tolerance
+    somebody could set wrong. Two tests pin it, along with its mirror image: **volume
+    alone cannot buy the high band** (it tops out at 65), so reach is earned by reading,
+    not by grinding.
+  - **The forward-rate signal compares a reader to the deployment, not to a coin.** The
+    feed's premise is that most posts should die, so 50/50 is not the healthy point;
+    `p̄` (cached, and skipped entirely below `TRUST_FORWARD_RATE_MIN_SAMPLE`) is.
+    Normalising the distance by the room available on each side is what makes it
+    asymmetric, and the asymmetry is correct: where the population forwards a quarter,
+    blind *forwarding* is caught far harder than blind dropping, because it spends the
+    system's reach while blind dropping only wastes the dropper's own time. At
+    `TRUST_SKEW_TOLERANCE` 0.7 nothing is penalised until a drop rate passes ~92%.
+  - **Test posts are real `Post` rows** (`Post.is_probe`), minted per reader and pushed
+    into their queue with the ordinary `place_post`, so they render, open and review
+    through exactly the paths a real post does — nothing about how one *arrives* can give
+    it away. Minted on the review path, never in the worker (which has no Postgres
+    session, by design), which is also what makes `TRUST_PROBE_RATE` mean literally
+    "the chance your next post is a test". **No fan-out operation is ever minted for
+    one**, so probes cost nothing in `OPS_OUTSTANDING` and never move the admission
+    price.
+  - **Answering one earns a token and moves nothing else.** No `PostReview` row, no
+    counter on the reader or the post, no fan-out, and nothing in `GET /posts/reviewed`.
+    So `reviewed_count == forwarded_count + dropped_count == COUNT(post_reviews)` stays
+    true, and the instrument stays out of the pace and forward-rate signals it exists to
+    calibrate. The token is the one deliberate exception: the attention was real, and a
+    reader who happens to be probed more often must not end the month poorer for it.
+  - **The score is lazy and cached (`TRUST_CACHE_TTL_SECONDS`), not a background job.**
+    A periodic recompute costs work proportional to the number of *accounts*; this costs
+    work proportional to *activity*, and only an active reader ever needs a score. The
+    computation is two indexed aggregates — `post_reviews` via a `lag()` window function
+    over the existing `ix_post_reviews_user_created`, so a reader with thousands of
+    reviews still returns one row, plus `probe_responses` over its own index — so there
+    is nothing heavy for a job to amortise. Answering a probe invalidates the cache
+    immediately, since it is the strongest and rarest input.
+  **The residual hole, and why it is a metric rather than a mechanism.** Probes carry a
+  visible marker (`PostRead.is_probe`) because measuring people without telling them is a
+  trick played on the reader. A determined adversary can therefore find probes without
+  reading, ace them, and blind-drop everything else. The anomaly ceiling closes the lazy
+  version of that — forward nothing at all and you are capped at normal reach — but not a
+  patient one that forwards ~5%, which is genuinely indistinguishable from careful
+  curation. The signature is near-perfect probe accuracy alongside a near-zero forward
+  rate, which is one query over `probe_responses` × `post_reviews`; watch it rather than
+  inventing a mechanism, exactly as with the baked-text-in-an-image hole above.
+  **Deploying it is one step, not two**: `alembic upgrade head` and nothing else — the
+  `trust:*` keys are caches created on first use, so unlike `0003_content_languages` this
+  needs no `rebuild_redis`. `TRUST_ENABLED=false` restores flat fan-out without disabling
+  the display.
+  **There is deliberately no cleanup job for probe rows**, and adding one is a trap worth
+  naming: the score reads `ProbeResponse.created` (when it was *answered*), while a probe
+  post carries `Post.created` (when it was *minted*), and a probe sits in its reader's
+  queue until they get to it — so a two-month-old probe answered yesterday is live
+  evidence. Pruning by mint age would silently move that reader's trust. Worse, no
+  deletion can tell an abandoned probe from one still sitting in a live queue, because the
+  queue is a Redis list of ids that Postgres cannot see; deleting one of those hands its
+  reader a ghost card. A probe is a post, and the table keeps posts forever anyway.
 - **Rate limiting** (`backend/app/core/rate_limit.py`, `app/deps/rate_limit.py`): feed writes
   (create post, forward, drop) share **one per-user budget** — `INTERACTION_RATE_LIMIT` hits per
   sliding `INTERACTION_RATE_WINDOW_SECONDS` window, enforced by a Lua sliding-window log in Redis

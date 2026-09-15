@@ -27,6 +27,17 @@ class PostReviewResult(BaseModel):
     # on the row, so neither costs a query.
     post_forwarded_count: int
     post_reviewed_count: int
+    # True when the post just reviewed was a test (see app/core/probes.py). The client
+    # shows a "that was a check" confirmation in place of the forward-score badge, which
+    # would be meaningless here: a probe is minted for one reader and nobody else will
+    # ever see it, so its counters can only ever read 1 of 1.
+    is_probe: bool = False
+    # Whether the test was answered as it asked. None for an ordinary post, and also for
+    # a probe whose wording no longer matches any variant in the catalogue - there is no
+    # expected verdict left to compare against, so nothing is scored and nothing is
+    # claimed. Told to the reader on purpose: getting one wrong should be visible, or
+    # the only feedback a careless reader ever gets is reach quietly disappearing.
+    probe_correct: bool | None = None
 
 
 class ReviewedPostRead(BaseModel):

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from app.models.oauth_account import OAuthAccount  # noqa: F401
     from app.models.post import Post  # noqa: F401
     from app.models.post_review import PostReview  # noqa: F401
+    from app.models.probe_response import ProbeResponse  # noqa: F401
     from app.models.user_subscription import UserSubscription  # noqa: F401
 
 
@@ -103,6 +104,9 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
         back_populates="author", cascade="all, delete"
     )
     post_reviews: Mapped[list["PostReview"]] = relationship(
+        back_populates="user", cascade="all, delete"
+    )
+    probe_responses: Mapped[list["ProbeResponse"]] = relationship(
         back_populates="user", cascade="all, delete"
     )
     subscriptions: Mapped[list["UserSubscription"]] = relationship(

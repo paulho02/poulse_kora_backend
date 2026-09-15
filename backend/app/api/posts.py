@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
-from app.core import languages
+from app.core import languages, probes, trust_service
 from app.core.config import settings
 from app.core.errors import api_error
 from app.core.logger import get_logger
@@ -113,6 +113,7 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
         ],
         is_anonymous=post.is_anonymous,
         author=author,
+        is_probe=post.is_probe,
         subscription_kind=post.subscription_kind,
         created=post.created,
     )
@@ -748,6 +749,20 @@ async def review_post(
     This is also the only route that discloses how the post has fared
     (`post_forwarded_count` / `post_reviewed_count`) - after the verdict, so the
     crowd cannot cast it. Keep it out of PostRead.
+
+    A **test post** (see app/core/probes.py) takes the short branch below and touches
+    almost none of this. It earns its token, because the attention it cost was real and
+    a reader who happens to be measured more often should not end the month poorer for
+    it - but it writes no `PostReview`, moves no counter on the reader or the post, and
+    mints no fan-out however it was answered. That is what keeps `reviewed_count ==
+    forwarded_count + dropped_count == COUNT(post_reviews)` true, keeps probes out of
+    `GET /posts/reviewed`, and keeps the instrument out of the very pace and
+    forward-rate signals it exists to calibrate.
+
+    On the ordinary path, a **forward** is now worth what the forwarder's judgement is
+    worth: `trust_service.forward_fanout` resolves their Reviewer Trust band into a
+    recipient count that travels with the operation. Only a forward - an original post
+    reaches exactly what its author paid the admission price for.
     """
     post = await session.get(Post, post_id)
     if not post:
@@ -759,6 +774,35 @@ async def review_post(
         # queue and the screen have drifted apart, which is a real bug class.
         log.info("post.review_rejected", post_id=post_id, reason="not_in_queue")
         raise api_error(409, "not_in_queue")
+
+    if post.is_probe:
+        correct = await probes.answer(session, redis, user, post, review_in.kind)
+        token_balance = await service.earn_token(redis, str(user.id))
+        log.info(
+            "post.reviewed",
+            post_id=post_id,
+            channel_id=post.channel_id,
+            kind=review_in.kind,
+            token_balance=token_balance,
+            is_probe=True,
+        )
+        return PostReviewResult(
+            post_id=post_id,
+            kind=review_in.kind,
+            # The reader's own counters, unchanged and read back as they stand. A probe
+            # is not a review, and the profile tile must not claim otherwise.
+            reviewed_count=user.reviewed_count,
+            review_gate=settings.RELAY_REVIEW_GATE,
+            unlocked=is_review_gate_unlocked(user),
+            token_balance=token_balance,
+            # Zero rather than the row's real 0/1: a probe is minted for one reader and
+            # nobody else will ever see it, so "1 of 1" would be a true number that
+            # means nothing. The client shows the probe confirmation instead.
+            post_forwarded_count=0,
+            post_reviewed_count=0,
+            is_probe=True,
+            probe_correct=correct,
+        )
 
     session.add(PostReview(user_id=user.id, post_id=post_id, kind=review_in.kind))
     user.reviewed_count += 1
@@ -793,6 +837,13 @@ async def review_post(
     token_balance = await service.earn_token(redis, str(user.id))
 
     if review_in.kind == "forward":
+        # How far this particular forward travels, resolved once here rather than at
+        # delivery: the worker has no Postgres session and so no way to score anyone,
+        # and a reader's verdict should be worth what their judgement was worth when
+        # they made it rather than what it has drifted to by the time the post finds an
+        # audience. None when trust is disabled, which writes no field at all and leaves
+        # the operation byte-identical to a pre-trust one.
+        fanout = await trust_service.forward_fanout(session, redis, str(user.id))
         # The author travels with the post, not with whoever forwarded it — a forward
         # must still never land back on the person who wrote it. None once they have
         # deleted their account, which is the same as the pre-exclusions ops the
@@ -806,7 +857,19 @@ async def review_post(
             # what decides its audience however many hands it has passed through.
             post.language,
             author_id=str(post.author_id) if post.author_id else None,
+            fanout=fanout,
         )
+
+    # Roll for whether this reader's next post is a test. After the review has committed
+    # and after the forward has been enqueued, so nothing about the measurement can cost
+    # someone a review they already made - and wrapped, because a probe is worth a little
+    # confidence in a score and is never worth failing a request over.
+    try:
+        if await probes.should_mint(redis, str(user.id)):
+            await probes.mint_probe(session, redis, user)
+    except Exception:
+        log.exception("probe.mint_failed")
+
     log.info(
         "post.reviewed",
         post_id=post_id,

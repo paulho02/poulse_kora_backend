@@ -61,6 +61,7 @@ async def _add_to_stream(
     language: str,
     expires_at: float | None = None,
     author_id: str | None = None,
+    fanout: int | None = None,
 ) -> None:
     """Append a fan-out operation to the stream, and *only* that.
 
@@ -83,6 +84,18 @@ async def _add_to_stream(
     purpose: ops written before this existed (still on the stream, or parked in
     `ops:retry` across the deploy) simply carry no author and are fanned out as before,
     exactly like `expires_at` degrades.
+
+    `fanout` is how many recipients this particular operation is worth — the forwarder's
+    Reviewer Trust band, resolved once at forward time (see app/core/trust.py). It has to
+    travel here for the same reason the other two do: the worker never opens a Postgres
+    session, so it cannot look up whose forward this was, let alone score them. None
+    means "whatever FEED_FANOUT says", which is both the disabled-feature path and the
+    degradation path for ops minted before this field existed.
+
+    Resolving it once, at forward time, rather than when the op is finally delivered is
+    deliberate. A parked op keeps the fan-out it was minted with, so a reader's verdict
+    is worth what their judgement was worth *when they made it* - not what it has drifted
+    to over the ten days the post spent looking for an audience.
     """
     fields = {
         "post_id": str(post_id),
@@ -93,6 +106,8 @@ async def _add_to_stream(
         fields["expires_at"] = str(expires_at)
     if author_id is not None:
         fields["author_id"] = author_id
+    if fanout is not None:
+        fields["fanout"] = str(fanout)
     await redis.xadd(keys.STREAM, fields)
 
 
@@ -102,6 +117,7 @@ async def enqueue_operation(
     channel_id: int,
     language: str,
     author_id: str | None = None,
+    fanout: int | None = None,
 ) -> None:
     """Mint a *new* fan-out operation for `post_id` (a publish or a forward).
 
@@ -109,8 +125,15 @@ async def enqueue_operation(
     per-route pricing possible: this is where work enters the system, and
     `retire_operation` is the only place it leaves. Ops re-added from `ops:retry` go
     through `_add_to_stream` instead, which skips the count.
+
+    `fanout` narrows or widens this one operation's reach (see `_add_to_stream`). Only
+    the *forward* path passes it: an original post's reach is what its author paid the
+    admission price for, and discounting or inflating that would be creator trust, a
+    different feature with a different economy.
     """
-    await _add_to_stream(redis, post_id, channel_id, language, author_id=author_id)
+    await _add_to_stream(
+        redis, post_id, channel_id, language, author_id=author_id, fanout=fanout
+    )
     await redis.hincrby(keys.OPS_OUTSTANDING, keys.route(channel_id, language), 1)
 
 
@@ -504,6 +527,7 @@ async def schedule_retry(
     delay: float | None = None,
     expires_at: float | None = None,
     author_id: str | None = None,
+    fanout: int | None = None,
 ) -> None:
     """Park an undeliverable operation in `ops:retry`, due after `delay` seconds
     (defaults to `FEED_RETRY_INTERVAL_SECONDS`).
@@ -518,9 +542,9 @@ async def schedule_retry(
     retried again. It is set once, on the first park (`now + FEED_RETRY_MAX_AGE_SECONDS`),
     and thereafter passed back in by the caller so repeated parking cannot extend it.
 
-    `author_id` and `language` ride along the same way, so a parked op still knows both
-    where to route and whose author to skip when it is eventually re-added to the
-    stream.
+    `author_id`, `language` and `fanout` ride along the same way, so a parked op still
+    knows where to route, whose author to skip, and how many recipients it is worth when
+    it is eventually re-added to the stream.
     """
     if delay is None:
         delay = settings.FEED_RETRY_INTERVAL_SECONDS
@@ -534,6 +558,7 @@ async def schedule_retry(
             "language": language,
             "expires_at": expires_at,
             "author_id": author_id,
+            "fanout": fanout,
         }
     )
     member = f"{uuid4().hex}:{payload}"
@@ -595,6 +620,9 @@ async def reschedule_due_retries(redis: Redis, now: float | None = None) -> int:
             language,
             expires_at,
             op.get("author_id"),
+            # Absent on ops parked before Reviewer Trust existed, which then fan out at
+            # FEED_FANOUT — the reach they were minted under.
+            op.get("fanout"),
         )
         await redis.zrem(keys.OPS_RETRY, member)
         rescheduled += 1
@@ -1056,6 +1084,11 @@ async def backfill_queue(
         # included: those posts route through the whole channel, so every subscriber
         # is in their audience.
         Post.language.in_([*languages, UNSPECIFIED]),
+        # Test posts are minted for one named reader and placed straight into their
+        # queue (see app/core/probes.py); they are never anyone else's to receive.
+        # Without this a rebuild would hand strangers a probe that was measuring
+        # somebody else, and score them on it.
+        Post.is_probe.is_(False),
     ]
     if settings.FEED_EXCLUDE_OWN_POSTS:
         # The fan-out path skips the author via the stream entry, which this path has
@@ -1160,7 +1193,9 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
     - `tokens:*` seeded from `FEED_STARTING_TOKENS + reviewed_count` (a proxy — actual
       spends are not tracked in PG, and reviewed_count is itself a proxy for earned
       tokens, but the starting grant *is* durable policy, not something to lose in
-      a rebuild).
+      a rebuild). Tokens earned by answering test posts are not in that proxy either,
+      since a probe deliberately moves no counter; next to the spends this already
+      discards, that is a rounding error and not worth a second query.
     - `seen:*` from `post_reviews`, so the re-delivery guard survives a rebuild.
     - Each subscriber's queue is backfilled with recent posts from their subscribed
       channels, so users who subscribed *before* Redis (empty queues) get content
