@@ -1,0 +1,12 @@
+{
+  "workspaces": [
+    {
+      "name": "poulse_kora_backend",
+      "path": "."
+    },
+    {
+      "name": "poulse_kora_app",
+      "path": "../poulse_kora_app"
+    }
+  ]
+}
