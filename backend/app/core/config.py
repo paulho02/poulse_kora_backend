@@ -448,6 +448,29 @@ class Settings(BaseSettings):
     PASSWORD_CHANGE_RATE_LIMIT: int = 5
     PASSWORD_CHANGE_RATE_WINDOW_SECONDS: float = 300.0
 
+    # --- account data export (GDPR Art. 15 / Art. 20) ---
+    # `GET /users/me/export` reads every table this account touches and streams
+    # every object it uploaded back out of the bucket, so one call can be the
+    # most expensive request this service serves. Its own budget for that reason
+    # alone - it has nothing to do with the interaction economy, and sharing one
+    # would let a download exhaust somebody's ability to post.
+    #
+    # The window is a day and the limit is small, but not one: a download that
+    # failed half way is the *normal* reason to ask again, and answering that
+    # with "come back tomorrow" would be an obstacle to a right rather than
+    # protection of a resource. Art. 12(5) permits refusing manifestly excessive
+    # repetition; three a day is nowhere near that line. Set the limit to 0 to
+    # disable, like every other budget here.
+    ACCOUNT_EXPORT_RATE_LIMIT: int = 3
+    ACCOUNT_EXPORT_RATE_WINDOW_SECONDS: float = 24 * 60 * 60
+
+    # Where a data-subject request goes when the automated export is not enough -
+    # printed in the export's README, and the address named in the privacy
+    # policy. A setting rather than a literal because the export is the one place
+    # the backend states it, and a project that changes its support address must
+    # not have to change code to stop misdirecting legal requests.
+    SUPPORT_EMAIL: str = "support@poulse.com"
+
     # --- email verification ---
     # Off: `is_verified` is never checked (see app.deps.users.CurrentVerifiedUser) and
     # no code is ever sent on registration - an unverified account works exactly

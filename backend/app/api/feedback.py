@@ -8,7 +8,12 @@ from app.core.config import settings
 from app.core.errors import api_error
 from app.core.logger import get_logger
 from app.core.media_validation import ProcessedMedia, process_feedback_upload
-from app.core.storage import StorageError, feedback_media_key, storage
+from app.core.storage import (
+    MEDIA_CACHE_CONTROL,
+    StorageError,
+    feedback_media_key,
+    storage,
+)
 from app.deps.db import CurrentAsyncSession
 from app.deps.locale import CurrentLocale
 from app.deps.rate_limit import limit_feedback
@@ -19,11 +24,6 @@ from app.schemas.feedback import FeedbackCreate, FeedbackCreateResult, FeedbackR
 log = get_logger(__name__)
 
 router = APIRouter(prefix="/feedback")
-
-# Same reasoning as post media: an object key is a fresh UUID per upload and
-# nothing ever rewrites one, so a cached copy can never go stale. `private`
-# because the presigned URL *is* the capability.
-_MEDIA_CACHE_CONTROL = "private, max-age=86400, immutable"
 
 _MIN_RATING = 1
 _MAX_RATING = 5
@@ -68,7 +68,7 @@ async def _store_media(
                 key,
                 item.data,
                 content_type=item.content_type,
-                cache_control=_MEDIA_CACHE_CONTROL,
+                cache_control=MEDIA_CACHE_CONTROL,
             )
             written.append(key)
 
@@ -79,7 +79,7 @@ async def _store_media(
                     poster_key,
                     item.poster,
                     content_type=item.poster_content_type,
-                    cache_control=_MEDIA_CACHE_CONTROL,
+                    cache_control=MEDIA_CACHE_CONTROL,
                 )
                 written.append(poster_key)
             keys.append((key, poster_key))

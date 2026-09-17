@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import email_verification as ev
 from app.core.config import settings
+from app.core.storage import MEDIA_CACHE_CONTROL
 from app.deps import users as users_module
 from app.feed import service
 from app.models.user import User
@@ -417,6 +418,30 @@ class TestProfilePicture:
         # bucket serves - derived here, never the client's claim.
         assert stored.format == "JPEG"
         assert fetched.headers["content-type"] == "image/jpeg"
+
+    async def test_upload_sets_the_shared_cache_control(
+        self, client: AsyncClient, media_client: AsyncClient, create_user
+    ):
+        """A profile picture is cached by the client exactly like post media.
+
+        It was the one upload path that never passed `cache_control`, while
+        app/api/posts.py and app/api/feedback.py each carried their own copy of
+        the same constant - so avatars alone were re-fetched every time their
+        presigned URL rolled over (`MEDIA_URL_REFRESH_SECONDS`), which the
+        Flutter client's `network_media_image.dart` documents as the thing this
+        header exists to prevent. Asserted on the *served* response rather than
+        on the call, because what matters is what the bucket echoes back.
+        """
+        user = await create_user()
+        resp = await client.put(
+            settings.API_PATH + "/users/me/profile-picture",
+            files={"file": ("avatar.png", make_test_png(), "image/png")},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+
+        fetched = await media_client.get(resp.json()["profile_picture_url"])
+        assert fetched.headers["cache-control"] == MEDIA_CACHE_CONTROL
 
     async def test_replacing_a_picture_changes_the_url(
         self, client: AsyncClient, media_client: AsyncClient, create_user

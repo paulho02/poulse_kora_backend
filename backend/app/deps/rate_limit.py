@@ -58,6 +58,12 @@ PASSWORD_CHANGE_SCOPE = "change_password"
 # whose identity may be a client IP rather than a user id. See `limit_feedback`.
 FEEDBACK_SCOPE = "feedback"
 
+# The account data export. Its own budget because what it protects is bandwidth
+# and bucket reads rather than the feed economy: a download must not be able to
+# spend somebody's ability to post, and posting must not be able to spend their
+# ability to exercise a right.
+ACCOUNT_EXPORT_SCOPE = "account_export"
+
 
 async def limit_interactions(user: CurrentVerifiedUser, redis: CurrentRedis) -> None:
     """Spend one interaction slot, or raise 429 with the wait in seconds.
@@ -193,6 +199,45 @@ async def limit_feedback(
         retry_after=retry_after,
         limit=settings.FEEDBACK_RATE_LIMIT,
         window_seconds=settings.FEEDBACK_RATE_WINDOW_SECONDS,
+    )
+    exc.headers = {"Retry-After": str(retry_after)}
+    raise exc
+
+
+async def limit_account_export(user: CurrentUser, redis: CurrentRedis) -> None:
+    """Spend one export slot, or raise 429 with the wait in seconds.
+
+    `CurrentUser`, not `CurrentVerifiedUser`, for the same reason `DELETE
+    /users/me` uses it: the right of access does not depend on having got round
+    to clicking a link in an email. Superusers are exempt, matching every other
+    limiter here. Setting `ACCOUNT_EXPORT_RATE_LIMIT` to 0 disables it.
+    """
+    if settings.ACCOUNT_EXPORT_RATE_LIMIT <= 0 or user.is_superuser:
+        return
+
+    retry_ms = await consume(
+        redis,
+        ACCOUNT_EXPORT_SCOPE,
+        str(user.id),
+        settings.ACCOUNT_EXPORT_RATE_LIMIT,
+        settings.ACCOUNT_EXPORT_RATE_WINDOW_SECONDS,
+    )
+    if retry_ms <= 0:
+        return
+
+    retry_after = max(1, math.ceil(retry_ms / 1000))
+    _log_rejection(
+        ACCOUNT_EXPORT_SCOPE,
+        str(user.id),
+        retry_after,
+        settings.ACCOUNT_EXPORT_RATE_LIMIT,
+    )
+    exc = api_error(
+        429,
+        "rate_limited",
+        retry_after=retry_after,
+        limit=settings.ACCOUNT_EXPORT_RATE_LIMIT,
+        window_seconds=settings.ACCOUNT_EXPORT_RATE_WINDOW_SECONDS,
     )
     exc.headers = {"Retry-After": str(retry_after)}
     raise exc

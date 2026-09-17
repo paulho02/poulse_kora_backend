@@ -1,16 +1,22 @@
 from fastapi import Depends, File, UploadFile, status
 from fastapi.routing import APIRouter
 from sqlalchemy import func, select
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
-from app.core import languages
+from app.core import account_export, languages
 from app.core.account_deletion import delete_account
 from app.core.errors import api_error
 from app.core.logger import get_logger
 from app.core.media_validation import process_profile_picture
-from app.core.storage import StorageError, profile_picture_key, storage
+from app.core.storage import (
+    MEDIA_CACHE_CONTROL,
+    StorageError,
+    profile_picture_key,
+    storage,
+)
 from app.deps.db import CurrentAsyncSession
-from app.deps.rate_limit import limit_password_change
+from app.deps.locale import CurrentLocale
+from app.deps.rate_limit import limit_account_export, limit_password_change
 from app.deps.redis import CurrentRedis
 from app.deps.users import CurrentSuperuser, CurrentUser, UserManager, get_user_manager
 from app.feed import service
@@ -66,7 +72,19 @@ async def upload_profile_picture(
     previous_key = user.profile_picture_key
     key = profile_picture_key(user.id, content_type)
     try:
-        await storage.put_object(key, data, content_type=content_type)
+        await storage.put_object(
+            key,
+            data,
+            content_type=content_type,
+            # The same header every other upload path sets, and the reason this
+            # one is spelled out rather than left to a default: it was the one
+            # path that omitted it, so a profile picture was re-downloaded every
+            # time its presigned URL rolled over (~15 minutes) while post media
+            # was cached for a day. See MEDIA_CACHE_CONTROL for why it is safe
+            # to be this aggressive - a key is a fresh UUID per upload and is
+            # never rewritten, so a cached copy cannot go stale.
+            cache_control=MEDIA_CACHE_CONTROL,
+        )
     except StorageError:
         log.exception("user.profile_picture_upload_failed", bytes=len(data))
         raise api_error(503, "media_storage_unavailable") from None
@@ -170,6 +188,69 @@ async def set_content_languages(
         changed=changed,
     )
     return user
+
+
+@router.get(
+    "/users/me/export",
+    dependencies=[Depends(limit_account_export)],
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "content": {"application/zip": {}},
+            "description": (
+                "A ZIP archive: README.txt, data.json and every file this "
+                "account uploaded."
+            ),
+        }
+    },
+)
+async def export_own_data(
+    session: CurrentAsyncSession,
+    user: CurrentUser,
+    redis: CurrentRedis,
+    locale: CurrentLocale,
+):
+    """Download everything this service holds about the current account.
+
+    The automated answer to GDPR Art. 15 (access) and Art. 20 (portability),
+    replacing the documented-manual-process-within-a-month that would otherwise
+    be the minimum. What goes in the archive, and why it is an archive rather
+    than a JSON body full of media links, is app/core/account_export.py's
+    business; this route is the gate in front of it.
+
+    **Everything is read here, in the handler, and nothing during the stream.**
+    FastAPI closes a `yield` dependency when the handler returns - so by the time
+    a `StreamingResponse` body is being consumed, `session` is closed and its
+    connection is back in the pool. `collect` therefore returns plain Python and
+    the generator touches only the storage client, which lives as long as the
+    process. Doing it the other way round works in a test and fails in
+    production, which is the worst available failure mode.
+
+    **No password, unlike `DELETE /users/me`.** The two are not symmetrical: the
+    deletion route asks for one because a stolen token would otherwise be enough
+    to destroy an account, and there is nothing this one can destroy. A stolen
+    token can already read every one of these records through the ordinary API,
+    one route at a time - what this adds is convenience, not reach - and putting
+    a password prompt in front of a legal right would refuse it outright to a
+    Google account, which has no password to give.
+
+    `CurrentUser`, not `CurrentVerifiedUser`, for the same reason the deletion
+    route uses it: the right of access does not wait on an email link.
+    """
+    export = await account_export.collect(session, redis, user, locale=locale)
+    return StreamingResponse(
+        account_export.stream_zip(export),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{export.filename}"',
+            # No `Content-Length`: the archive is built as it is sent, so its
+            # size is not known until it is finished. And `no-store`, because
+            # this is the one response that concentrates an entire account's
+            # personal data into a single file - it has no business sitting in
+            # an intermediary's cache or a browser's disk cache afterwards.
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.delete(

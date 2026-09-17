@@ -148,6 +148,19 @@ EMAIL_PROVIDER=smtp
 # LETTERMINT_API_BASE_URL=
 # LETTERMINT_TIMEOUT_SECONDS=30
 
+# --- data-subject requests (GDPR Art. 15 / Art. 20) ---
+# The address printed in the export's README, and the one the privacy policy
+# should name: where a request goes that the automated download cannot answer.
+# Defaults to support@poulse.com, so this only needs setting if that changes.
+# SUPPORT_EMAIL=support@poulse.com
+#
+# `GET /users/me/export` streams every object the account uploaded back out of
+# the bucket, so it has its own rate-limit budget rather than sharing the
+# interaction one. Three a day is well clear of "manifestly excessive"; set the
+# limit to 0 to disable the budget entirely.
+# ACCOUNT_EXPORT_RATE_LIMIT=3
+# ACCOUNT_EXPORT_RATE_WINDOW_SECONDS=86400
+
 # --- Google sign-in ---
 # Defaults to false; leave unset until the Google Cloud OAuth clients exist.
 # GOOGLE_CLIENT_IDS lists the `aud` values accepted on incoming ID tokens. The

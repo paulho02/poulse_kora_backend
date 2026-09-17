@@ -13,7 +13,12 @@ from app.core.errors import api_error
 from app.core.logger import get_logger
 from app.core.media_validation import ProcessedMedia, process_upload
 from app.core.relay_rules import is_review_gate_unlocked
-from app.core.storage import StorageError, post_media_key, storage
+from app.core.storage import (
+    MEDIA_CACHE_CONTROL,
+    StorageError,
+    post_media_key,
+    storage,
+)
 from app.deps.db import CurrentAsyncSession
 from app.deps.rate_limit import limit_interactions
 from app.deps.redis import CurrentRedis
@@ -47,12 +52,6 @@ router = APIRouter(prefix="/posts")
 
 _blocks_adapter = TypeAdapter(list[PostBlockIn])
 
-# Stored on every media object and echoed back by the bucket on a presigned GET.
-# Safe to make aggressive: an object key is a fresh UUID per upload and nothing
-# ever rewrites one, so a cached response can never go stale - the object is
-# either the one the URL names or gone. `private` because the URL is a
-# capability, and shared caches have no business keeping a copy of it.
-_MEDIA_CACHE_CONTROL = "private, max-age=86400, immutable"
 
 
 async def post_create_form(
@@ -160,7 +159,7 @@ async def _store_media(
                 key,
                 item.data,
                 content_type=item.content_type,
-                cache_control=_MEDIA_CACHE_CONTROL,
+                cache_control=MEDIA_CACHE_CONTROL,
             )
             written.append(key)
 
@@ -171,7 +170,7 @@ async def _store_media(
                     poster_key,
                     item.poster,
                     content_type=item.poster_content_type,
-                    cache_control=_MEDIA_CACHE_CONTROL,
+                    cache_control=MEDIA_CACHE_CONTROL,
                 )
                 written.append(poster_key)
             keys[index] = (key, poster_key)

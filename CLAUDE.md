@@ -298,6 +298,67 @@ after cloning).
   deliberately outside the interaction budget — a whole queue of ghosts is up to
   `FEED_QUEUE_MAX_SLOTS` of them, and `INTERACTION_RATE_LIMIT` would throttle a reader for a
   minute over someone else's account deletion.
+- **Data export** (`GET /users/me/export`, `app/core/account_export.py`): the automated
+  answer to GDPR Art. 15 (access) and Art. 20 (portability) — a streamed ZIP holding
+  `README.txt`, `data.json` (every row this service holds about the account) and every
+  object it ever uploaded. Five things are load-bearing:
+  - **Files, not links.** The obvious design — JSON with presigned media URLs, valid for
+    the month the law gives you — cannot be built honestly here. SigV4 caps
+    `X-Amz-Expires` at **seven days**, so a month-long link would 403 long before its
+    stated deadline; a presigned URL is also its own authorization, which is tolerable
+    for a feed image already shown to strangers and wrong for a file whose whole purpose
+    is to concentrate one person's data; and Art. 20's "structured, commonly used,
+    machine-readable format" wants the data, not a promise that it still exists
+    somewhere else — including in the case where the next thing the user does is
+    `DELETE /users/me`.
+  - **Everything is read in the route, nothing during the stream.** FastAPI closes a
+    `yield` dependency when the handler returns, which is *before* a `StreamingResponse`
+    body is consumed — so a generator that lazily queried `session` passes a test that
+    awaits the whole body inside the request and fails against a real server.
+    `account_export.collect` therefore returns plain Python and `stream_zip` touches only
+    `app.core.storage`, whose httpx client is process-lived.
+  - **The archive is built into a write-only sink** (`_Sink`), which is what makes
+    `zipfile` emit data descriptors instead of seeking back to patch local headers — the
+    only mode in which a ZIP can be streamed. Peak memory is one media object plus the
+    JSON, never the archive; media is `ZIP_STORED` because JPEG and H.264 do not deflate.
+  - **A bucket object that cannot be read does not fail the export.** The 200 went out
+    before the first byte was fetched, so there is no status left to change; the misses
+    are listed in `media/UNAVAILABLE.txt` inside the archive instead.
+  - **The JSON is an allow-list, and it lives in `app/schemas/account_export.py`.**
+    Art. 15 is a right to the personal data plus context, Art. 20 is narrower still,
+    and Art. 5(1)(c) points the other way — a file that concentrates an account's whole
+    life into one download that ends up in a Drive folder should carry nothing that
+    means nothing to the person. So a field earns its place by *telling the reader
+    something about themselves*, and five categories are left out and named in
+    `export.omitted` as stable codes (the localized README spells each out in words):
+    `credentials` (password hash, OAuth tokens — a copy of those in a portable file is
+    a way into the account rather than information about it), `internal_flags`
+    (`is_active`/`is_verified`/`is_superuser`, `settings_revision`, every `updated`
+    stamp, `Feedback.status`, and the denormalized review counters, which are the
+    `reviews` list counted), `transient_queue_state` (a Redis list that changes by the
+    minute and that the app is already showing them), `post_vote_counts` (other
+    people's decisions in aggregate, and absent from every read route — see `PostRead`
+    above), and `other_peoples_posts`. Two smaller rules follow: **don't describe a
+    file you are shipping** (a media entry carries the archive path and `image`/`video`,
+    not width, height, duration, byte size or content type — all of which the file in
+    the same ZIP answers exactly), and **prefer a name to an internal id** (`channel_id`,
+    the Google `sub` and Mollie's customer/subscription ids are all gone; post ids stay,
+    because a post id is how someone can point at one of their posts). Explicit pydantic
+    models rather than dicts built next to the queries is the whole mechanism: a new
+    column on `User` reaches the export only when somebody adds a field there, and
+    `tests/api/test_account_export.py::TestExportOmissions` fails if one arrives anyway.
+    Serialized with `exclude_none`, since a null is never an answer here. Note what
+    *cannot* be included either way: an anonymous `Feedback` row stores no `user_id` at
+    all, so there is nothing to match it by — the same property the anonymous option
+    exists for.
+  Unlike `DELETE /users/me` this asks for **no password**: a stolen token can already
+  read every one of these records through the ordinary API one route at a time, and a
+  password prompt would refuse a legal right outright to a Google account. Its own
+  rate-limit budget (`ACCOUNT_EXPORT_RATE_LIMIT`, 3 per 24h) rather than the interaction
+  one, so a download cannot spend somebody's ability to post; the client gives 429 its
+  own sentence, since the shared "try again in N seconds" copy is absurd at N = most of a
+  day. `SUPPORT_EMAIL` is the address the README names for anything the automated export
+  cannot answer.
 - **Google sign-in** (`backend/app/api/google_auth.py`): an **ID-token** flow, not fastapi-users'
   `get_oauth_router` — that is a browser redirect flow the mobile app has no deep links for, and
   its `associate_by_email` linking is silent, leaving nowhere for the confirmation step. The client

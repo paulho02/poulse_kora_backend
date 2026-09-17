@@ -79,6 +79,24 @@ PROFILE_PICTURE_PREFIX = "profile-pictures"
 POST_MEDIA_PREFIX = "post-media"
 FEEDBACK_MEDIA_PREFIX = "feedback-media"
 
+# Stored on every object we upload and echoed back by the bucket on a presigned
+# GET. Safe to make this aggressive: every key here is a fresh UUID per upload
+# and nothing ever rewrites one, so a cached response can never go stale - the
+# object is either the one the URL names or gone. `private` because the
+# presigned URL *is* the capability, and a shared cache has no business keeping
+# a copy of it.
+#
+# It lives here, next to the key builders, rather than as a constant in each API
+# module. It was declared twice - identically, with the same paragraph of
+# reasoning - in app/api/posts.py and app/api/feedback.py, and the third upload
+# path (profile pictures, app/api/users.py) simply never passed one. That is the
+# failure mode a duplicated constant has: not a disagreement, an omission. The
+# Flutter client documents relying on this header being present on *every*
+# object (see `core/media/presentation/network_media_image.dart` there), so an
+# upload path that forgets it silently makes those images re-download on a
+# ~15-minute cycle as the presigned URL rolls over.
+MEDIA_CACHE_CONTROL = "private, max-age=86400, immutable"
+
 
 class StorageError(RuntimeError):
     """The bucket refused or could not be reached. Always a 5xx as far as a client
