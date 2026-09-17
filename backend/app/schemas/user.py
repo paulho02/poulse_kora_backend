@@ -4,6 +4,8 @@ from fastapi_users import schemas
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 
+from app.core.config import settings
+
 
 class UserRead(schemas.BaseUser[uuid.UUID]):
     username: str | None
@@ -48,7 +50,7 @@ class ContentLanguagesUpdate(BaseModel):
 
 
 class UserCreate(schemas.BaseUserCreate):
-    username: str
+    username: str = Field(min_length=1, max_length=settings.USERNAME_MAX_LENGTH)
     # BaseUserCreate exposes these as client-settable, and the register router already
     # discards them (it calls user_manager.create(..., safe=True)) so they can't be set
     # in practice. SkipJsonSchema removes them from the OpenAPI schema too, so a
@@ -58,8 +60,10 @@ class UserCreate(schemas.BaseUserCreate):
 
 
 class UserUpdate(schemas.BaseUserUpdate):
-    username: str | None = None
-    bio: str | None = None
+    username: str | None = Field(
+        default=None, min_length=1, max_length=settings.USERNAME_MAX_LENGTH
+    )
+    bio: str | None = Field(default=None, max_length=settings.BIO_MAX_LENGTH)
     dark_mode: bool | None = None
     onboarding_completed: bool | None = None
 

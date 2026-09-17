@@ -15,7 +15,7 @@ from app.core.config import Settings
 
 def _base_kwargs(**overrides):
     kwargs = {
-        "SECRET_KEY": "test-secret",
+        "SECRET_KEY": "test-secret-" + "x" * 32,
         "DATABASE_URL": "postgresql://user:pass@host/db",
         "REDIS_URL": "redis://host:6379/0",
     }
@@ -108,3 +108,29 @@ class TestSeenTtl:
         # running on a value it believes it set.
         with pytest.raises(ValidationError, match="FEED_SEEN_TTL_SECONDS"):
             Settings(**self._kwargs(FEED_SEEN_TTL_SECONDS=7 * 24 * 60 * 60))
+
+
+class TestSecretKeyValidator:
+    """The template ships `CHANGE_ME`; the app must not sign tokens with it."""
+
+    def test_placeholder_is_refused(self):
+        with pytest.raises(ValidationError, match="SECRET_KEY"):
+            Settings(**_base_kwargs(SECRET_KEY="CHANGE_ME"))
+
+    def test_placeholder_is_refused_whatever_the_case_or_padding(self):
+        with pytest.raises(ValidationError, match="SECRET_KEY"):
+            Settings(**_base_kwargs(SECRET_KEY="  changeme  "))
+
+    def test_short_key_is_refused(self):
+        with pytest.raises(ValidationError, match="at least 32"):
+            Settings(**_base_kwargs(SECRET_KEY="correct-horse-battery"))
+
+    def test_error_does_not_quote_other_settings(self):
+        """A field validator, so the crash names only this field - not the whole
+        settings dict with every other secret in it."""
+        with pytest.raises(ValidationError) as exc_info:
+            Settings(**_base_kwargs(SECRET_KEY="CHANGE_ME"))
+        assert "postgresql://user:pass@host/db" not in str(exc_info.value)
+
+    def test_real_key_is_accepted(self):
+        Settings(**_base_kwargs(SECRET_KEY="f" * 64))

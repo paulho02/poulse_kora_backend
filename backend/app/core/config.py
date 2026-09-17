@@ -238,6 +238,47 @@ class Settings(BaseSettings):
     INTERACTION_RATE_LIMIT: int = 13
     INTERACTION_RATE_WINDOW_SECONDS: float = 10.0
 
+    # --- authentication rate limiting ---
+    # Login is the one route where an attacker's input is checked against a secret
+    # they do not hold, and every attempt costs an argon2 verify (64 MiB, on the
+    # event loop) whether the account exists or not - so an unthrottled login is
+    # both a brute-force path and the cheapest DoS this process offers. Two budgets
+    # are spent per attempt (see app/deps/rate_limit.py: limit_login): one keyed on
+    # the caller's address, one on the lowercased email being tried. The address
+    # budget bounds the CPU any one host can burn; the account budget bounds the
+    # guesses one account can receive from *everywhere*, which a per-IP limit alone
+    # cannot (a botnet gets a fresh allowance per host). Set either limit to 0 to
+    # disable that half.
+    LOGIN_RATE_LIMIT_PER_IP: int = 20
+    LOGIN_RATE_LIMIT_PER_ACCOUNT: int = 10
+    LOGIN_RATE_WINDOW_SECONDS: float = 300.0
+    # Registration hashes a password *and* sends a verification mail to an address
+    # the caller chose, so left open it is a mail cannon with our sending domain's
+    # reputation as the ammunition. Keyed on the caller's address only - there is no
+    # account yet. Set to 0 to disable.
+    REGISTER_RATE_LIMIT: int = 5
+    REGISTER_RATE_WINDOW_SECONDS: float = 3600.0
+    # Changing `email` re-sends a verification code to the *new* address on every
+    # write (see UserManager.on_after_update), which is the same mail cannon behind
+    # a login. Keyed on the account whose address is being changed, enforced in
+    # UserManager._update because fastapi-users' own router serves the PATCH. Set
+    # to 0 to disable.
+    EMAIL_CHANGE_RATE_LIMIT: int = 3
+    EMAIL_CHANGE_RATE_WINDOW_SECONDS: float = 3600.0
+
+    # --- request body size ---
+    # Enforced by app/core/body_limit.py *before* a body is read: Starlette spools
+    # multipart file parts to disk and FastAPI reads a JSON body whole, both before
+    # any dependency (auth, a rate limit) runs, so without this a signed-out caller
+    # can fill /tmp or RAM with one request. Two caps by content type, because a
+    # multipart body is the only way anything large legitimately arrives: the
+    # upload cap has to hold POST_MEDIA_MAX_TOTAL_BYTES / FEEDBACK_MEDIA_MAX_TOTAL_BYTES
+    # plus the blocks JSON and multipart framing, the other cap only ever has to
+    # hold a form or a JSON document. The caps bound what is *received*; the
+    # per-file limits below still decide what is *kept*.
+    MAX_REQUEST_BODY_BYTES: int = 64 * 1024
+    MAX_UPLOAD_BODY_BYTES: int = 64 * 1024 * 1024
+
     # --- reviewer trust ---
     # How far a *forward* travels is scaled by the forwarder's Reviewer Trust score
     # (see app/core/trust.py for the formula and app/core/probes.py for the test
@@ -778,11 +819,37 @@ class Settings(BaseSettings):
     # it is kept small - it is fetched by every feed card that has a video on it.
     POST_VIDEO_POSTER_MAX_DIMENSION_PX: int = 720
     POST_VIDEO_POSTER_QUALITY: int = 6  # ffmpeg -q:v, 2 (best) .. 31 (worst)
+    # ffmpeg/ffprobe are the heaviest thing this process runs (hundreds of MB of
+    # RSS per transcode), and a verified user may upload several clips per post
+    # several times a minute - so their concurrency is capped process-wide with a
+    # semaphore (app/core/media_validation.py) and each transcode is pinned to a
+    # few threads rather than every core. Uploads past the cap wait their turn
+    # rather than failing; the transcode timeout does not start until they run.
+    MEDIA_MAX_CONCURRENT_FFMPEG: int = 2
+    MEDIA_TRANSCODE_THREADS: int = 2
 
     # Sanity cap on total blocks per post (text + media combined, see PostBlock) -
     # guards against a pathological submission (thousands of tiny blocks), not a
     # real authoring limit.
     POST_BLOCKS_MAX_COUNT: int = 40
+    # Upper bound on the text of one block. A sanity cap like the one above, not an
+    # authoring limit - a post is meant to be read on a phone.
+    POST_BLOCK_TEXT_MAX_LENGTH: int = 10_000
+
+    # --- profile fields ---
+    # Bounds on free text a user writes about themselves. `username` is serialized
+    # into every recipient's feed for every non-anonymous post, so an unbounded
+    # one is a bandwidth problem for everyone else; derived usernames are shorter
+    # still (app/core/username.py: MAX_LENGTH).
+    USERNAME_MAX_LENGTH: int = 30
+    BIO_MAX_LENGTH: int = 500
+
+    # --- list routes ---
+    # The most rows any list route returns per page, whatever `limit` asks for.
+    # Clamped rather than refused, so a client asking for more simply pages. The
+    # self-serve lists (own posts, own reviews) presign every attachment of every
+    # row they return, which is what makes an unbounded page worth stopping.
+    LIST_MAX_PAGE_SIZE: int = 100
 
     # --- feedback ---
     # User-submitted feedback / bug reports (app/models/feedback.py). Attachments go
@@ -859,6 +926,35 @@ class Settings(BaseSettings):
         return v
 
     SECRET_KEY: str
+
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def require_real_secret_key(cls, v: str) -> str:
+        """Refuse to boot on a key that signs nothing worth trusting.
+
+        Every JWT is HS256 over this value, so whoever knows it mints a superuser
+        token. `env-template` ships it as `CHANGE_ME` so a copy of the template
+        is not a working secret, and this is what turns forgetting to change it
+        into a crash on deploy instead of an open door that looks exactly like a
+        healthy service.
+
+        A *field* validator, like `require_token_for_lettermint` and for the same
+        reason - a model validator's error would quote the whole settings dict,
+        this one quotes only the offending key, which by construction is one
+        nobody should be using. The error text names no value even so.
+        """
+        if len(v) < 32 or v.strip().lower() in _PLACEHOLDER_SECRETS:
+            raise ValueError(
+                "SECRET_KEY must be at least 32 characters and not a placeholder "
+                "(generate one with `openssl rand -hex 32`)"
+            )
+        return v
+
+
+#: Values a SECRET_KEY is refused for outright, whatever their length.
+_PLACEHOLDER_SECRETS = frozenset(
+    {"change_me", "changeme", "change-me", "secret", "secret_key", "secretkey"}
+)
 
 
 settings = Settings()

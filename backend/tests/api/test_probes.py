@@ -11,12 +11,14 @@ answering a probe pays, because the attention it cost was real and a reader who 
 to be measured more often should not end the month poorer for it.
 """
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
 from redis.asyncio import Redis
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import probes, trust_service
@@ -440,3 +442,42 @@ class TestProbesDoNotExpire:
             db, str(user.id), trust_service.window_start()
         )
         assert (answered, correct) == (1, 1)
+
+
+class TestProbeAuthorIdentity:
+    async def test_an_active_account_at_the_probe_address_is_never_the_author(
+        self, db: AsyncSession, create_user, monkeypatch
+    ):
+        """The author is looked up by email *and* `is_active = false`. An active
+        account at that address is somebody's (squatted before the row existed);
+        publishing every test post under their name would be the worst outcome, so
+        the lookup passes it by and the insert then fails on the unique email -
+        no probe rather than a hijacked one."""
+        squatter: User = await create_user()
+        monkeypatch.setattr(settings, "TRUST_PROBE_AUTHOR_EMAIL", squatter.email)
+        monkeypatch.setattr(
+            settings, "TRUST_PROBE_AUTHOR_USERNAME", f"p{squatter.id.hex[:12]}"
+        )
+
+        with pytest.raises(IntegrityError):
+            await probes._ensure_probe_author(db)
+        await db.rollback()
+
+        await db.refresh(squatter)
+        assert squatter.is_active
+        assert squatter.username != settings.TRUST_PROBE_AUTHOR_USERNAME
+
+    async def test_the_author_is_an_inactive_identity(
+        self, db: AsyncSession, monkeypatch
+    ):
+        suffix = uuid.uuid4().hex[:8]
+        monkeypatch.setattr(
+            settings, "TRUST_PROBE_AUTHOR_EMAIL", f"probes-{suffix}@poulse.example.com"
+        )
+        monkeypatch.setattr(settings, "TRUST_PROBE_AUTHOR_USERNAME", f"poulse{suffix}")
+        author = await probes._ensure_probe_author(db)
+        assert author.is_active is False
+        assert author.is_verified is True
+        # Idempotent: the second call finds the same row.
+        again = await probes._ensure_probe_author(db)
+        assert again.id == author.id

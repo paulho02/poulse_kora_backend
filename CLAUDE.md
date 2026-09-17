@@ -542,6 +542,18 @@ after cloning).
   EXIF is *applied* (`ImageOps.exif_transpose`) before it is stripped: a phone "portrait"
   photo is often a landscape sensor frame plus a rotate-90 tag, which would otherwise be
   stored sideways and measured against the wrong ratio.
+  Three hardening details that are easy to undo by accident: **`_strip_info` runs before every
+  image save**, because not passing `exif=`/`icc_profile=` is not the whole strip — Pillow's JPEG
+  encoder falls back to `im.info["comment"]` and the PNG encoder to `im.info["icc_profile"]`, and
+  `convert`/`exif_transpose`/`thumbnail` all copy `info` across. **ffmpeg is told the input
+  format** (`-f mov` before `-i`) instead of sniffing it, which removes every demuxer but the one
+  the allowed content types need. And **`-map_metadata:s:v -1 -map_metadata:s:a -1`** join the
+  global `-map_metadata -1`, because the global flag alone leaves per-stream tags
+  (`handler_name`) in place. Every ffmpeg/ffprobe child also runs under the `_FFMPEG_SLOTS`
+  semaphore (`MEDIA_MAX_CONCURRENT_FFMPEG`) with `-threads MEDIA_TRANSCODE_THREADS`, and
+  `_open_within_pixel_budget` refuses an image past `Image.MAX_IMAGE_PIXELS` from the header
+  alone — Pillow itself only warns there and refuses at twice it, and a global warnings filter
+  is process state that pytest (or any library) can reset without anyone noticing.
 - **Feedback** (`backend/app/api/feedback.py`, `app/models/feedback.py`): in-app feedback, bug
   reports and feature requests, with optional screenshots/screen recordings. Four things are
   load-bearing:
@@ -661,6 +673,13 @@ after cloning).
   `trust:*` keys are caches created on first use, so unlike `0003_content_languages` this
   needs no `rebuild_redis`. `TRUST_ENABLED=false` restores flat fan-out without disabling
   the display.
+  **The probe author is minted by migration `0005_probe_author`, not on first use**, so its
+  email and username exist before anyone could register them — on-demand creation left both
+  squattable until the first probe: the username taken meant no probe was ever minted
+  (silently), the email taken meant a real person's active account became the author of every
+  test post. `_ensure_probe_author` still creates on demand (the test schema is `create_all`)
+  but matches on `is_active = false` as well as the email, so a squatted *active* account is
+  never adopted; `UserManager._check_username_free` refuses the name case-insensitively.
   **There is deliberately no cleanup job for probe rows**, and adding one is a trap worth
   naming: the score reads `ProbeResponse.created` (when it was *answered*), while a probe
   post carries `Post.created` (when it was *minted*), and a probe sits in its reader's
@@ -676,7 +695,34 @@ after cloning).
   the limit to 0 disables it. Attach to a route with
   `dependencies=[Depends(limit_interactions)]` — it runs before the handler, so a throttled request
   spends nothing and mutates nothing. Rejections are `429 {"error": "rate_limited", "retry_after": n}`
-  plus a `Retry-After` header.
+  plus a `Retry-After` header. `core/rate_limit.enforce` is the one place the 429 is built, so
+  every budget logs and answers identically.
+  **The signed-out writers are budgeted too**, and on something other than a user id. `limit_login`
+  spends *two* budgets per attempt — one on the caller's address (`LOGIN_RATE_LIMIT_PER_IP`, bounds
+  the argon2 CPU one host can burn) and one on the account tried (`LOGIN_RATE_LIMIT_PER_ACCOUNT`,
+  bounds the guesses one password can receive from everywhere; keyed on a hash of the normalized
+  email so no address enters Redis or a log). `limit_register` is per address
+  (`REGISTER_RATE_LIMIT`), and an email change is budgeted per account inside `UserManager._update`
+  (`EMAIL_CHANGE_RATE_LIMIT`) — both because they send mail to an address the caller picked. The
+  first two are router-level dependencies on fastapi-users' routers in `factory.setup_routers`;
+  `limit_login` reads the email off the already-parsed form rather than declaring
+  `OAuth2PasswordRequestForm`, so `/logout` on the same router is not made to demand login fields.
+  **The address identity is `caller_address` in `request_logging.py`** — the same derivation the
+  log line uses (rightmost `X-Forwarded-For` behind Railway, socket peer otherwise) — because
+  keyed on the socket peer behind the edge every anonymous caller shared one budget, and keyed on
+  the *leftmost* forwarded entry the budget would be the caller's to reset.
+- **Request body limits** (`backend/app/core/body_limit.py`): nothing in uvicorn, Starlette or
+  FastAPI bounds a body, and FastAPI reads it (multipart spooled to disk, JSON whole) *before* any
+  dependency runs — so a signed-out request could fill `/tmp` or RAM ahead of auth and every rate
+  limit. `BodySizeLimitMiddleware` checks the declared `Content-Length` before entering the app and
+  counts bytes in `receive` for bodies that declare none or lie, against `MAX_UPLOAD_BODY_BYTES`
+  (multipart, must stay above the largest upload total plus framing) or `MAX_REQUEST_BODY_BYTES`
+  (everything else). Chosen by content type rather than a route list on purpose: multipart is the
+  only way anything large legitimately arrives, and a path list goes stale silently. 413
+  `request_too_large`.
+- **Startup refuses a placeholder `SECRET_KEY`** (`Settings.require_real_secret_key`: ≥ 32 chars
+  and not `CHANGE_ME`-like), since every JWT is HS256 over it. CI generates one after copying
+  `env-template`; a local `.env` needs a real value too (`openssl rand -hex 32`).
 - **List endpoints follow the React Admin data-provider convention**: `app/deps/request_params.py`
   parses react-admin-style `sort`/`range` query params into skip/limit/order, and responses set a
   `Content-Range` header (`{skip}-{end}/{total}`). This convention exists purely because of the

@@ -411,3 +411,32 @@ class TestMollieWebhook:
             settings.API_PATH + "/subscriptions/webhook/mollie", data={"id": payment_id}
         )
         assert resp.status_code == 200
+
+
+class TestWebhookInputValidation:
+    async def test_malformed_payment_id_never_reaches_mollie(
+        self, client: AsyncClient, monkeypatch
+    ):
+        """The id goes into a URL path on Mollie's API, so anything that is not
+        the shape of a payment id (`../customers/...`) is dropped before that -
+        with the same 200, since a non-2xx only makes Mollie retry."""
+        called: list[str] = []
+
+        async def fake_get_payment(payment_id: str):
+            called.append(payment_id)
+            return {}
+
+        monkeypatch.setattr(mollie, "get_payment", fake_get_payment)
+        for bad in ("../customers/cst_abc", "tr_abc/../../x", "", "cst_abc", "tr_"):
+            resp = await client.post(
+                settings.API_PATH + "/subscriptions/webhook/mollie", data={"id": bad}
+            )
+            assert resp.status_code == 200, (bad, resp.text)
+        assert called == []
+
+        resp = await client.post(
+            settings.API_PATH + "/subscriptions/webhook/mollie",
+            data={"id": "tr_WDqYK6vllg"},
+        )
+        assert resp.status_code == 200
+        assert called == ["tr_WDqYK6vllg"]

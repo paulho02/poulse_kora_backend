@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Form
@@ -186,6 +187,10 @@ async def cancel_supporter_subscription(
     )
 
 
+#: Mollie payment ids are `tr_` plus a short alphanumeric token.
+_MOLLIE_PAYMENT_ID = re.compile(r"tr_[A-Za-z0-9]{1,64}")
+
+
 @router.post("/webhook/mollie", include_in_schema=False)
 async def mollie_webhook(session: CurrentAsyncSession, id: str = Form(...)):
     """Mollie calls this for every payment belonging to a subscription (both the
@@ -202,7 +207,16 @@ async def mollie_webhook(session: CurrentAsyncSession, id: str = Form(...)):
 
     Always answers 200 (even "we don't recognize this payment") — a non-2xx makes
     Mollie retry the same webhook indefinitely, which would never help here.
+
+    The id is checked against the shape of a Mollie payment id before it is put
+    into a URL path: `get_payment` builds `/payments/{id}`, so anything else
+    (`../customers/...`) would steer the live API key at a different endpoint.
+    Answered with the same 200, and logged, since a malformed id is either a bug
+    on Mollie's side or someone probing.
     """
+    if not _MOLLIE_PAYMENT_ID.fullmatch(id):
+        log.warning("subscription.webhook_malformed_id")
+        return {}
     payment = await mollie.get_payment(id)
     customer_id = payment.get("customerId")
     sub = await session.scalar(

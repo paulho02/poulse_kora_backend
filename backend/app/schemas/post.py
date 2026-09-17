@@ -2,7 +2,9 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.config import settings
 
 
 class PostBlockIn(BaseModel):
@@ -11,7 +13,9 @@ class PostBlockIn(BaseModel):
     create_post in app/api/posts.py for how `file_index` is validated/consumed."""
 
     type: Literal["text", "media"]
-    text: str | None = None
+    text: str | None = Field(
+        default=None, max_length=settings.POST_BLOCK_TEXT_MAX_LENGTH
+    )
     file_index: int | None = None  # index into the multipart `files` list
     # Videos only, and the single thing about a file the client gets to decide:
     # which of the two fixed shapes to center-crop the clip to

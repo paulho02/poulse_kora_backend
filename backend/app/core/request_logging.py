@@ -69,7 +69,7 @@ def _header(scope: Scope, name: bytes) -> str | None:
     return None
 
 
-def _client_ip(scope: Scope, behind_proxy: bool) -> str | None:
+def caller_address(scope: Scope, behind_proxy: bool) -> str | None:
     """The caller's address, as far as we are willing to believe it.
 
     Two deployments, two answers, and *not* a setting. Behind Railway's edge the
@@ -88,18 +88,26 @@ def _client_ip(scope: Scope, behind_proxy: bool) -> str | None:
     correct for a proxy that overwrites the header instead of appending, so it
     holds either way.
 
-    Logs only. The rate limiter deliberately keys on the socket address even
-    here (see app/deps/rate_limit.py): a forged address costs a wrong label in a
-    log, but would be an outright opt-out of a limit.
+    Shared with the signed-out rate limiters (see app/deps/rate_limit.py), which
+    need the same answer for the opposite reason: keyed on the socket peer behind
+    the proxy, every anonymous caller on the deployment would share one budget,
+    and keyed on the *leftmost* forwarded entry the budget would be the caller's
+    to reset. One derivation, so the two cannot disagree.
     """
-    if not settings.LOG_CLIENT_IP:
-        return None
     if behind_proxy:
         forwarded = _header(scope, b"x-forwarded-for")
         if forwarded:
             return forwarded.rsplit(",", 1)[-1].strip()[:45]
     client = scope.get("client")
     return client[0] if client else None
+
+
+def _client_ip(scope: Scope, behind_proxy: bool) -> str | None:
+    """`caller_address`, gated by `LOG_CLIENT_IP` - an address is personal data,
+    so the log line carries it only where the deployment has opted in."""
+    if not settings.LOG_CLIENT_IP:
+        return None
+    return caller_address(scope, behind_proxy)
 
 
 def _route_path(scope: Scope) -> str | None:

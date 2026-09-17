@@ -105,9 +105,21 @@ async def _ensure_probe_author(session: AsyncSession) -> User:
     rather than a login: `authenticate` refuses an inactive user, and nobody holds the
     secret in any case. Verified, so nothing in the registration machinery ever tries
     to mail the reserved address it uses.
+
+    Normally already there: alembic 0005 mints it, so that on a fresh deployment the
+    identity exists before any user could register it. The lookup insists on
+    `is_active = false` for the same reason - an *active* account at this address is
+    somebody's, not ours, and publishing test posts under it would hand that person
+    every probe in the deployment. In that case the insert below fails on the unique
+    email, `review_post` logs `probe.mint_failed`, and no probe is minted, which is
+    the safe failure. The tests' `create_all` schema never runs the migration, so the
+    on-demand path is still exercised.
     """
     author = await session.scalar(
-        select(User).where(User.email == settings.TRUST_PROBE_AUTHOR_EMAIL)
+        select(User).where(
+            User.email == settings.TRUST_PROBE_AUTHOR_EMAIL,
+            User.is_active.is_(False),
+        )
     )
     if author is not None:
         return author

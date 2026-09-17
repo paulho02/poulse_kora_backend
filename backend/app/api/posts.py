@@ -113,7 +113,9 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
         is_anonymous=post.is_anonymous,
         author=author,
         is_probe=post.is_probe,
-        subscription_kind=post.subscription_kind,
+        # Withheld with the author: at launch the supporter set is small enough that
+        # "anonymous, but a supporter" narrows the author to a handful of accounts.
+        subscription_kind=post.subscription_kind if reveal_author else None,
         created=post.created,
     )
 
@@ -659,7 +661,7 @@ async def get_my_posts(
                 .filter(Post.author_id == user.id)
                 .order_by(Post.created.desc())
                 .offset(skip)
-                .limit(limit)
+                .limit(min(limit, settings.LIST_MAX_PAGE_SIZE))
             )
         )
         .scalars()
@@ -694,7 +696,7 @@ async def get_my_reviewed_posts(
                 .filter(PostReview.user_id == user.id)
                 .order_by(PostReview.created.desc())
                 .offset(skip)
-                .limit(limit)
+                .limit(min(limit, settings.LIST_MAX_PAGE_SIZE))
             )
         )
         .scalars()

@@ -22,6 +22,7 @@ from app.core.locale import parse_accept_language
 from app.core.errors import api_error
 from app.core.logger import bind_request_context, get_logger
 from app.core.password_policy import strength_violations
+from app.core.rate_limit import enforce
 from app.core.username import is_username_taken
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import get_redis
@@ -219,6 +220,16 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         """
         if username is None:
             return
+        # The probe author's name is reserved outright, case-insensitively, and not
+        # only by the row that holds it (see alembic 0005 and app/core/probes.py):
+        # uniqueness is exact-match, so `Poulse` would otherwise be free to take,
+        # and every test post the trust score rests on is published under this
+        # name. Refused with the same code as a taken name, because to the person
+        # typing it that is what it is.
+        reserved = settings.TRUST_PROBE_AUTHOR_USERNAME.casefold()
+        if username.strip().casefold() == reserved:
+            log.info("user.username_taken", on="reserved")
+            raise api_error(409, "username_taken")
         session = self.user_db.session
         if await is_username_taken(session, username, exclude_user_id=exclude_user_id):
             # The name itself stays out of the line - it is user-chosen content,
@@ -314,6 +325,21 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         # that corner costs the user one code; special-casing it would put a second
         # path to `is_verified = True` in a place nobody would think to audit.
         if "email" in update_dict and update_dict["email"] != user.email:
+            # Budgeted, because `on_after_update` mails a verification code to the
+            # *new* address on every change - so an unthrottled email change is a
+            # way to send our mail to any address, as often as wanted. Keyed on the
+            # account being changed and enforced here rather than as a route
+            # dependency because fastapi-users' own router serves the PATCH, and a
+            # dependency there could not see whether the body changes the email at
+            # all. Superusers exempt, like every other budget.
+            if not user.is_superuser:
+                await enforce(
+                    self._redis,
+                    "email_change",
+                    str(user.id),
+                    settings.EMAIL_CHANGE_RATE_LIMIT,
+                    settings.EMAIL_CHANGE_RATE_WINDOW_SECONDS,
+                )
             update_dict = {**update_dict, "is_verified": False}
             # Neither address is logged, only that the account moved: an email
             # change that revokes verification is the start of most "I can no

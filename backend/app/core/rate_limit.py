@@ -23,10 +23,19 @@ project's structured error envelope (`app/core/errors.py`). Bending either to th
 is more code than the fifteen lines of Lua below.
 """
 
+import hashlib
+import math
 from uuid import uuid4
 
+from fastapi import HTTPException
 from redis.asyncio import Redis
 from redis.commands.core import AsyncScript
+
+from app.core.config import settings
+from app.core.errors import api_error
+from app.core.logger import get_logger
+
+log = get_logger(__name__)
 
 # KEYS[1]=rate:{scope}:{user}
 # ARGV[1]=window_ms  ARGV[2]=limit  ARGV[3]=unique member id
@@ -83,3 +92,64 @@ async def consume(
         keys=[key(scope, user_id)], args=[window_ms, limit, uuid4().hex]
     )
     return int(result)
+
+
+def opaque_identity(prefix: str, value: str) -> str:
+    """A budget identity for something that is not an id - an email address being
+    tried at login, say - without putting the value itself into a Redis key or a
+    log line. Normalized (trimmed, lowercased) before hashing, so `Alice@` and
+    `alice@` draw on the same budget."""
+    digest = hashlib.sha256(value.strip().lower().encode()).hexdigest()[:32]
+    return f"{prefix}:{digest}"
+
+
+def rejection(
+    scope: str, identity: str, retry_ms: int, limit: int, window_seconds: float
+) -> HTTPException:
+    """The 429 every limiter raises, logged once at WARNING.
+
+    WARNING rather than INFO because a limit being hit is by definition unusual:
+    the budgets are set well above what the UI can produce by hand, so a burst
+    means either a client bug (a retry loop) or someone driving the API directly.
+    The identity is logged because it is the only thing that tells those apart -
+    except that an `ip:` identity is personal data, so it is written only where
+    `LOG_CLIENT_IP` has opted the deployment in, the same rule the request line
+    follows.
+
+    `retry_after` is rounded up and never advertised as 0 seconds - a client
+    obeying it would retry immediately and be rejected again.
+    """
+    retry_after = max(1, math.ceil(retry_ms / 1000))
+    if identity.startswith("ip:") and not settings.LOG_CLIENT_IP:
+        identity = "ip:<redacted>"
+    log.warning(
+        "rate_limit.exceeded",
+        scope=scope,
+        identity=identity,
+        retry_after=retry_after,
+        limit=limit,
+    )
+    exc = api_error(
+        429,
+        "rate_limited",
+        retry_after=retry_after,
+        limit=limit,
+        window_seconds=window_seconds,
+    )
+    # Standard header alongside the structured body, so non-app clients (and any
+    # proxy in front of us) see the backoff too. `setup_exception_handlers` passes
+    # `exc.headers` through to the response.
+    exc.headers = {"Retry-After": str(retry_after)}
+    return exc
+
+
+async def enforce(
+    redis: Redis, scope: str, identity: str, limit: int, window_seconds: float
+) -> None:
+    """`consume`, raising the 429 when the budget is spent. A limit of 0 disables
+    the budget, which every setting that feeds this documents as its off switch."""
+    if limit <= 0:
+        return
+    retry_ms = await consume(redis, scope, identity, limit, window_seconds)
+    if retry_ms > 0:
+        raise rejection(scope, identity, retry_ms, limit, window_seconds)

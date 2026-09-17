@@ -5,6 +5,7 @@ from starlette.responses import Response, StreamingResponse
 
 from app.core import account_export, languages
 from app.core.account_deletion import delete_account
+from app.core.config import settings
 from app.core.errors import api_error
 from app.core.logger import get_logger
 from app.core.media_validation import process_profile_picture
@@ -39,7 +40,19 @@ async def get_users(
 ):
     total = await session.scalar(select(func.count(User.id)))
     users = (
-        (await session.execute(select(User).offset(skip).limit(limit))).scalars().all()
+        (
+            await session.execute(
+                select(User)
+                # Newest first, and ordered at all: an unordered OFFSET/LIMIT is
+                # not paging, it is sampling - and with the page size now capped,
+                # a row could otherwise never appear on any page.
+                .order_by(User.created.desc(), User.id)
+                .offset(skip)
+                .limit(min(limit, settings.LIST_MAX_PAGE_SIZE))
+            )
+        )
+        .scalars()
+        .all()
     )
     response.headers["Content-Range"] = f"{skip}-{skip + len(users)}/{total}"
     return users

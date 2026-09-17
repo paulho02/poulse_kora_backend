@@ -67,6 +67,11 @@ def _make_decompression_bomb_png() -> bytes:
     return buf.getvalue()
 
 
+#: Planted in a source clip's video-stream tags by `_make_test_video`, so a test
+#: can assert the transcode did not carry it over.
+STREAM_TAG_MARKER = "SecretPhoneHandler"
+
+
 def _make_test_video(
     duration: float = 1.0,
     *,
@@ -84,6 +89,8 @@ def _make_test_video(
         ]
         if with_metadata:
             cmd += ["-metadata", "location=+37.7749-122.4194/"]
+            # A *stream* tag, which `-map_metadata -1` alone leaves in place.
+            cmd += ["-metadata:s:v", f"handler_name={STREAM_TAG_MARKER}"]
         cmd += [str(out_path)]
         subprocess.run(cmd, check=True, capture_output=True)
         return out_path.read_bytes()
@@ -2248,3 +2255,200 @@ class TestMyReviewedPosts:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json() == []
+
+
+class TestAnonymousPostWithholdsSubscriptionKind:
+    async def test_other_readers_do_not_see_the_supporter_badge(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        db: AsyncSession,
+        create_user,
+        create_channel,
+        create_post,
+    ):
+        """At launch the supporter set is small enough that "anonymous, but a
+        supporter" narrows the author to a handful of accounts - so the badge is
+        withheld together with the name."""
+        viewer: User = await create_user()
+        author: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(
+            channel=channel, author=author, is_anonymous=True
+        )
+        post.subscription_kind = "supporter"
+        db.add(post)
+        await db.commit()
+        await service.place_post(redis, str(viewer.id), post.id)
+
+        resp = await client.get(
+            settings.API_PATH + "/posts/feed", headers=get_jwt_header(viewer)
+        )
+        assert resp.status_code == 200, resp.text
+        [data] = [p for p in _feed_posts(resp.json()) if p["id"] == post.id]
+        assert data["subscription_kind"] is None
+
+        # The author still sees their own badge, like their own name.
+        resp = await client.get(
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(author)
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["subscription_kind"] == "supporter"
+
+
+class TestMetadataSurvivors:
+    """Metadata the re-encode would carry across on its own - a JPEG comment, a
+    PNG ICC profile, ffmpeg stream tags - is stripped explicitly. See
+    `_strip_info` and the `-map_metadata:s:*` flags in app/core/media_validation.py.
+    """
+
+    async def _upload(
+        self, client, redis, create_user, create_channel, filename, data, content_type
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "language": "en",
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", (filename, data, content_type))],
+        )
+        assert resp.status_code == 201, resp.text
+        return _media_blocks(resp.json()["post"])[0]
+
+    async def test_jpeg_comment_is_stripped(
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        img = Image.new("RGB", (64, 48), color=(200, 50, 50))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", comment=b"C:/Users/realname/DCIM/IMG_0001.JPG")
+        assert Image.open(io.BytesIO(buf.getvalue())).info.get("comment")  # sanity
+
+        media = await self._upload(
+            client,
+            redis,
+            create_user,
+            create_channel,
+            "shot.jpg",
+            buf.getvalue(),
+            "image/jpeg",
+        )
+        fetched = await media_client.get(media["url"])
+        assert fetched.status_code == 200
+        assert b"realname" not in fetched.content
+        assert "comment" not in Image.open(io.BytesIO(fetched.content)).info
+
+    async def test_png_icc_profile_is_stripped(
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        # Alpha keeps the upload a PNG through the re-encode, which is the path
+        # where Pillow would copy `info["icc_profile"]` into an iCCP chunk.
+        img = Image.new("RGBA", (64, 48), color=(200, 50, 50, 128))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", icc_profile=b"FAKE-ICC-PROFILE-FROM-A-NAMED-DEVICE")
+        assert Image.open(io.BytesIO(buf.getvalue())).info.get("icc_profile")  # sanity
+
+        media = await self._upload(
+            client,
+            redis,
+            create_user,
+            create_channel,
+            "shot.png",
+            buf.getvalue(),
+            "image/png",
+        )
+        fetched = await media_client.get(media["url"])
+        assert fetched.status_code == 200
+        assert media["content_type"] == "image/png"
+        assert "icc_profile" not in Image.open(io.BytesIO(fetched.content)).info
+
+    async def test_video_stream_tags_are_stripped(
+        self, client: AsyncClient, media_client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        clip = _make_test_video(duration=1.0, with_metadata=True)
+        assert STREAM_TAG_MARKER.encode() in clip  # sanity: the source carries it
+
+        media = await self._upload(
+            client, redis, create_user, create_channel, "clip.mp4", clip, "video/mp4"
+        )
+        fetched = await media_client.get(media["url"])
+        assert fetched.status_code == 200
+        assert STREAM_TAG_MARKER.encode() not in fetched.content
+        assert "location" not in _probe_format_tags(fetched.content)
+
+
+class TestDecompressionBombThreshold:
+    async def test_image_between_pillows_warning_and_hard_limit_is_refused(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel
+    ):
+        """Pillow only warns at MAX_IMAGE_PIXELS and refuses at twice it;
+        `_open_within_pixel_budget` makes the configured number the real ceiling.
+        41 MP is over the 40 MP limit and well under Pillow's own 80."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await service.earn_token(redis, str(user.id), settings.FEED_PRICE_MAX)
+        img = Image.new("RGB", (6400, 6400), color=(0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+
+        resp = await client.post(
+            settings.API_PATH + "/posts",
+            headers=get_jwt_header(user),
+            data={
+                "channel_id": channel.id,
+                "language": "en",
+                "blocks": _blocks_json(_media_block(0)),
+            },
+            files=[("files", ("big.png", buf.getvalue(), "image/png"))],
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"]["error"] == "post_media_invalid_type"
+
+
+class TestOwnListsPageCap:
+    async def test_my_posts_limit_is_clamped(
+        self, client: AsyncClient, create_user, create_channel, create_post, monkeypatch
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        await create_post(channel=channel, author=user)
+        await create_post(channel=channel, author=user)
+
+        monkeypatch.setattr(settings, "LIST_MAX_PAGE_SIZE", 1)
+        resp = await client.get(
+            settings.API_PATH + "/posts/mine",
+            params={"limit": 100_000},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()) == 1
+
+    async def test_reviewed_posts_limit_is_clamped(
+        self,
+        client: AsyncClient,
+        redis: Redis,
+        db: AsyncSession,
+        create_user,
+        create_channel,
+        create_post,
+        monkeypatch,
+    ):
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        for _ in range(2):
+            post = await create_post(channel=channel)
+            await review(db, user, post, "drop")
+
+        monkeypatch.setattr(settings, "LIST_MAX_PAGE_SIZE", 1)
+        resp = await client.get(
+            settings.API_PATH + "/posts/reviewed",
+            params={"limit": 100_000},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()) == 1

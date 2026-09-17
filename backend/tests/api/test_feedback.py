@@ -461,7 +461,8 @@ class TestFeedbackRateLimit:
         self, client: AsyncClient, monkeypatch
     ):
         """Signed out there is no user id to key on, so the budget falls back to
-        the client IP - `request.client.host`, never a spoofable X-Forwarded-For.
+        the caller's address - the socket peer here, in front of no proxy (see
+        tests/api/test_rate_limits.py for the behind-a-proxy derivation).
         """
         monkeypatch.setattr(settings, "FEEDBACK_RATE_LIMIT", 2)
         for _ in range(2):

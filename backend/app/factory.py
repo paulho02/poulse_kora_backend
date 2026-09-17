@@ -5,7 +5,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
@@ -20,8 +20,10 @@ from app.core import email
 from app.core.config import settings
 from app.core.errors import detail_text, slugify_detail
 from app.core.logger import configure_logging, get_logger, resolved_log_format
+from app.core.body_limit import BodySizeLimitMiddleware
 from app.core.request_logging import RequestLoggingMiddleware
 from app.core.storage import storage
+from app.deps.rate_limit import limit_login, limit_register
 from app.deps.users import fastapi_users, jwt_authentication
 from app.feed import service
 from app.feed.worker import run_consumer
@@ -110,6 +112,9 @@ def create_app():
     setup_exception_handlers(app)
     setup_cors_middleware(app)
     serve_static_app(app)
+    # Inside the logging middleware (added before it, so wrapped by it): a body
+    # refused at the door is still one request line, with its 413, in the log.
+    app.add_middleware(BodySizeLimitMiddleware)
     # Added last, so it ends up outermost (Starlette runs user middleware in
     # reverse registration order): the status it logs is the one the client
     # actually received, after CORS and after the SPA fallback have had their
@@ -202,6 +207,10 @@ def setup_exception_handlers(app: FastAPI) -> None:
 
 def setup_routers(app: FastAPI, fastapi_users: FastAPIUsers) -> None:
     app.include_router(api_router, prefix=settings.API_PATH)
+    # The two signed-out writers fastapi-users serves get their budgets here,
+    # as router-level dependencies, because there is no route of ours to attach
+    # them to. `limit_login` also covers `/logout` on the same router, which is
+    # harmless: it is a no-op for a JWT strategy and nobody calls it in a loop.
     app.include_router(
         fastapi_users.get_auth_router(
             jwt_authentication,
@@ -209,11 +218,13 @@ def setup_routers(app: FastAPI, fastapi_users: FastAPIUsers) -> None:
         ),
         prefix=f"{settings.API_PATH}/auth/jwt",
         tags=["auth"],
+        dependencies=[Depends(limit_login)],
     )
     app.include_router(
         fastapi_users.get_register_router(UserRead, UserCreate),
         prefix=f"{settings.API_PATH}/auth",
         tags=["auth"],
+        dependencies=[Depends(limit_register)],
     )
     app.include_router(
         fastapi_users.get_users_router(

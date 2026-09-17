@@ -573,3 +573,79 @@ class TestProfilePicture:
             files={"file": ("avatar.png", make_test_png(), "image/png")},
         )
         assert resp.status_code == 401
+
+
+class TestUsernamePolicy:
+    async def _set_username(self, client: AsyncClient, user, username: str):
+        return await client.patch(
+            settings.API_PATH + "/users/me",
+            json={"username": username},
+            headers=get_jwt_header(user),
+        )
+
+    async def test_probe_author_name_is_reserved_case_insensitively(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        """Every test post is published under this name, and uniqueness is
+        exact-match - so `Poulse` has to be refused explicitly, on both writers."""
+        user = await create_user()
+        resp = await self._set_username(
+            client, user, settings.TRUST_PROBE_AUTHOR_USERNAME.upper()
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error"] == "username_taken"
+
+        resp = await client.post(
+            settings.API_PATH + "/auth/register",
+            json={
+                "email": f"{generate_random_string(20)}@{generate_random_string(10)}.com",
+                "password": generate_random_string(24),
+                "username": settings.TRUST_PROBE_AUTHOR_USERNAME.title(),
+            },
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error"] == "username_taken"
+
+    async def test_username_and_bio_lengths_are_bounded(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        user = await create_user()
+        too_long = "x" * (settings.USERNAME_MAX_LENGTH + 1)
+        assert (await self._set_username(client, user, too_long)).status_code == 422
+
+        resp = await client.patch(
+            settings.API_PATH + "/users/me",
+            json={"bio": "x" * (settings.BIO_MAX_LENGTH + 1)},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 422
+
+        resp = await client.post(
+            settings.API_PATH + "/auth/register",
+            json={
+                "email": f"{generate_random_string(20)}@{generate_random_string(10)}.com",
+                "password": generate_random_string(24),
+                "username": too_long,
+            },
+        )
+        assert resp.status_code == 422
+
+
+class TestListPageCap:
+    async def test_limit_is_clamped_to_the_page_cap(
+        self, client: AsyncClient, db: AsyncSession, create_user: Callable, monkeypatch
+    ):
+        superuser: User = await create_user()
+        superuser.is_superuser = True
+        db.add(superuser)
+        await db.commit()
+        await create_user()
+
+        monkeypatch.setattr(settings, "LIST_MAX_PAGE_SIZE", 1)
+        resp = await client.get(
+            settings.API_PATH + "/users",
+            params={"limit": 100_000},
+            headers=get_jwt_header(superuser),
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()) == 1

@@ -61,6 +61,23 @@ log = get_logger(__name__)
 # many pixels. ~40 MP is generous for any real phone photo.
 Image.MAX_IMAGE_PIXELS = 40_000_000
 
+# Process-wide cap on concurrent ffmpeg/ffprobe children. A transcode is hundreds
+# of MB of RSS and as many threads as it is given, and nothing else bounds how
+# many a verified user can start at once (five clips per post, a post every
+# second within the interaction budget). Waiting here costs an upload some
+# latency; not waiting cost the whole box. Held around the child's lifetime only,
+# so the transcode timeout does not start until the slot is acquired.
+_FFMPEG_SLOTS = asyncio.Semaphore(settings.MEDIA_MAX_CONCURRENT_FFMPEG)
+
+# The one container family an upload may be: ffmpeg's `mov` demuxer handles
+# mov/mp4/m4a/3gp/3g2/mj2 as one unit, which is exactly the set
+# POST_VIDEO_ALLOWED_CONTENT_TYPES admits. Passed as `-f` before every `-i` so the
+# input is *declared* rather than sniffed - by default ffmpeg probes the bytes and
+# will happily open a "video/mp4" as any of the several hundred formats it knows
+# (HLS playlists, `concat` scripts, image sequences), which is where its
+# file-read and SSRF history lives. Two flags remove every other demuxer.
+_INPUT_FORMAT = "mov"
+
 _FFMPEG_TIMEOUT_SECONDS = 15
 # Transcoding is real work, unlike a probe - a POST_VIDEO_MAX_DURATION_SECONDS
 # clip at 1080p can take tens of seconds on a busy box. Generous enough not to
@@ -187,7 +204,7 @@ async def _process_feedback_image(file: UploadFile) -> ProcessedMedia:
         raise api_error(400, "feedback_media_too_large")
 
     try:
-        probe = Image.open(io.BytesIO(data))
+        probe = _open_within_pixel_budget(data)
         probe.verify()
     except Exception:
         raise api_error(400, "feedback_media_invalid_type") from None
@@ -219,9 +236,10 @@ async def _process_feedback_image(file: UploadFile) -> ProcessedMedia:
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
 
     buffer = io.BytesIO()
-    # No `exif=`/`icc_profile=` forwarded - that omission is the metadata strip.
+    # No `exif=`/`icc_profile=` forwarded, and `_strip_info` clears what the
+    # encoders would otherwise fall back to - together that is the metadata strip.
     save_kwargs = {"quality": 90} if save_format == "JPEG" else {}
-    img.save(buffer, format=save_format, **save_kwargs)
+    _strip_info(img).save(buffer, format=save_format, **save_kwargs)
     out = buffer.getvalue()
 
     return ProcessedMedia(
@@ -269,7 +287,7 @@ async def process_profile_picture(file: UploadFile) -> tuple[bytes, str]:
         raise api_error(400, "profile_picture_too_large")
 
     try:
-        probe = Image.open(io.BytesIO(data))
+        probe = _open_within_pixel_budget(data)
         probe.verify()
         img = Image.open(io.BytesIO(data))  # verify() leaves its parser unusable
         img.load()
@@ -292,8 +310,9 @@ async def process_profile_picture(file: UploadFile) -> tuple[bytes, str]:
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
 
     buffer = io.BytesIO()
-    # No `exif=`/`icc_profile=` forwarded - that omission is the metadata strip.
-    img.save(
+    # No `exif=`/`icc_profile=` forwarded, and `_strip_info` clears what the
+    # encoders would otherwise fall back to - together that is the metadata strip.
+    _strip_info(img).save(
         buffer, format=save_format, **({"quality": 90} if save_format == "JPEG" else {})
     )
     return buffer.getvalue(), _IMAGE_SAVE_FORMAT_CONTENT_TYPE[save_format]
@@ -305,7 +324,7 @@ async def _process_image(file: UploadFile) -> ProcessedMedia:
         raise api_error(400, "post_media_too_large")
 
     try:
-        probe = Image.open(io.BytesIO(data))
+        probe = _open_within_pixel_budget(data)
         probe.verify()
     except Exception:
         raise api_error(400, "post_media_invalid_type") from None
@@ -352,10 +371,11 @@ async def _process_image(file: UploadFile) -> ProcessedMedia:
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
 
     buffer = io.BytesIO()
-    # No `exif=`/`icc_profile=` forwarded - that omission is the actual EXIF/ICC
-    # strip, since Pillow only writes metadata it's explicitly handed.
+    # No `exif=`/`icc_profile=` forwarded, and `_strip_info` clears what the
+    # encoders would otherwise fall back to (a JPEG comment, a PNG ICC profile) -
+    # together that is the actual EXIF/ICC strip.
     save_kwargs = {"quality": 90} if save_format == "JPEG" else {}
-    img.save(buffer, format=save_format, **save_kwargs)
+    _strip_info(img).save(buffer, format=save_format, **save_kwargs)
     out = buffer.getvalue()
 
     return ProcessedMedia(
@@ -479,18 +499,56 @@ async def process_video_bytes(
 async def _run_subprocess(
     *args: str, timeout: float = _FFMPEG_TIMEOUT_SECONDS
 ) -> tuple[int, bytes, bytes]:
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise api_error(400, "post_media_invalid_type") from None
+    async with _FFMPEG_SLOTS:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise api_error(400, "post_media_invalid_type") from None
     return proc.returncode, stdout, stderr
+
+
+def _open_within_pixel_budget(data: bytes) -> Image.Image:
+    """`Image.open`, refusing anything past `Image.MAX_IMAGE_PIXELS` outright.
+
+    Pillow itself only *warns* at that number and refuses at twice it, so the
+    real ceiling was 80 MP - about 320 MB of RGBA decoded from a 12 MB PNG. A
+    global `warnings.simplefilter("error", ...)` would close that, but it is
+    process state that anything (pytest's per-test capture, another library)
+    can reset without noticing, and a guard that fails open silently is not a
+    guard. `open` reads only the header, so the size is known before a single
+    pixel is decoded and the check costs nothing. Raises, so it lands in the
+    same "not a valid image" refusal as any other undecodable upload.
+    """
+    img = Image.open(io.BytesIO(data))
+    if img.width * img.height > Image.MAX_IMAGE_PIXELS:
+        raise ValueError("image exceeds the pixel budget")
+    return img
+
+
+def _strip_info(img: Image.Image) -> Image.Image:
+    """Drop the metadata Pillow would otherwise carry from `img.info` into a save.
+
+    Not passing `exif=`/`icc_profile=` to `save` is *not* the whole strip: the
+    JPEG encoder falls back to `im.info["comment"]` when no `comment=` is given,
+    and the PNG encoder to `im.info["icc_profile"]`. A JPEG COM segment is free
+    text that some tools fill with a user name or a file path, so on an anonymous
+    post it is as identifying as EXIF. `convert`, `exif_transpose` and
+    `thumbnail` all copy `info` across, hence this runs on the final image, right
+    before the save.
+    """
+    for key in ("comment", "icc_profile", "exif", "xmp"):
+        img.info.pop(key, None)
+    return img
 
 
 async def _probe_video(path: Path) -> tuple[float, int, int] | None:
@@ -507,6 +565,8 @@ async def _probe_video(path: Path) -> tuple[float, int, int] | None:
         "ffprobe",
         "-v",
         "error",
+        "-f",
+        _INPUT_FORMAT,
         "-select_streams",
         "v:0",
         "-show_entries",
@@ -597,10 +657,22 @@ async def _transcode_video(
     returncode, _, stderr = await _run_subprocess(
         "ffmpeg",
         "-y",
+        "-nostdin",
+        "-f",
+        _INPUT_FORMAT,
         "-i",
         str(src),
+        # Global metadata (where phone GPS lives) *and* per-stream tags: the
+        # global flag alone leaves `handler_name`/`encoder` on each stream, a
+        # weak device fingerprint that has no business on an anonymous post.
         "-map_metadata",
         "-1",
+        "-map_metadata:s:v",
+        "-1",
+        "-map_metadata:s:a",
+        "-1",
+        "-threads",
+        str(settings.MEDIA_TRANSCODE_THREADS),
         "-vf",
         f"{crop_filter}"
         f"scale=w='min(iw,{max_dim})':h='min(ih,{max_dim})'"
@@ -664,6 +736,7 @@ async def _extract_poster(path: Path, duration: float) -> bytes | None:
             returncode, _, stderr = await _run_subprocess(
                 "ffmpeg",
                 "-y",
+                "-nostdin",
                 # Before -i: seeks by keyframe without decoding everything up to
                 # `seek` first.
                 "-ss",

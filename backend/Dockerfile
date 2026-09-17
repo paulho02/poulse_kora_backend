@@ -36,4 +36,14 @@ COPY --from=base /usr/local/bin /usr/local/bin
 
 RUN chmod +x /app/entrypoint.sh
 
+# Not root. Nothing here needs it: the app listens on an unprivileged port, writes
+# only to /tmp (ffmpeg scratch), and reads /app. What root would add is that a
+# bug in ffmpeg or Pillow - the two things that parse untrusted bytes - lands as
+# root inside the container rather than as a user that owns nothing. /app is
+# chowned so `alembic revision` and the reload watcher work in the dev override,
+# which mounts the source tree over it.
+RUN useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin app \
+    && chown -R app:app /app
+USER app
+
 CMD ["/app/entrypoint.sh"]
