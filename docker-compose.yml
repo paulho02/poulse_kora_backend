@@ -24,7 +24,7 @@ services:
 
   # Local stand-in for the production bucket (a Railway Bucket, Tigris underneath).
   # The point is protocol fidelity, not feature parity: the backend speaks plain
-  # S3 + SigV4 to both, so moving to Railway is a change of STORAGE_* variables and
+  # S3 + SigV4 to both, so moving to Railway is a change of AWS_* / S3_* variables and
   # nothing else (see app/core/storage.py, RAILWAY.md).
   #
   # Pinned to the last community release MinIO published (the project stopped
@@ -39,8 +39,8 @@ services:
     restart: always
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY_ID}
-      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_ACCESS_KEY}
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY}
       MINIO_API_CORS_ALLOW_ORIGIN: "*"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]

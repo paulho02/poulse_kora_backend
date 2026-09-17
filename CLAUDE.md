@@ -75,7 +75,7 @@ docker compose exec backend python -m scripts.safe.backfill_post_media [--dry-ru
 docker compose exec backend python -m scripts.dangerous.rebuild_redis
 
 # MinIO console for the local media bucket, to eyeball what actually landed.
-# Log in with STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY from .env.
+# Log in with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from .env.
 http://localhost:9001
 ```
 
@@ -458,8 +458,21 @@ after cloning).
 - **Object storage** (`app/core/storage.py`, `app/core/sigv4.py`): every uploaded image, video and
   poster frame lives in an S3-compatible bucket — a **MinIO container** in docker-compose locally
   and in CI, a **Railway Bucket** (Tigris) in production. Nothing in the code knows which; the
-  `STORAGE_*` settings are the whole difference (see RAILWAY.md, `env-template`). Four things are
+  `AWS_*`/`S3_*` settings are the whole difference (see RAILWAY.md, `env-template`). Five things are
   load-bearing:
+  - **The variable names are the S3 convention, not ours.** `AWS_ENDPOINT_URL`,
+    `S3_BUCKET_NAME`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+    are exactly what Railway's bucket auto-connect injects into a service, so attaching a
+    Railway Bucket configures the backend with no variable mapping by hand — which is what
+    the old `STORAGE_*` names cost. The same names are what boto3, the `aws` CLI and rclone
+    read, so a script run inside the container inherits working credentials. The four
+    settings with no S3 convention to follow describe how this backend *addresses* the
+    bucket rather than how it authenticates, and carry the `S3_` prefix to sit beside the
+    rest: `S3_ADDRESSING_STYLE`, `S3_PUBLIC_ENDPOINT_URL`, `S3_AUTO_CREATE_BUCKET` and
+    `TEST_S3_BUCKET_NAME`/`TEST_S3_PUBLIC_ENDPOINT_URL`. Note this makes
+    `S3_ADDRESSING_STYLE=virtual` the one *required* Railway setting auto-connect cannot
+    supply, and a wrong value there fails as `SignatureDoesNotMatch`, not as a missing
+    variable.
   - **Clients never hold a bucket credential.** They are handed a **presigned URL**, minted only
     after the existing authorization check has passed. So the check moved from *every byte fetch* to
     *once per serialization*: a URL keeps working for up to `MEDIA_URL_TTL_SECONDS` even if access
@@ -476,8 +489,8 @@ after cloning).
     clock and gives no way to pin it.
   - **The bucket endpoint must be reachable by the client**, even though the bucket is private. The
     host is a *signed* header, so a URL signed for `minio:9000` cannot be rewritten to
-    `localhost:9000` afterwards — hence `STORAGE_PUBLIC_ENDPOINT_URL` alongside
-    `STORAGE_ENDPOINT_URL`, and the published port in `docker-compose.override.yml`. A Flutter
+    `localhost:9000` afterwards — hence `S3_PUBLIC_ENDPOINT_URL` alongside
+    `AWS_ENDPOINT_URL`, and the published port in `docker-compose.override.yml`. A Flutter
     **web** client additionally needs CORS on the bucket (`MINIO_API_CORS_ALLOW_ORIGIN` locally).
 - **Profile pictures** (`app/api/users.py`): stored in the bucket, keyed by `User.profile_picture_key`.
   Set via `PUT /users/me/profile-picture` (multipart), cleared via `DELETE`. The bytes go through

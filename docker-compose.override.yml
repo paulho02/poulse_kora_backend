@@ -19,7 +19,7 @@ services:
       # 9000 is the S3 API and has to be published, not just reachable on the
       # compose network: presigned URLs are fetched by the *client* (browser,
       # emulator, phone), which cannot resolve `minio`. That is also why
-      # STORAGE_PUBLIC_ENDPOINT_URL exists - the host is inside the signature, so
+      # S3_PUBLIC_ENDPOINT_URL exists - the host is inside the signature, so
       # the URL has to be signed for whatever name the client will dial.
       # 9001 is MinIO's console, handy for eyeballing what actually landed.
       - "9000:9000"

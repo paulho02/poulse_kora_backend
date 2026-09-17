@@ -274,7 +274,7 @@ class TestDeleteAccountErasingPosts:
         )
         assert upload.status_code == 200, upload.text
         url = upload.json()["profile_picture_url"]
-        key = url.split("?")[0].split(f"{settings.STORAGE_BUCKET}/", 1)[1]
+        key = url.split("?")[0].split(f"{settings.S3_BUCKET_NAME}/", 1)[1]
         assert await storage.get_object(key)
 
         resp = await client.request(

@@ -35,22 +35,31 @@ Set these as Variables on the backend service (Settings → Variables):
 | `EMAIL_PROVIDER` | recommended | `smtp` (default) or `lettermint`. Picks which connector `send_email` uses; the other one's settings are then ignored. |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | required if `EMAIL_PROVIDER=smtp` and `REQUIRE_EMAIL_VERIFICATION=true` | Any relay works (Gmail SMTP, SES, Mailgun, Postmark, ...). |
 | `LETTERMINT_API_TOKEN` | required if `EMAIL_PROVIDER=lettermint` | A *sending* token from the Lettermint dashboard, not a team API token. The app refuses to boot without it — see below. Optional companions: `LETTERMINT_ROUTE`, `LETTERMINT_FROM_EMAIL`, `LETTERMINT_FROM_NAME`. |
-| `STORAGE_ENDPOINT_URL` | yes | `${{Bucket.ENDPOINT}}` (`https://storage.railway.app`) |
-| `STORAGE_BUCKET` | yes | `${{Bucket.BUCKET}}` |
-| `STORAGE_REGION` | yes | `${{Bucket.REGION}}` — `auto` |
-| `STORAGE_ACCESS_KEY_ID` | yes | `${{Bucket.ACCESS_KEY_ID}}` |
-| `STORAGE_SECRET_ACCESS_KEY` | yes | `${{Bucket.SECRET_ACCESS_KEY}}` |
-| `STORAGE_ADDRESSING_STYLE` | yes | `virtual` — Railway serves `https://<bucket>.storage.railway.app/<key>`. The `path` default exists only because `<bucket>.localhost` does not resolve against the local MinIO container. |
-| `STORAGE_PUBLIC_ENDPOINT_URL` | no | Leave unset. It exists for local dev, where the backend and the client reach MinIO under different hostnames; on Railway the endpoint is already the public one. |
-| `STORAGE_AUTO_CREATE_BUCKET` | no | Leave unset (`false`). The platform provisions the bucket and the credentials are scoped to it. |
+| `AWS_ENDPOINT_URL` | yes | Set by the bucket's **Connect** action (`${{Bucket.ENDPOINT}}`, `https://storage.railway.app`) |
+| `S3_BUCKET_NAME` | yes | Set by **Connect** (`${{Bucket.BUCKET}}`) |
+| `AWS_DEFAULT_REGION` | yes | Set by **Connect** (`${{Bucket.REGION}}` — `auto`) |
+| `AWS_ACCESS_KEY_ID` | yes | Set by **Connect** (`${{Bucket.ACCESS_KEY_ID}}`) |
+| `AWS_SECRET_ACCESS_KEY` | yes | Set by **Connect** (`${{Bucket.SECRET_ACCESS_KEY}}`) |
+| `S3_ADDRESSING_STYLE` | yes | `virtual` — Railway serves `https://<bucket>.storage.railway.app/<key>`. The `path` default exists only because `<bucket>.localhost` does not resolve against the local MinIO container. |
+| `S3_PUBLIC_ENDPOINT_URL` | no | Leave unset. It exists for local dev, where the backend and the client reach MinIO under different hostnames; on Railway the endpoint is already the public one. |
+| `S3_AUTO_CREATE_BUCKET` | no | Leave unset (`false`). The platform provisions the bucket and the credentials are scoped to it. |
 | `MEDIA_URL_TTL_SECONDS` / `MEDIA_URL_REFRESH_SECONDS` | no | Defaults (1 h / 15 min) are fine. The first is how long a leaked media URL keeps working, the second how often the URL string changes — see the media section below before touching either. |
-| `TEST_STORAGE_BUCKET` / `TEST_STORAGE_PUBLIC_ENDPOINT_URL` | not needed | Dev/CI-only, used only when `pytest` is running. |
+| `TEST_S3_BUCKET_NAME` / `TEST_S3_PUBLIC_ENDPOINT_URL` | not needed | Dev/CI-only, used only when `pytest` is running. |
 | `SENTRY_DSN` | optional | Declared in `app/core/config.py` but **not wired to anything yet** — setting it today does nothing. See "Logs and monitoring" below. |
 | `ENVIRONMENT` | recommended | `production` (or `int`). Stamped on every log line as `env`, which is what lets one log query tell two environments apart. |
 | `LOG_LEVEL` | no | `INFO` default. `DEBUG` is for a few minutes of investigation, not a standing setting. |
 | `LOG_FORMAT` | no | `auto` default → JSON on Railway, which is what makes the fields below filterable. Only set it to pin the format. |
 | `LOG_LEVEL_OVERRIDES` | no | JSON object, e.g. `{"app.feed": "DEBUG"}` — turn one module up without turning the process up. |
 | `LOG_QUIET_PATHS` / `LOG_SLOW_REQUEST_MS` / `LOG_ACCESS` / `LOG_SQL` / `LOG_CLIENT_IP` | no | Defaults are the intended production setting; see `app/core/logger.py` for what each trades. |
+
+Those five are named the way they are on purpose: they are exactly the variables Railway's bucket
+auto-connect injects into a service, so attaching a Railway Bucket sets all five with no manual
+mapping — and any other S3 tool run inside the container (`aws s3`, boto3, rclone) picks the same
+credentials up from the environment. The four settings that have no S3 convention to follow
+(`S3_ADDRESSING_STYLE`, `S3_PUBLIC_ENDPOINT_URL`, `S3_AUTO_CREATE_BUCKET`, `TEST_S3_BUCKET_NAME`)
+still have to be set by hand; `S3_ADDRESSING_STYLE=virtual` is the one that is *required* and that
+auto-connect cannot know, since it describes how this backend addresses the bucket rather than how
+it authenticates.
 
 There is deliberately **no variable for reading the caller's IP out of `X-Forwarded-For`**. Behind
 Railway's edge the socket peer is always the proxy, so the backend takes the address from that
@@ -68,7 +77,7 @@ so whatever scheme Railway's Postgres reference variable uses works unchanged.
 
 ## 3. First deploy checklist
 
-- **Set the `STORAGE_*` variables before the first deploy.** Media lives in the bucket and not in
+- **Set the `AWS_*` / `S3_*` variables before the first deploy.** Media lives in the bucket and not in
   Postgres (`app/core/storage.py`), so an upload route raises without them — there is no
   degraded mode that stores bytes in the database. Nothing in the migrations needs them: the
   data migration that used to copy existing media out of Postgres was squashed away along with
@@ -221,4 +230,4 @@ deliberate decision rather than done by default.
   line before any user finds it.
 - Upload a profile picture from the app and confirm the returned `profile_picture_url` points at
   `https://<bucket>.storage.railway.app/...` and loads. A `SignatureDoesNotMatch` here almost always
-  means `STORAGE_ADDRESSING_STYLE` is still `path` — the host is part of the signature.
+  means `S3_ADDRESSING_STYLE` is still `path` — the host is part of the signature.

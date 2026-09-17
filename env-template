@@ -60,8 +60,8 @@ LOG_LEVEL=INFO
 # Railway Bucket. The backend speaks the same S3+SigV4 protocol to both, so only
 # these variables change - see RAILWAY.md for the production values.
 #
-# STORAGE_ENDPOINT_URL is how the *backend* reaches the bucket (compose network).
-# STORAGE_PUBLIC_ENDPOINT_URL is how the *client* reaches it, and it is what
+# AWS_ENDPOINT_URL is how the *backend* reaches the bucket (compose network).
+# S3_PUBLIC_ENDPOINT_URL is how the *client* reaches it, and it is what
 # presigned URLs are signed for - the host is part of the signature, so these must
 # each name the host that will actually be dialled. Change the public one to match
 # how you run the client:
@@ -78,26 +78,26 @@ LOG_LEVEL=INFO
 # on 8000, e.g. in an elevated PowerShell:
 #   New-NetFirewallRule -DisplayName localMinioDev -Direction Inbound \
 #     -Action Allow -Protocol TCP -LocalPort 9000 -Profile Private
-STORAGE_ENDPOINT_URL=http://minio:9000
-STORAGE_PUBLIC_ENDPOINT_URL=http://localhost:9000
+AWS_ENDPOINT_URL=http://minio:9000
+S3_PUBLIC_ENDPOINT_URL=http://localhost:9000
 # pytest runs inside the backend container, so "the client" there reaches MinIO
 # on the compose network rather than on the host.
-TEST_STORAGE_PUBLIC_ENDPOINT_URL=http://minio:9000
-STORAGE_BUCKET=poulse-kora-media
+TEST_S3_PUBLIC_ENDPOINT_URL=http://minio:9000
+S3_BUCKET_NAME=poulse-kora-media
 # Separate bucket for pytest, mirroring TEST_DATABASE_URL/TEST_REDIS_URL - a test
 # run must never write into (or delete out of) the bucket the dev app is using.
-TEST_STORAGE_BUCKET=poulse-kora-media-test
-STORAGE_REGION=us-east-1
+TEST_S3_BUCKET_NAME=poulse-kora-media-test
+AWS_DEFAULT_REGION=us-east-1
 # MinIO root credentials; also consumed by the minio service in docker-compose.yml.
 # Password must be at least 8 characters. Local-only values - Railway injects real
 # scoped credentials.
-STORAGE_ACCESS_KEY_ID=minioadmin
-STORAGE_SECRET_ACCESS_KEY=CHANGE_ME_minio
+AWS_ACCESS_KEY_ID=minioadmin
+AWS_SECRET_ACCESS_KEY=CHANGE_ME_minio
 # path-style, because <bucket>.localhost does not resolve. Railway needs "virtual".
-STORAGE_ADDRESSING_STYLE=path
+S3_ADDRESSING_STYLE=path
 # Create the bucket on boot if missing. Local/CI only; on Railway the platform
 # provisions it and the credentials are not allowed to create buckets.
-STORAGE_AUTO_CREATE_BUCKET=true
+S3_AUTO_CREATE_BUCKET=true
 
 # --- supporter subscription (Mollie) ---
 # SUBSCRIPTIONS_ENABLED defaults to false — leave unset until Mollie is actually
@@ -193,14 +193,15 @@ GOOGLE_CLIENT_IDS='["CHANGE_ME.apps.googleusercontent.com"]'
 #   SMTP_HOST, verification codes are only logged server-side and no one can
 #   complete verification; the `app.started` log line reports which connector is
 #   live and whether it is configured.
-# STORAGE_*: point at the Railway Bucket instead of the local MinIO container -
-#   STORAGE_ENDPOINT_URL=${{Bucket.ENDPOINT}} (https://storage.railway.app),
-#   STORAGE_BUCKET=${{Bucket.BUCKET}}, STORAGE_REGION=${{Bucket.REGION}} ("auto"),
-#   STORAGE_ACCESS_KEY_ID=${{Bucket.ACCESS_KEY_ID}},
-#   STORAGE_SECRET_ACCESS_KEY=${{Bucket.SECRET_ACCESS_KEY}},
-#   STORAGE_ADDRESSING_STYLE=virtual, STORAGE_AUTO_CREATE_BUCKET unset (false),
-#   STORAGE_PUBLIC_ENDPOINT_URL unset (the endpoint is already public there).
-#   TEST_STORAGE_BUCKET is dev/CI-only, like the other TEST_ variables.
+# AWS_* / S3_*: point at the Railway Bucket instead of the local MinIO container.
+#   AWS_ENDPOINT_URL, S3_BUCKET_NAME, AWS_DEFAULT_REGION, AWS_ACCESS_KEY_ID and
+#   AWS_SECRET_ACCESS_KEY are set for you by the bucket's Connect action - those
+#   names are the whole reason they are not called STORAGE_*. What Connect cannot
+#   know, and you must still set by hand:
+#     S3_ADDRESSING_STYLE=virtual  (required - Railway serves <bucket>.storage.railway.app)
+#     S3_AUTO_CREATE_BUCKET        unset (false) - the platform provisions the bucket
+#     S3_PUBLIC_ENDPOINT_URL       unset - the endpoint is already the public one there
+#   TEST_S3_BUCKET_NAME is dev/CI-only, like the other TEST_ variables.
 # GOOGLE_OAUTH_ENABLED / GOOGLE_CLIENT_IDS: set both once the Google Cloud OAuth
 #   clients exist. The web client's "Authorized JavaScript origins" must list every
 #   origin the Flutter web app is served from (http://localhost:3000 for dev, plus

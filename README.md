@@ -255,12 +255,12 @@ Now you can navigate to the following URLs:
 
 - Backend OpenAPI docs: http://localhost:8000/docs/
 - MinIO console (local media bucket): http://localhost:9001 — log in with
-  `STORAGE_ACCESS_KEY_ID` / `STORAGE_SECRET_ACCESS_KEY` from `.env`
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` from `.env`
 - Frontend: http://localhost:3000
 
-The media bucket itself is created on backend startup (`STORAGE_AUTO_CREATE_BUCKET=true`
+The media bucket itself is created on backend startup (`S3_AUTO_CREATE_BUCKET=true`
 in `env-template`), so there is nothing to set up by hand. If you run the client
-somewhere other than the host browser, point `STORAGE_PUBLIC_ENDPOINT_URL` at a hostname
+somewhere other than the host browser, point `S3_PUBLIC_ENDPOINT_URL` at a hostname
 that client can actually reach (`http://10.0.2.2:9000` for the Android emulator, your LAN
 IP for a physical device) — presigned URLs are signed for that host, so it cannot be
 patched up afterwards. Your LAN IP satisfies all of them at once, which makes it the

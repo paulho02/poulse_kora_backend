@@ -41,7 +41,7 @@ async def init_db():
 
 @pytest.fixture(scope="session", autouse=True)
 async def init_storage():
-    """Create the test bucket (TEST_STORAGE_BUCKET, see app/core/config.py) and shut
+    """Create the test bucket (TEST_S3_BUCKET_NAME, see app/core/config.py) and shut
     the storage client down at the end of the run.
 
     Needed because the tests drive the app through an ASGI transport, which never

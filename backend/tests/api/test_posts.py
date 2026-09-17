@@ -237,7 +237,7 @@ class TestPostsFeed:
         assert url is not None
         # Presigned bucket URL, not a route back into this API - and it resolves
         # without the viewer's bearer token.
-        assert url.startswith(str(settings.STORAGE_PUBLIC_ENDPOINT_URL))
+        assert url.startswith(str(settings.S3_PUBLIC_ENDPOINT_URL))
         fetched = await media_client.get(url)
         assert fetched.status_code == 200, fetched.text
         # Re-encoded on upload, so compare what it decodes to, not raw bytes.
@@ -1667,7 +1667,7 @@ class TestPostMediaUrls:
         url = self._media_url(resp.json())
 
         # Absolute, pointing at the bucket - not a path back into this API.
-        assert url.startswith(str(settings.STORAGE_PUBLIC_ENDPOINT_URL))
+        assert url.startswith(str(settings.S3_PUBLIC_ENDPOINT_URL))
         fetched = await media_client.get(url)
         assert fetched.status_code == 200, fetched.text
         assert fetched.content == self._MEDIA_DATA

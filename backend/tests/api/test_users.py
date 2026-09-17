@@ -402,7 +402,7 @@ class TestProfilePicture:
         )
         assert resp.status_code == 200, resp.text
         url = resp.json()["profile_picture_url"]
-        assert url.startswith(str(settings.STORAGE_PUBLIC_ENDPOINT_URL))
+        assert url.startswith(str(settings.S3_PUBLIC_ENDPOINT_URL))
 
         resp = await client.get(
             settings.API_PATH + "/users/me", headers=get_jwt_header(user)

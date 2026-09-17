@@ -15,7 +15,7 @@ Two implementations, one protocol:
 - **Railway**: a Railway Bucket (Tigris underneath), virtual-hosted addressing
   (`https://<bucket>.storage.railway.app/<key>`), region `auto`.
 
-Nothing in this module knows which is which; `STORAGE_*` in app/core/config.py is
+Nothing in this module knows which is which; `AWS_*` / `S3_*` in app/core/config.py is
 the whole difference. See RAILWAY.md for the variable mapping.
 
 **How access control survives the move.** Objects are never public. A client
@@ -37,8 +37,8 @@ their picture). Three consequences worth being deliberate about:
    anyone who saw the URL, which is the same failure mode the EXIF strip in
    app/core/media_validation.py exists to prevent.
 3. **The bucket endpoint has to be reachable by the client**, even though the
-   bucket itself is private. That is why `STORAGE_PUBLIC_ENDPOINT_URL` exists
-   separately from `STORAGE_ENDPOINT_URL`: the host is a *signed* header, so a URL
+   bucket itself is private. That is why `S3_PUBLIC_ENDPOINT_URL` exists
+   separately from `AWS_ENDPOINT_URL`: the host is a *signed* header, so a URL
    signed against the internal name and rewritten afterwards fails with
    SignatureDoesNotMatch. Signing happens against the public host directly.
 
@@ -116,8 +116,7 @@ def profile_picture_key(user_id: uuid.UUID, content_type: str) -> str:
     key instead would leave every cache in the system serving the old face.
     """
     return (
-        f"{PROFILE_PICTURE_PREFIX}/{user_id}/{uuid.uuid4()}"
-        f".{_extension(content_type)}"
+        f"{PROFILE_PICTURE_PREFIX}/{user_id}/{uuid.uuid4()}.{_extension(content_type)}"
     )
 
 
@@ -157,17 +156,17 @@ class ObjectStorage:
     @property
     def configured(self) -> bool:
         return bool(
-            settings.STORAGE_ENDPOINT_URL
-            and settings.STORAGE_BUCKET
-            and settings.STORAGE_ACCESS_KEY_ID
-            and settings.STORAGE_SECRET_ACCESS_KEY
+            settings.AWS_ENDPOINT_URL
+            and settings.S3_BUCKET_NAME
+            and settings.AWS_ACCESS_KEY_ID
+            and settings.AWS_SECRET_ACCESS_KEY
         )
 
     def _require_configured(self) -> None:
         if not self.configured:
             raise StorageError(
-                "object storage is not configured - set STORAGE_ENDPOINT_URL, "
-                "STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY"
+                "object storage is not configured - set AWS_ENDPOINT_URL, "
+                "S3_BUCKET_NAME, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"
             )
 
     def _address(self, endpoint: str, key: str | None) -> tuple[str, str, str]:
@@ -180,8 +179,8 @@ class ObjectStorage:
         derived here rather than guessed from the URL afterwards.
         """
         parts = urlsplit(endpoint)
-        bucket = settings.STORAGE_BUCKET
-        if settings.STORAGE_ADDRESSING_STYLE == "virtual":
+        bucket = settings.S3_BUCKET_NAME
+        if settings.S3_ADDRESSING_STYLE == "virtual":
             host = f"{bucket}.{parts.netloc}"
             path = f"/{key}" if key is not None else "/"
         else:
@@ -201,15 +200,15 @@ class ObjectStorage:
         once per attachment while serializing a whole feed page.
         """
         self._require_configured()
-        endpoint = settings.STORAGE_PUBLIC_ENDPOINT_URL or settings.STORAGE_ENDPOINT_URL
+        endpoint = settings.S3_PUBLIC_ENDPOINT_URL or settings.AWS_ENDPOINT_URL
         url, host, canonical_uri = self._address(str(endpoint), key)
         query = sigv4.presign(
             method=method,
             host=host,
             canonical_uri=canonical_uri,
-            access_key_id=settings.STORAGE_ACCESS_KEY_ID,
-            secret_access_key=settings.STORAGE_SECRET_ACCESS_KEY,
-            region=settings.STORAGE_REGION,
+            access_key_id=settings.AWS_ACCESS_KEY_ID,
+            secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region=settings.AWS_DEFAULT_REGION,
             signed_at=_quantized_now(),
             expires_in=settings.MEDIA_URL_TTL_SECONDS,
         )
@@ -256,16 +255,16 @@ class ObjectStorage:
             log.warning("storage.delete_failed", object_key=key, exc_info=True)
 
     async def ensure_bucket(self) -> None:
-        """Create the bucket if it is missing, when STORAGE_AUTO_CREATE_BUCKET is
+        """Create the bucket if it is missing, when S3_AUTO_CREATE_BUCKET is
         on. Local dev and CI only: on Railway the bucket is provisioned by the
         platform and the credentials are scoped to it, so the setting stays off
         and this is never called.
         """
-        if not settings.STORAGE_AUTO_CREATE_BUCKET:
+        if not settings.S3_AUTO_CREATE_BUCKET:
             return
         try:
             await self._request("PUT", None, warn_on_error=False)
-            log.info("storage.bucket_created", bucket=settings.STORAGE_BUCKET)
+            log.info("storage.bucket_created", bucket=settings.S3_BUCKET_NAME)
         except StorageError as exc:
             # Already existing is the normal case on every boot after the first.
             # S3 spells it BucketAlreadyOwnedByYou (200/409 depending on region
@@ -276,7 +275,7 @@ class ObjectStorage:
             # normal case on every boot after the first and would otherwise put a
             # WARNING in the startup log of every single deploy. A real failure
             # still gets a line - this one - before it takes the process down.
-            log.error("storage.bucket_create_failed", bucket=settings.STORAGE_BUCKET)
+            log.error("storage.bucket_create_failed", bucket=settings.S3_BUCKET_NAME)
             raise
 
     # --- plumbing ----------------------------------------------------------
@@ -303,16 +302,14 @@ class ObjectStorage:
         warn_on_error: bool = True,
     ) -> httpx.Response:
         self._require_configured()
-        url, host, canonical_uri = self._address(
-            str(settings.STORAGE_ENDPOINT_URL), key
-        )
+        url, host, canonical_uri = self._address(str(settings.AWS_ENDPOINT_URL), key)
         request_headers = sigv4.signed_headers(
             method=method,
             host=host,
             canonical_uri=canonical_uri,
-            access_key_id=settings.STORAGE_ACCESS_KEY_ID,
-            secret_access_key=settings.STORAGE_SECRET_ACCESS_KEY,
-            region=settings.STORAGE_REGION,
+            access_key_id=settings.AWS_ACCESS_KEY_ID,
+            secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region=settings.AWS_DEFAULT_REGION,
             signed_at=datetime.now(timezone.utc),
             payload=payload,
             headers=headers,

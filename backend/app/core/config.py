@@ -616,20 +616,33 @@ class Settings(BaseSettings):
     # Where every uploaded image, video and poster frame lives. One protocol, two
     # deployments: a MinIO container locally/in CI, a Railway Bucket (Tigris) in
     # production - see app/core/storage.py and RAILWAY.md.
-    STORAGE_ENDPOINT_URL: str = "http://minio:9000"
+    #
+    # The names are not ours to choose. AWS_ENDPOINT_URL, S3_BUCKET_NAME,
+    # AWS_DEFAULT_REGION, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are exactly
+    # what Railway's bucket auto-connect injects into a service, and what every
+    # other S3 client (boto3, the aws CLI, rclone) already reads from the
+    # environment - so a Railway Bucket attaches with no variable mapping at all,
+    # and a script run inside the container inherits working credentials for free.
+    # They used to be STORAGE_*, which meant every one of them had to be wired up
+    # by hand in the Railway dashboard. Don't rename them back for tidiness.
+    #
+    # The remaining four have no S3 convention to follow (they describe how *this*
+    # backend addresses the bucket, not how it authenticates), so they carry the
+    # S3_ prefix to sit beside the ones that do.
+    AWS_ENDPOINT_URL: str = "http://minio:9000"
     # The endpoint *clients* connect to, when it differs from the one the backend
     # uses. It usually does in local dev: the backend reaches MinIO as `minio:9000`
     # on the compose network, while a phone or browser has to reach it as
     # `localhost:9000` (or `10.0.2.2:9000` from the Android emulator). This is not
     # cosmetic - the host is a *signed* header, so a URL signed against one name and
-    # rewritten to another is rejected. Unset means "same as STORAGE_ENDPOINT_URL",
+    # rewritten to another is rejected. Unset means "same as AWS_ENDPOINT_URL",
     # which is the correct setting on Railway.
-    TEST_STORAGE_PUBLIC_ENDPOINT_URL: str | None = None
-    STORAGE_PUBLIC_ENDPOINT_URL: str | None = None
+    TEST_S3_PUBLIC_ENDPOINT_URL: str | None = None
+    S3_PUBLIC_ENDPOINT_URL: str | None = None
 
-    @field_validator("STORAGE_PUBLIC_ENDPOINT_URL", mode="before")
+    @field_validator("S3_PUBLIC_ENDPOINT_URL", mode="before")
     @classmethod
-    def build_test_storage_public_endpoint(
+    def build_test_s3_public_endpoint(
         cls, v: str | None, info: dict[str, Any]
     ) -> str | None:
         """Under pytest the "client" fetching a presigned URL is the test process,
@@ -639,41 +652,41 @@ class Settings(BaseSettings):
         that has nothing to do with the code under test.
         """
         if "pytest" in sys.modules:
-            return info.data.get("TEST_STORAGE_PUBLIC_ENDPOINT_URL") or v
+            return info.data.get("TEST_S3_PUBLIC_ENDPOINT_URL") or v
         return v
 
-    # Declared before STORAGE_BUCKET so the validator below can see it: pydantic
+    # Declared before S3_BUCKET_NAME so the validator below can see it: pydantic
     # fills `info.data` in field-definition order.
-    TEST_STORAGE_BUCKET: str | None = None
-    STORAGE_BUCKET: str = "poulse-kora-media"
+    TEST_S3_BUCKET_NAME: str | None = None
+    S3_BUCKET_NAME: str = "poulse-kora-media"
 
-    @field_validator("STORAGE_BUCKET", mode="before")
+    @field_validator("S3_BUCKET_NAME", mode="before")
     @classmethod
-    def build_test_storage_bucket(cls, v: str | None, info: dict[str, Any]) -> str:
-        """Swaps in TEST_STORAGE_BUCKET while pytest is running, mirroring what
+    def build_test_s3_bucket_name(cls, v: str | None, info: dict[str, Any]) -> str:
+        """Swaps in TEST_S3_BUCKET_NAME while pytest is running, mirroring what
         DATABASE_URL/REDIS_URL already do - so a test run can never write objects
         into (or delete objects out of) the bucket the dev app is using.
         """
         if "pytest" in sys.modules:
-            test_bucket = info.data.get("TEST_STORAGE_BUCKET")
+            test_bucket = info.data.get("TEST_S3_BUCKET_NAME")
             if not test_bucket:
                 raise ValueError(
-                    "pytest detected, but TEST_STORAGE_BUCKET is not set in environment"
+                    "pytest detected, but TEST_S3_BUCKET_NAME is not set in environment"
                 )
             return str(test_bucket)
         return v
 
-    STORAGE_REGION: str = "us-east-1"  # Railway/Tigris wants "auto"
-    STORAGE_ACCESS_KEY_ID: str = ""
-    STORAGE_SECRET_ACCESS_KEY: str = ""
+    AWS_DEFAULT_REGION: str = "us-east-1"  # Railway/Tigris wants "auto"
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
     # "path" -> http://host/<bucket>/<key>, "virtual" -> https://<bucket>.host/<key>.
     # MinIO on localhost can only do path-style (there is no wildcard DNS for
     # `<bucket>.localhost`); Railway/Tigris serves virtual-hosted URLs.
-    STORAGE_ADDRESSING_STYLE: str = "path"
+    S3_ADDRESSING_STYLE: str = "virtual"
     # Local dev and CI only: create the bucket on boot (and before a migration that
     # needs it) if it is missing. On Railway the platform provisions the bucket and
     # the credentials are scoped to it, so this stays off there.
-    STORAGE_AUTO_CREATE_BUCKET: bool = False
+    S3_AUTO_CREATE_BUCKET: bool = False
 
     # --- presigned media URLs ---
     # How long a handed-out media URL stays valid. This is the window in which a URL

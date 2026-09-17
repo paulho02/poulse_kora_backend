@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
     snapshot key on its own timer, which is harmless since the computation is
     deterministic given the same Redis state.
 
-    Also creates the media bucket when STORAGE_AUTO_CREATE_BUCKET is on (local dev
+    Also creates the media bucket when S3_AUTO_CREATE_BUCKET is on (local dev
     and CI only — on Railway the platform provisions it), and closes the storage
     client's connection pool on the way out.
     """
@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI):
         email_delivery_configured=email.delivery_configured(),
         google_oauth_enabled=settings.GOOGLE_OAUTH_ENABLED,
         subscriptions_enabled=settings.SUBSCRIPTIONS_ENABLED,
-        storage_bucket=settings.STORAGE_BUCKET,
+        storage_bucket=settings.S3_BUCKET_NAME,
         feed_fanout=settings.FEED_FANOUT,
         queue_slots=settings.FEED_QUEUE_MAX_SLOTS,
     )
