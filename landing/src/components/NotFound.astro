@@ -1,0 +1,18 @@
+---
+import { type Locale, localePath, ui } from "../i18n";
+import Base from "../layouts/Base.astro";
+import { SITE_NAME } from "../site";
+
+interface Props {
+  locale: Locale;
+}
+
+const t = ui[Astro.props.locale];
+---
+<Base title={`${t.notFoundTitle} — ${SITE_NAME}`} noindex>
+  <div class="not-found">
+    <h1>{t.notFoundHeading}</h1>
+    <p>{t.notFoundBody}</p>
+    <a class="btn btn-primary" href={localePath(Astro.props.locale)}>{t.notFoundCta}</a>
+  </div>
+</Base>

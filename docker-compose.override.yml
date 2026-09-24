@@ -39,3 +39,20 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+
+  landing:
+    # The deps stage (node + node_modules) instead of the Caddy image, running
+    # the dev server over the bind-mounted source.
+    build:
+      context: landing
+      target: deps
+    command: npx astro dev --host 0.0.0.0 --port 4321
+    environment:
+      # File events don't cross a Docker Desktop bind mount from Windows/macOS
+      # reliably, so Vite polls instead.
+      ASTRO_WATCH_POLLING: "true"
+    volumes:
+      - ./landing:/app:delegated
+      # The image's Linux node_modules, not the host's (sharp and esbuild ship
+      # per-platform binaries, so a Windows node_modules won't run here).
+      - /app/node_modules

@@ -1,4 +1,4 @@
-# Poulse Kora Backend
+# Peerkola Backend
 
 ## Features
 

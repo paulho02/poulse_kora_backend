@@ -1,6 +1,6 @@
-"""Pure MVP heuristics for the Relay feature.
+"""Pure MVP heuristics for the review gate and the badges on the stats screen.
 
-There is no real relay/hop-propagation graph in this MVP (every subscriber of a channel
+There is no real hop-propagation graph in this MVP (every subscriber of a channel
 sees every post in it — see CLAUDE.md/plan), so `avg_hops` is a simple, documented proxy
 rather than something derived from real propagation data. Keep these as pure functions
 (no I/O) so they're shared identically between the review-gate check (app/api/posts.py)
@@ -19,7 +19,7 @@ from app.schemas.stats import BadgeRead
 
 
 def is_review_gate_unlocked(user: User) -> bool:
-    return user.is_superuser or user.reviewed_count >= settings.RELAY_REVIEW_GATE
+    return user.is_superuser or user.reviewed_count >= settings.REVIEW_GATE
 
 
 def compute_avg_hops(user: User) -> float:

@@ -1,0 +1,259 @@
+---
+/**
+ * The frame every page shares: the whole <head> (title, description,
+ * canonical, social cards, icons, hreflang, structured data), header with the
+ * language switch, footer, and the small script for theme, header hairline and
+ * reveal-on-scroll.
+ *
+ * A page passes only what differs. The canonical URL and the language are
+ * derived from the route (`/de/...` is German), so neither can disagree with
+ * the URL the page is actually served at.
+ */
+import "@fontsource-variable/space-grotesk";
+// The Latin subset is the one every page renders with; preloading it lets the
+// headline paint in its own face instead of swapping in after the CSS arrives.
+import fontLatin from "@fontsource-variable/space-grotesk/files/space-grotesk-latin-wght-normal.woff2?url";
+import "../styles/global.css";
+
+import { getCollection } from "astro:content";
+
+import {
+  contentLocale,
+  DEFAULT_LOCALE,
+  type Locale,
+  LOCALE_META,
+  LOCALES,
+  localeFromPath,
+  localePath,
+  ui,
+} from "../i18n";
+import { APP_URL, DEFAULT_DESCRIPTION, SITE_NAME, SUPPORT_EMAIL } from "../site";
+
+interface Props {
+  /** The full <title>; also the social-card title unless `ogTitle` is set. */
+  title: string;
+  description?: string;
+  ogTitle?: string;
+  ogDescription?: string;
+  /** Site-relative or absolute. Defaults to the card for the page's language. */
+  ogImage?: string;
+  noindex?: boolean;
+  /**
+   * This page's path in every language it exists in, itself included:
+   * `{ en: "/", de: "/de/" }`. Drives the hreflang links and where the
+   * language switch goes; a language missing here switches to its home page.
+   */
+  translations?: Partial<Record<Locale, string>>;
+  /** One or more schema.org objects, emitted as JSON-LD. */
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
+}
+
+const locale = localeFromPath(Astro.url.pathname);
+const t = ui[locale];
+
+const {
+  title,
+  description = locale === DEFAULT_LOCALE ? DEFAULT_DESCRIPTION : undefined,
+  ogTitle = title,
+  ogDescription = description,
+  ogImage = locale === DEFAULT_LOCALE ? "/og.png" : `/og-${locale}.png`,
+  noindex = false,
+  translations = {},
+  jsonLd,
+} = Astro.props;
+
+const abs = (path: string) => new URL(path, Astro.site).href;
+const canonical = abs(Astro.url.pathname);
+
+// hreflang only pairs pages that really are translations of each other, and
+// only once there are at least two of them. A noindex page pairs with nothing.
+const hreflangs = noindex
+  ? []
+  : LOCALES.flatMap((l) => (translations[l] ? [{ lang: l, href: abs(translations[l]) }] : []));
+const hreflangDefault = translations[DEFAULT_LOCALE];
+
+const otherLocales = LOCALES.filter((l) => l !== locale);
+const switchTo = otherLocales.map((l) => ({
+  locale: l,
+  href: translations[l] ?? localePath(l),
+}));
+
+const legalPages = (
+  await getCollection("pages", (p) => p.data.legal && !p.data.draft && contentLocale(p.id) === locale)
+).sort((a, b) => a.data.title.localeCompare(b.data.title, locale));
+
+const year = new Date().getFullYear();
+---
+<!doctype html>
+<html lang={locale}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+{description && <meta name="description" content={description}>}
+<link rel="canonical" href={canonical}>
+{noindex && <meta name="robots" content="noindex">}
+{hreflangs.length > 1 && hreflangs.map((a) => <link rel="alternate" hreflang={a.lang} href={a.href}>)}
+{hreflangs.length > 1 && hreflangDefault && <link rel="alternate" hreflang="x-default" href={abs(hreflangDefault)}>}
+<meta name="theme-color" content="#059669" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content={SITE_NAME}>
+<meta property="og:title" content={ogTitle}>
+{ogDescription && <meta property="og:description" content={ogDescription}>}
+<meta property="og:url" content={canonical}>
+<meta property="og:image" content={abs(ogImage)}>
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:locale" content={LOCALE_META[locale].ogLocale}>
+{hreflangs.filter((a) => a.lang !== locale).map((a) => <meta property="og:locale:alternate" content={LOCALE_META[a.lang].ogLocale}>)}
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="preload" href={fontLatin} as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+{jsonLd && <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />}
+
+<!-- Before first paint: the saved theme (so a dark-mode reader never sees a
+     white flash) and the `js` class that the reveal effect is gated on. -->
+<script is:inline>
+  (function () {
+    var root = document.documentElement;
+    root.classList.add("js");
+    try {
+      var saved = localStorage.getItem("peerkola-theme");
+      if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
+    } catch (e) { /* private mode / blocked storage - system default is fine */ }
+  })();
+</script>
+<slot name="head" />
+</head>
+<body>
+<a class="skip-link" href="#main">{t.skipToContent}</a>
+
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <defs>
+    <g id="logo" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round">
+      <path d="M54.5 13.3 H86.6 V45.5" stroke-linejoin="miter"/>
+      <path d="M45.5 86.7 H13.4 V54.5" stroke-linejoin="miter"/>
+      <path d="M29.8 18.6 C55 18.6 71 26 71 37.8 C71 49.6 55 57 30.6 57 L30.6 86.7"/>
+    </g>
+  </defs>
+</svg>
+
+<header id="top-bar">
+  <div class="wrap nav">
+    <a class="brand" href={localePath(locale)}>
+      <svg viewBox="0 0 100 100" aria-hidden="true"><use href="#logo"/></svg>
+      <span>{SITE_NAME}</span>
+    </a>
+    <div class="spacer"></div>
+    <nav class="nav-links" aria-label={t.navLabel}>
+      <a href={localePath(locale, "/#how")}>{t.navHow}</a>
+      <a href={localePath(locale, "/#beta")}>{t.navBeta}</a>
+      <a href={localePath(locale, "/#contact")}>{t.navContact}</a>
+    </nav>
+    {switchTo.map((s) => (
+      <a class="icon-btn lang-switch" href={s.href} hreflang={s.locale} lang={s.locale} title={LOCALE_META[s.locale].name}>
+        <span aria-hidden="true">{s.locale.toUpperCase()}</span>
+        <span class="visually-hidden">{LOCALE_META[s.locale].name}</span>
+      </a>
+    ))}
+    <button class="icon-btn" id="theme-toggle" type="button" aria-label={t.themeToggle}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>
+      </svg>
+    </button>
+    <a class="btn btn-primary btn-sm" href={APP_URL} target="_blank" rel="noopener">
+      {t.openApp} <span class="arrow" aria-hidden="true">&rarr;</span>
+    </a>
+  </div>
+</header>
+
+<main id="main">
+  <slot />
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <a class="brand" href={localePath(locale)} style="font-size:.95rem">
+      <svg viewBox="0 0 100 100" aria-hidden="true" style="width:20px;height:20px"><use href="#logo"/></svg>
+      <span>{SITE_NAME}</span>
+    </a>
+    <span class="spacer"></span>
+    <span>&copy; {year} {SITE_NAME}</span>
+    <span class="sep">&middot;</span>
+    <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>
+    <span class="sep">&middot;</span>
+    <a href={APP_URL} target="_blank" rel="noopener">{t.openApp}</a>
+    {legalPages.map((p) => (
+      <Fragment>
+        <span class="sep">&middot;</span>
+        <a href={`/${p.id}/`}>{p.data.title}</a>
+      </Fragment>
+    ))}
+    {switchTo.map((s) => (
+      <Fragment>
+        <span class="sep">&middot;</span>
+        <a href={s.href} hreflang={s.locale} lang={s.locale}>{LOCALE_META[s.locale].name}</a>
+      </Fragment>
+    ))}
+  </div>
+  {legalPages.length === 0 && (
+    <div class="wrap" style="margin-top:14px; font-size:.82rem; opacity:.85">
+      {t.legalPending}
+    </div>
+  )}
+</footer>
+
+<script>
+  const root = document.documentElement;
+
+  /* Theme: follows the system until someone asks for something else, the same
+     default the app itself uses. The saved choice is applied in <head>. */
+  document.getElementById("theme-toggle")?.addEventListener("click", () => {
+    let current = root.getAttribute("data-theme");
+    if (current !== "light" && current !== "dark") {
+      current = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    const next = current === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("peerkola-theme", next); } catch (e) {}
+  });
+
+  /* Hairline under the header, once the page has moved. */
+  const bar = document.getElementById("top-bar");
+  const onScroll = () => bar?.classList.toggle("scrolled", window.scrollY > 6);
+  onScroll();
+  window.addEventListener("scroll", onScroll, { passive: true });
+
+  const reveals = Array.from(document.querySelectorAll(".reveal"));
+  const anims = Array.from(document.querySelectorAll("[data-anim]"));
+
+  if (!("IntersectionObserver" in window)) {
+    /* Degrade to "everything visible, everything running". */
+    reveals.forEach((el) => el.classList.add("in"));
+    anims.forEach((el) => el.classList.add("live"));
+  } else {
+    const revealObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("in");
+        revealObserver.unobserve(entry.target);
+      });
+    }, { rootMargin: "0px 0px -6% 0px" });
+    reveals.forEach((el) => revealObserver.observe(el));
+
+    /* A diagram animates only while it is on screen - the app does the same for
+       the visible page of its tutorial PageView, and for the same reason. */
+    const animObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => entry.target.classList.toggle("live", entry.isIntersecting));
+    }, { rootMargin: "140px 0px" });
+    anims.forEach((el) => animObserver.observe(el));
+  }
+</script>
+</body>
+</html>

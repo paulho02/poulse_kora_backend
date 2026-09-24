@@ -65,7 +65,7 @@ _MONO_FONT = "'SF Mono',SFMono-Regular,Menlo,Consolas,'Courier New',monospace"
 
 _STRINGS: dict[str, dict[str, str]] = {
     "en": {
-        "verify_subject": "Your Poulse Kora verification code",
+        "verify_subject": "Your Peerkola verification code",
         "verify_heading": "Verify your email",
         "verify_lead": (
             "Enter this code in the app to finish setting up your account."
@@ -73,13 +73,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "verify_expiry_one": "This code expires in 1 minute.",
         "verify_expiry_other": "This code expires in {minutes} minutes.",
         "verify_ignore": (
-            "If you didn't create a Poulse Kora account, you can ignore this "
+            "If you didn't create a Peerkola account, you can ignore this "
             "email — nothing will happen."
         ),
         "footer_automated": "This is an automated message, so please don't reply.",
     },
     "de": {
-        "verify_subject": "Dein Poulse Kora Bestätigungscode",
+        "verify_subject": "Dein Peerkola Bestätigungscode",
         "verify_heading": "Bestätige deine E-Mail-Adresse",
         "verify_lead": (
             "Gib diesen Code in der App ein, um dein Konto fertig einzurichten."
@@ -87,7 +87,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "verify_expiry_one": "Dieser Code läuft in 1 Minute ab.",
         "verify_expiry_other": "Dieser Code läuft in {minutes} Minuten ab.",
         "verify_ignore": (
-            "Falls du kein Poulse Kora Konto erstellt hast, kannst du diese "
+            "Falls du kein Peerkola Konto erstellt hast, kannst du diese "
             "E-Mail ignorieren — es passiert nichts."
         ),
         "footer_automated": (
@@ -155,7 +155,7 @@ def _layout(
           <td align="center" style="padding-bottom:20px;font-family:{_FONT};
                      font-size:15px;font-weight:600;letter-spacing:0.3px;
                      color:{_INK};">
-            Poulse<span style="color:{_ACCENT};">&nbsp;Kora</span>
+            Peer<span style="color:{_ACCENT};">kola</span>
           </td>
         </tr>
         <tr>

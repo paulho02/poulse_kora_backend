@@ -20,7 +20,7 @@ LANGUAGE_UNSPECIFIED = "und"
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "Poulse Kora Backend"
+    PROJECT_NAME: str = "Peerkola Backend"
 
     SENTRY_DSN: HttpUrl | None = None
 
@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # Number of posts a user must review (forward or drop) before they can create one.
     # Superusers still bypass gating; no longer gates posting (replaced by the token
     # economy, see the FEED_* settings below), but kept for reference/compatibility.
-    RELAY_REVIEW_GATE: int = 5
+    REVIEW_GATE: int = 5
 
     # Tokens a brand-new account starts with (granted on registration — see
     # UserManager.on_after_register), so signing up is enough to publish a first
@@ -336,8 +336,8 @@ class Settings(BaseSettings):
     # but are rejected outright by the email validator behind `UserRead.email`: this
     # account is a real row, and a superuser listing users has to be able to
     # serialize it.
-    TRUST_PROBE_AUTHOR_USERNAME: str = "poulse"
-    TRUST_PROBE_AUTHOR_EMAIL: str = "probes@poulse.example.com"
+    TRUST_PROBE_AUTHOR_USERNAME: str = "peerkola"
+    TRUST_PROBE_AUTHOR_EMAIL: str = "probes@peerkola.example.com"
 
     # --- volume component ---
     # Reviews in the window below which volume contributes exactly neutral, and the
@@ -561,7 +561,7 @@ class Settings(BaseSettings):
     # Also the sender identity of the Lettermint connector unless LETTERMINT_FROM_*
     # overrides it - see there for when the two have to differ.
     SMTP_FROM_EMAIL: str = "no-reply@poulse.com"
-    SMTP_FROM_NAME: str = "Poulse Kora"
+    SMTP_FROM_NAME: str = "Peerkola"
 
     # --- outbound email: Lettermint connector ---
     # https://lettermint.co - an EU-hosted transactional provider, driven through its
@@ -699,7 +699,7 @@ class Settings(BaseSettings):
     # Declared before S3_BUCKET_NAME so the validator below can see it: pydantic
     # fills `info.data` in field-definition order.
     TEST_S3_BUCKET_NAME: str | None = None
-    S3_BUCKET_NAME: str = "poulse-kora-media"
+    S3_BUCKET_NAME: str = "peerkola-media"
 
     @field_validator("S3_BUCKET_NAME", mode="before")
     @classmethod

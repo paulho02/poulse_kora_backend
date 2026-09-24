@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "poulse_kora_backend-backend"
+name = "peerkola-backend"
 version = "0.1.0"
 description = ""
 authors = []

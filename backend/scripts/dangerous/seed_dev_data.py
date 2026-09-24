@@ -1,4 +1,4 @@
-"""Seed the dev database with bot-authored posts so the Relay review flow
+"""Seed the dev database with bot-authored posts so the Peerkola review flow
 (feed / forward / drop) can actually be exercised.
 
 A post is never delivered to its own author (FEED_EXCLUDE_OWN_POSTS), so a single
@@ -35,10 +35,10 @@ TARGET_POSTS_PER_CHANNEL = 6
 BOT_PASSWORD = "devpassword123"  # dev-only seed accounts, not meant to be logged into
 
 BOTS = [
-    {"email": "relay.bot.ada@kora.dev", "username": "ada_relay"},
-    {"email": "relay.bot.grace@kora.dev", "username": "grace_relay"},
-    {"email": "relay.bot.linus@kora.dev", "username": "linus_relay"},
-    {"email": "relay.bot.marie@kora.dev", "username": "marie_relay"},
+    {"email": "bot.ada@peerkola.dev", "username": "ada_bot"},
+    {"email": "bot.grace@peerkola.dev", "username": "grace_bot"},
+    {"email": "bot.linus@peerkola.dev", "username": "linus_bot"},
+    {"email": "bot.marie@peerkola.dev", "username": "marie_bot"},
 ]
 
 # (text, is_anonymous) — exactly TARGET_POSTS_PER_CHANNEL entries per known channel

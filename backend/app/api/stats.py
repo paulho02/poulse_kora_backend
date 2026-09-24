@@ -6,7 +6,7 @@ from sqlalchemy import Date, cast, func, select
 
 from app.core import trust_service
 from app.core.config import settings
-from app.core.relay_rules import (
+from app.core.review_rules import (
     compute_avg_hops,
     compute_badges,
     is_review_gate_unlocked,
@@ -84,7 +84,7 @@ async def get_my_stats(
         avg_hops=compute_avg_hops(user),
         weekly_activity=weekly_activity,
         badges=compute_badges(user, trust.score),
-        review_gate=settings.RELAY_REVIEW_GATE,
+        review_gate=settings.REVIEW_GATE,
         unlocked=is_review_gate_unlocked(user),
     )
 

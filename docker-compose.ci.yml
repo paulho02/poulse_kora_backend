@@ -1,7 +1,7 @@
 services:
   backend:
-    image: "poulse_kora_backend-backend:latest"
+    image: "peerkola-backend:latest"
 
   # frontend disabled, see docker-compose.yml
   # frontend:
-  #   image: "poulse_kora_backend-frontend:latest"
+  #   image: "peerkola-frontend:latest"

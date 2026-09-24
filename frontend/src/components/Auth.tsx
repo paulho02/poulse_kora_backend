@@ -35,7 +35,7 @@ const Auth: React.FC<AuthProps> = ({
             </Avatar>
           </div>
           <CardHeader
-            title={`Poulse Kora Backend - ${actionName}`}
+            title={`Peerkola Backend - ${actionName}`}
             sx={authStyles.header}
           />
           <div style={authStyles.form}>

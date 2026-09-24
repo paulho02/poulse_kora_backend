@@ -222,7 +222,7 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
             return
         # The probe author's name is reserved outright, case-insensitively, and not
         # only by the row that holds it (see alembic 0005 and app/core/probes.py):
-        # uniqueness is exact-match, so `Poulse` would otherwise be free to take,
+        # uniqueness is exact-match, so `Peerkola` would otherwise be free to take,
         # and every test post the trust score rests on is published under this
         # name. Refused with the same code as a taken name, because to the person
         # typing it that is what it is.

@@ -472,9 +472,13 @@ class TestProbeAuthorIdentity:
     ):
         suffix = uuid.uuid4().hex[:8]
         monkeypatch.setattr(
-            settings, "TRUST_PROBE_AUTHOR_EMAIL", f"probes-{suffix}@poulse.example.com"
+            settings,
+            "TRUST_PROBE_AUTHOR_EMAIL",
+            f"probes-{suffix}@peerkola.example.com",
         )
-        monkeypatch.setattr(settings, "TRUST_PROBE_AUTHOR_USERNAME", f"poulse{suffix}")
+        monkeypatch.setattr(
+            settings, "TRUST_PROBE_AUTHOR_USERNAME", f"peerkola{suffix}"
+        )
         author = await probes._ensure_probe_author(db)
         assert author.is_active is False
         assert author.is_verified is True

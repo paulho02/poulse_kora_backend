@@ -121,7 +121,7 @@ async def create_supporter_checkout(
         customer_id=customer_id,
         amount=settings.SUPPORTER_PRICE_AMOUNT,
         currency=settings.SUPPORTER_PRICE_CURRENCY,
-        description="Poulse Kora supporter subscription",
+        description="Peerkola supporter subscription",
         redirect_url=settings.SUBSCRIPTION_CHECKOUT_REDIRECT_URL,
         webhook_url=_webhook_url(),
         metadata={"user_id": str(user.id)},
@@ -253,7 +253,7 @@ async def mollie_webhook(session: CurrentAsyncSession, id: str = Form(...)):
             amount=settings.SUPPORTER_PRICE_AMOUNT,
             currency=settings.SUPPORTER_PRICE_CURRENCY,
             interval=settings.SUPPORTER_INTERVAL,
-            description="Poulse Kora supporter subscription",
+            description="Peerkola supporter subscription",
             webhook_url=_webhook_url(),
             metadata={"user_id": str(sub.user_id)},
         )

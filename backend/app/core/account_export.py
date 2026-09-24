@@ -149,14 +149,14 @@ class AccountExport:
 
     @property
     def filename(self) -> str:
-        """`poulse-kora-export-2026-09-16.zip`.
+        """`peerkola-export-2026-09-16.zip`.
 
         Dated rather than sequenced: two exports taken on different days are the
         interesting pair to keep apart, and a counter would need server state
         whose only reader is a filename.
         """
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return f"poulse-kora-export-{stamp}.zip"
+        return f"peerkola-export-{stamp}.zip"
 
 
 # --- README --------------------------------------------------------------
@@ -169,8 +169,8 @@ class AccountExport:
 _STRINGS: dict[str, dict[str, str]] = {
     "en": {
         "readme": (
-            "POULSE KORA - YOUR DATA EXPORT\n"
-            "==============================\n"
+            "PEERKOLA - YOUR DATA EXPORT\n"
+            "===========================\n"
             "\n"
             "Created: {generated_at}\n"
             "Account: {user_id}\n"
@@ -260,8 +260,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "de": {
         "readme": (
-            "POULSE KORA - DEIN DATENEXPORT\n"
-            "==============================\n"
+            "PEERKOLA - DEIN DATENEXPORT\n"
+            "===========================\n"
             "\n"
             "Erstellt: {generated_at}\n"
             "Konto:    {user_id}\n"

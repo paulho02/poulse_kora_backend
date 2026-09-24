@@ -36,7 +36,7 @@ class TestSendEmail:
         monkeypatch.setattr(settings, "SMTP_PASSWORD", "pass")
         monkeypatch.setattr(settings, "SMTP_USE_TLS", True)
         monkeypatch.setattr(settings, "SMTP_FROM_EMAIL", "no-reply@poulse.com")
-        monkeypatch.setattr(settings, "SMTP_FROM_NAME", "Poulse Kora")
+        monkeypatch.setattr(settings, "SMTP_FROM_NAME", "Peerkola")
 
         send_mock = AsyncMock()
         monkeypatch.setattr(email.aiosmtplib, "send", send_mock)
@@ -47,7 +47,7 @@ class TestSendEmail:
         message = send_mock.await_args.args[0]
         assert message["To"] == "to@example.com"
         assert message["Subject"] == "hi"
-        assert message["From"] == "Poulse Kora <no-reply@poulse.com>"
+        assert message["From"] == "Peerkola <no-reply@poulse.com>"
         assert message.get_content().strip() == "body text"
 
         kwargs = send_mock.await_args.kwargs
@@ -177,14 +177,14 @@ def lettermint(monkeypatch):
 class TestSendEmailViaLettermint:
     async def test_sends_with_expected_fields(self, lettermint, monkeypatch):
         monkeypatch.setattr(settings, "LETTERMINT_FROM_EMAIL", "hi@lettermint.test")
-        monkeypatch.setattr(settings, "LETTERMINT_FROM_NAME", "Poulse Kora")
+        monkeypatch.setattr(settings, "LETTERMINT_FROM_NAME", "Peerkola")
 
         await email.send_email("to@example.com", "hi", "body text")
 
         client = lettermint.instances[0]
         assert client.api_token == "lm_token"
         assert client.email.calls == {
-            "from": "Poulse Kora <hi@lettermint.test>",
+            "from": "Peerkola <hi@lettermint.test>",
             "to": ("to@example.com",),
             "subject": "hi",
             "text": "body text",
@@ -222,12 +222,12 @@ class TestSendEmailViaLettermint:
 
     async def test_from_falls_back_to_smtp_identity(self, lettermint, monkeypatch):
         monkeypatch.setattr(settings, "SMTP_FROM_EMAIL", "no-reply@poulse.com")
-        monkeypatch.setattr(settings, "SMTP_FROM_NAME", "Poulse Kora")
+        monkeypatch.setattr(settings, "SMTP_FROM_NAME", "Peerkola")
 
         await email.send_email("to@example.com", "hi", "body")
 
         from_header = lettermint.instances[0].email.calls["from"]
-        assert from_header == "Poulse Kora <no-reply@poulse.com>"
+        assert from_header == "Peerkola <no-reply@poulse.com>"
 
     async def test_route_is_omitted_when_unset(self, lettermint):
         """Unset must mean the account's default route, not a null route."""

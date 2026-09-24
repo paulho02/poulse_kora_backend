@@ -4,9 +4,13 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project
 
+The product is **Peerkola** (peer + percolation). The repository directories still carry the
+pre-rename name (`poulse_kora_backend`, `poulse_kora_app`) and are the one place the old name
+is deliberately kept; everything inside them says Peerkola.
+
 FastAPI backend (`backend/`), generated from the `fastapi-starter` template. Its client is the
 Flutter app in the sibling repo `poulse_kora_app` (see that repo's CLAUDE.md). Also here:
-`landing/` (static landing page), `docs/` (analysis notes and GDPR/hosting research — prose, not
+`landing/` (Astro static site for peerkola.com — see its README), `docs/` (analysis notes and GDPR/hosting research — prose, not
 code), `RAILWAY.md` (deployment), `env-template`.
 
 The template's React Admin frontend (`frontend/`) is **not used** and is disabled rather than
@@ -21,7 +25,7 @@ only by the template's `items.py`. New endpoints for the mobile app need not fol
 Local dev is Docker Compose (hot reload via `docker-compose.override.yml`).
 
 ```bash
-docker compose up -d                                   # backend + postgres + redis + minio
+docker compose up -d                                   # backend + postgres + redis + minio + landing (:4321)
 docker compose up -d --build                           # after changing pyproject.toml
 docker compose exec backend alembic upgrade head       # apply migrations
 docker compose exec postgres createdb apptest -U postgres   # one-time test DB
@@ -394,7 +398,9 @@ than failing. fastapi-users' `on_after_register`/`on_after_update` hooks get onl
   - The probe author is minted by migration `0005_probe_author` so its email/username can't be
     squatted before first use. `_ensure_probe_author` still creates on demand (the test schema is
     `create_all`) but only adopts an `is_active = false` row; `_check_username_free` is
-    case-insensitive.
+    case-insensitive. `0006_rename_probe_author` moved that identity to the Peerkola one on
+    databases already past 0005 — renaming those two settings again needs the same treatment,
+    or the old row is orphaned and a second author is minted.
   - **No cleanup job for probe rows**: the score reads `ProbeResponse.created` (answered), a probe
     carries `Post.created` (minted), and a probe waits in a Redis queue Postgres can't see —
     pruning by mint age would move live trust and hand readers ghost cards.

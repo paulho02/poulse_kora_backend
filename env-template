@@ -84,10 +84,10 @@ S3_PUBLIC_ENDPOINT_URL=http://localhost:9000
 # pytest runs inside the backend container, so "the client" there reaches MinIO
 # on the compose network rather than on the host.
 TEST_S3_PUBLIC_ENDPOINT_URL=http://minio:9000
-S3_BUCKET_NAME=poulse-kora-media
+S3_BUCKET_NAME=peerkola-media
 # Separate bucket for pytest, mirroring TEST_DATABASE_URL/TEST_REDIS_URL - a test
 # run must never write into (or delete out of) the bucket the dev app is using.
-TEST_S3_BUCKET_NAME=poulse-kora-media-test
+TEST_S3_BUCKET_NAME=peerkola-media-test
 AWS_DEFAULT_REGION=us-east-1
 # MinIO root credentials; also consumed by the minio service in docker-compose.yml.
 # Password must be at least 8 characters. Local-only values - Railway injects real
@@ -127,7 +127,7 @@ EMAIL_PROVIDER=smtp
 # SMTP_PASSWORD=
 # SMTP_USE_TLS=true
 # SMTP_FROM_EMAIL=no-reply@poulse.com
-# SMTP_FROM_NAME=Poulse Kora
+# SMTP_FROM_NAME=Peerkola
 #
 # Lettermint connector. LETTERMINT_API_TOKEN is a *sending* token from the
 # Lettermint dashboard, not a team API token, and it is required the moment
@@ -183,7 +183,7 @@ GOOGLE_CLIENT_IDS='["CHANGE_ME.apps.googleusercontent.com"]'
 #   Never reuse a CHANGE_ME/dev value anywhere reachable from the internet.
 # BACKEND_CORS_ORIGINS: must list the exact https:// origin(s) the deployed Flutter
 #   web app is served from (its Railway domain, and any custom domain), e.g.
-#   '["https://poulse-kora-app-production.up.railway.app"]'. No wildcards.
+#   '["https://app.peerkola.com"]'. No wildcards.
 # REQUIRE_STRONG_PASSWORD: defaults to false (fine for pure local dev). Set to true
 #   for any environment reachable over the internet, including "int".
 # EMAIL_PROVIDER and its connector's settings: one of the two must be configured

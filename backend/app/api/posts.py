@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.core.errors import api_error
 from app.core.logger import get_logger
 from app.core.media_validation import ProcessedMedia, process_upload
-from app.core.relay_rules import is_review_gate_unlocked
+from app.core.review_rules import is_review_gate_unlocked
 from app.core.storage import (
     MEDIA_CACHE_CONTROL,
     StorageError,
@@ -793,7 +793,7 @@ async def review_post(
             # The reader's own counters, unchanged and read back as they stand. A probe
             # is not a review, and the profile tile must not claim otherwise.
             reviewed_count=user.reviewed_count,
-            review_gate=settings.RELAY_REVIEW_GATE,
+            review_gate=settings.REVIEW_GATE,
             unlocked=is_review_gate_unlocked(user),
             token_balance=token_balance,
             # Zero rather than the row's real 0/1: a probe is minted for one reader and
@@ -883,7 +883,7 @@ async def review_post(
         post_id=post_id,
         kind=review_in.kind,
         reviewed_count=user.reviewed_count,
-        review_gate=settings.RELAY_REVIEW_GATE,
+        review_gate=settings.REVIEW_GATE,
         unlocked=is_review_gate_unlocked(user),
         token_balance=token_balance,
         post_forwarded_count=post.forwarded_count,

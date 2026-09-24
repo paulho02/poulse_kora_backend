@@ -89,7 +89,7 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     settings_revision: Mapped[int] = mapped_column(default=0, server_default="0")
 
     # Denormalized counters, updated transactionally alongside `PostReview` inserts
-    # (see app/core/relay_rules.py) so the review-gate check is an O(1) attribute read.
+    # (see app/core/review_rules.py) so the review-gate check is an O(1) attribute read.
     reviewed_count: Mapped[int] = mapped_column(default=0, server_default="0")
     forwarded_count: Mapped[int] = mapped_column(default=0, server_default="0")
     dropped_count: Mapped[int] = mapped_column(default=0, server_default="0")

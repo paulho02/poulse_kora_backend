@@ -21,7 +21,7 @@ jobs:
       uses: docker/build-push-action@v2
       with:
         push: false
-        tags: "poulse_kora_backend-backend:latest"
+        tags: "peerkola-backend:latest"
         cache-from: type=gha
         cache-to: type=gha,mode=max
         context: backend
@@ -33,7 +33,7 @@ jobs:
     #   uses: docker/build-push-action@v2
     #   with:
     #     push: false
-    #     tags: "poulse_kora_backend-frontend:latest"
+    #     tags: "peerkola-frontend:latest"
     #     cache-from: type=gha,scope=ci-test
     #     cache-to: type=gha,mode=max,scope=ci-test
     #     context: frontend

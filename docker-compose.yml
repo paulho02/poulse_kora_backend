@@ -62,6 +62,17 @@ services:
       minio:
         condition: service_healthy
 
+  # The peerkola.com site (landing/). This is the production image - Caddy
+  # serving the prerendered HTML, exactly what Railway runs; the override swaps
+  # in the Astro dev server with hot reload. Independent of the backend.
+  landing:
+    build:
+      context: landing
+    ports:
+      - "4321:4321"
+    environment:
+      PORT: 4321
+
   # frontend service disabled: the React Admin frontend is unused for now.
   # The poulse_kora_app repo will be the client. Kept here (not deleted) in
   # case it's needed again later.

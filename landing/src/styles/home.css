@@ -1,0 +1,345 @@
+/* The home page only: hero, fact strips, chapters and the animated diagrams. */
+
+/* ------------------------------------------------------------------ hero */
+.hero{position:relative; overflow:hidden; padding:clamp(44px,6vw,88px) 0 clamp(40px,6vw,72px)}
+.hero::before{
+  content:""; position:absolute; inset:-45% 0 auto 0; height:560px; pointer-events:none;
+  background:radial-gradient(58% 58% at 50% 42%, var(--accent-soft), transparent 70%);
+}
+.hero .wrap{position:relative}
+.hero-grid{display:grid; gap:clamp(30px,4vw,56px); grid-template-columns:1fr}
+@media (min-width:900px){ .hero-grid{grid-template-columns:1.05fr .95fr; align-items:center} }
+.pill{
+  display:inline-flex; align-items:center; gap:.5em;
+  padding:.34em .8em; border-radius:999px;
+  background:var(--accent-soft); color:var(--accent-ink);
+  font-size:.82rem; font-weight:600;
+}
+.pill .dot{width:7px; height:7px; border-radius:50%; background:var(--accent)}
+.hero h1{margin:18px 0 0}
+.hero .lede{margin-top:18px; font-size:clamp(1.02rem,.95rem + .35vw,1.18rem); color:var(--muted); max-width:34em}
+.cta-row{display:flex; flex-wrap:wrap; gap:12px; margin-top:30px}
+.cta-note{margin-top:14px; font-size:.86rem; color:var(--muted)}
+
+.art-frame{
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:var(--radius-lg);
+  box-shadow:var(--shadow);
+  padding:18px 16px 14px;
+}
+.art-frame .cap{display:block; text-align:center; margin-top:6px; font-size:.82rem; color:var(--muted)}
+
+/* ---------------------------------------------------------------- strips */
+.strip{border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--surface)}
+.facts{display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--line)}
+@media (max-width:760px){ .facts{grid-template-columns:1fr} }
+.fact{background:var(--surface); padding:26px 24px}
+.fact b{display:block; font-size:1.02rem; margin-bottom:4px}
+.fact span{color:var(--muted); font-size:.94rem}
+
+/* -------------------------------------------------------------- chapters */
+section{padding:clamp(54px,7vw,96px) 0}
+.section-head{max-width:46ch}
+.section-head h2{margin-top:12px}
+.section-head p{margin-top:14px; color:var(--muted)}
+
+.chapters{margin-top:clamp(32px,5vw,58px); display:flex; flex-direction:column; gap:clamp(24px,3.4vw,40px)}
+.chapter{
+  display:grid; gap:clamp(18px,3vw,44px); align-items:center;
+  grid-template-columns:1fr;
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:var(--radius-lg);
+  padding:clamp(20px,3vw,34px);
+  box-shadow:var(--shadow);
+}
+@media (min-width:860px){
+  .chapter{grid-template-columns:1fr 1fr}
+  .chapter.flip .art-col{order:-1}
+}
+.chapter .num{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:30px; height:30px; border-radius:9px;
+  background:var(--accent-soft); color:var(--accent-ink);
+  font-size:.9rem; font-weight:700; margin-bottom:14px;
+}
+.chapter h3{margin-bottom:10px}
+.chapter p{color:var(--muted)}
+.art{background:var(--surface-2); border-radius:var(--radius); padding:14px 12px 10px}
+.art svg{display:block; width:100%; height:auto}
+.legend{display:flex; gap:10px; justify-content:center; align-items:center; flex-wrap:wrap; margin-top:10px; font-size:.78rem; min-height:1.9em}
+.legend-stack{display:grid; justify-content:center; margin-top:10px; min-height:1.9em}
+.legend-stack > *{grid-area:1 / 1}
+.tag{display:inline-flex; align-items:center; gap:.45em; padding:.26em .75em; border-radius:999px; font-weight:600; white-space:nowrap}
+.tag.a{background:var(--accent-soft); color:var(--accent-ink)}
+.tag.n{background:rgba(120,132,126,.16); color:var(--muted)}
+.tag.d{background:rgba(186,26,26,.14); color:var(--danger)}
+.tag i{width:7px; height:7px; border-radius:50%; background:currentColor; display:block; flex:none}
+
+/* ------------------------------------------------------------------ beta */
+.beta{
+  display:grid; gap:20px; grid-template-columns:1fr;
+  border:1px dashed var(--faint); border-radius:var(--radius-lg);
+  padding:clamp(22px,3vw,32px);
+  background:var(--surface);
+}
+@media (min-width:860px){ .beta{grid-template-columns:.75fr 1.25fr} }
+.beta ul{margin:0; padding-left:1.15em; color:var(--muted)}
+.beta li{margin:.42em 0}
+
+/* --------------------------------------------------------------- closing */
+.closing{
+  text-align:center;
+  border:1px solid var(--line); border-radius:var(--radius-lg);
+  background:var(--surface); box-shadow:var(--shadow);
+  padding:clamp(34px,5vw,60px) clamp(20px,4vw,48px);
+}
+.closing h2{max-width:20ch; margin:14px auto 0}
+.closing p{margin:16px auto 0; color:var(--muted); max-width:46ch}
+.closing .cta-row{justify-content:center}
+
+.contact{display:grid; gap:20px; grid-template-columns:1fr}
+@media (min-width:780px){ .contact{grid-template-columns:1fr 1fr} }
+.card{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-lg); padding:clamp(20px,3vw,30px)}
+.card h3{margin-bottom:8px}
+.card p{color:var(--muted); font-size:.95rem}
+.mail{
+  display:inline-flex; align-items:center; gap:.5em; margin-top:16px;
+  font-weight:600; font-size:1.02rem; color:var(--accent-ink); text-decoration:none;
+}
+.mail:hover{text-decoration:underline}
+
+/* ============================================================== DIAGRAMS
+   Hand-drawn the same way the app's tutorial illustrations are (see
+   lib/src/features/tutorial/presentation/tutorial_illustrations.dart): plain
+   geometry taking every colour from the theme, so one copy works in both
+   themes, and one looping clock per diagram out of which every phase is cut
+   with keyframe percentages. */
+.disc-off{fill:var(--faint)}
+.fig-off{fill:var(--muted); opacity:.7}
+.disc-on{fill:var(--accent)}
+.fig-on{fill:var(--on-accent)}
+.edge{stroke:var(--faint); stroke-width:2.4; fill:none; stroke-linecap:round; stroke-linejoin:round}
+.edge-lit{stroke:var(--accent); stroke-width:2.8; fill:none; stroke-linecap:round; stroke-linejoin:round; opacity:.85}
+.ring{fill:none; stroke:var(--accent); stroke-width:2.2; transform-box:fill-box; transform-origin:center}
+.card-body{fill:currentColor}
+.card-line{stroke:var(--on-accent); stroke-width:2.2; stroke-linecap:round; opacity:.85}
+.ink-accent{color:var(--accent)}
+.ink-muted{color:var(--muted)}
+/* Anything scaled or rotated pivots around itself, not around the viewBox. */
+.an-fcard, .an-x, .an-rv0, .an-rv1{transform-box:fill-box; transform-origin:center}
+.slot{fill:none; stroke:var(--faint); stroke-width:2; stroke-dasharray:5 5}
+.coin{fill:var(--accent)}
+.coin-in{fill:var(--on-accent); opacity:.5}
+.xmark{stroke:var(--danger); stroke-width:4; stroke-linecap:round; fill:none}
+.dlabel{fill:var(--muted); font-size:11px; font-family:inherit}
+
+/* A diagram animates only while it is on screen — the app does the same for
+   the visible page of its PageView, and for the same reason. */
+.anim [class*="an-"]{animation-play-state:paused}
+.anim.live [class*="an-"]{animation-play-state:running}
+
+/* Reduced motion: hold one representative frame rather than frame 0, which is
+   an empty stage in every one of these. */
+@media (prefers-reduced-motion: reduce){
+  .anim [class*="an-"], .anim.live [class*="an-"]{
+    animation-play-state:paused !important;
+    animation-delay:calc(var(--dur) * -0.42) !important;
+  }
+}
+
+/* Reduced motion: hold one representative frame rather than frame 0, which is
+/* ---------------------------------------------- 1. a post, hand to hand */
+.relay{--dur:5.6s}
+.relay .an-card{animation:relayCard var(--dur) linear infinite}
+@keyframes relayCard{
+  0%    {transform:translate(56px,-20px); opacity:0}
+  5%    {opacity:1}
+  8%    {transform:translate(56px,84px)}
+  13.8% {transform:translate(80px,62px)}
+  19.7% {transform:translate(104px,50px)}
+  25.5% {transform:translate(128px,49px)}
+  31.3% {transform:translate(152px,59px)}
+  37.2% {transform:translate(176px,49px)}
+  43%   {transform:translate(200px,50px)}
+  48.9% {transform:translate(224px,62px)}
+  54.7% {transform:translate(248px,84px)}
+  60.5% {transform:translate(272px,62px)}
+  66.4% {transform:translate(296px,50px)}
+  72.2% {transform:translate(320px,49px)}
+  78%   {transform:translate(344px,59px); opacity:1}
+  90%   {transform:translate(344px,59px); opacity:1}
+  97%   {transform:translate(344px,59px); opacity:0}
+  100%  {transform:translate(56px,-20px); opacity:0}
+}
+.relay .an-lit0{animation:lit0 var(--dur) linear infinite}
+.relay .an-lit1{animation:lit1 var(--dur) linear infinite}
+.relay .an-lit2{animation:lit2 var(--dur) linear infinite}
+.relay .an-lit3{animation:lit3 var(--dur) linear infinite}
+@keyframes lit0{0%,7%{opacity:0} 11%,92%{opacity:1} 98%,100%{opacity:0}}
+@keyframes lit1{0%,30.3%{opacity:0} 34%,92%{opacity:1} 98%,100%{opacity:0}}
+@keyframes lit2{0%,53.7%{opacity:0} 57%,92%{opacity:1} 98%,100%{opacity:0}}
+@keyframes lit3{0%,77%{opacity:0} 81%,92%{opacity:1} 98%,100%{opacity:0}}
+.relay .an-ring0{animation:ring0 var(--dur) ease-out infinite}
+.relay .an-ring1{animation:ring1 var(--dur) ease-out infinite}
+.relay .an-ring2{animation:ring2 var(--dur) ease-out infinite}
+.relay .an-ring3{animation:ring3 var(--dur) ease-out infinite}
+@keyframes ring0{0%,8%{transform:scale(1); opacity:.5} 22%,100%{transform:scale(1.85); opacity:0}}
+@keyframes ring1{0%,31.2%{transform:scale(1); opacity:0} 31.3%{transform:scale(1); opacity:.5} 45%,100%{transform:scale(1.85); opacity:0}}
+@keyframes ring2{0%,54.6%{transform:scale(1); opacity:0} 54.7%{transform:scale(1); opacity:.5} 68%,100%{transform:scale(1.85); opacity:0}}
+@keyframes ring3{0%,77.9%{transform:scale(1); opacity:0} 78%{transform:scale(1); opacity:.5} 91%,100%{transform:scale(1.85); opacity:0}}
+.relay .an-e0{animation:e0 var(--dur) linear infinite}
+.relay .an-e1{animation:e1 var(--dur) linear infinite}
+.relay .an-e2{animation:e2 var(--dur) linear infinite}
+@keyframes e0{0%,8%{stroke-dashoffset:1} 31.3%,96%{stroke-dashoffset:0} 96.01%,100%{stroke-dashoffset:1}}
+@keyframes e1{0%,31.3%{stroke-dashoffset:1} 54.7%,96%{stroke-dashoffset:0} 96.01%,100%{stroke-dashoffset:1}}
+@keyframes e2{0%,54.7%{stroke-dashoffset:1} 78%,96%{stroke-dashoffset:0} 96.01%,100%{stroke-dashoffset:1}}
+
+/* ------------------------------ 2. broadcast (left) versus relay (right) */
+.bcast{--dur:3.4s}
+.bcast .an-rays{animation:rays var(--dur) ease-out infinite}
+@keyframes rays{0%,6%{stroke-dashoffset:1} 34%,88%{stroke-dashoffset:0} 96%,100%{stroke-dashoffset:1}}
+.bcast .an-all{animation:allLit var(--dur) linear infinite}
+@keyframes allLit{0%,32%{opacity:0} 40%,88%{opacity:1} 96%,100%{opacity:0}}
+.bcast .an-pulse{animation:pulse var(--dur) ease-out infinite}
+.bcast .an-pulse2{animation:pulse var(--dur) ease-out infinite; animation-delay:-1.7s}
+@keyframes pulse{0%{transform:scale(.9); opacity:.3} 100%{transform:scale(3.2); opacity:0}}
+
+.rly{--dur:4.6s}
+.rly .an-chain{animation:chain var(--dur) linear infinite}
+@keyframes chain{0%,8%{stroke-dashoffset:1} 62%,90%{stroke-dashoffset:0} 96%,100%{stroke-dashoffset:1}}
+.rly .an-r0{animation:r0 var(--dur) linear infinite}
+.rly .an-r1{animation:r1 var(--dur) linear infinite}
+.rly .an-r2{animation:r2 var(--dur) linear infinite}
+.rly .an-r3{animation:r3 var(--dur) linear infinite}
+@keyframes r0{0%,21%{opacity:0} 26%,90%{opacity:1} 96%,100%{opacity:0}}
+@keyframes r1{0%,34%{opacity:0} 39%,90%{opacity:1} 96%,100%{opacity:0}}
+@keyframes r2{0%,47%{opacity:0} 52%,90%{opacity:1} 96%,100%{opacity:0}}
+@keyframes r3{0%,60%{opacity:0} 65%,90%{opacity:1} 96%,100%{opacity:0}}
+
+/* ------------------------------------------------- 3. forward, or drop */
+.fwd{--dur:7.6s}
+.fwd .an-fcard{animation:fcard var(--dur) ease-in-out infinite}
+@keyframes fcard{
+  0%   {transform:translate(106px,60px) scale(1) rotate(0deg); opacity:0}
+  5%   {transform:translate(106px,60px) scale(1) rotate(0deg); opacity:1}
+  26%  {transform:translate(178px,84px) scale(1) rotate(0deg); opacity:1}
+  34%  {transform:translate(200px,88px) scale(1) rotate(0deg); opacity:0}
+  50%  {transform:translate(106px,60px) scale(1) rotate(0deg); opacity:0}
+  56%  {transform:translate(106px,60px) scale(1) rotate(0deg); opacity:1}
+  76%  {transform:translate(106px,60px) scale(1) rotate(0deg); opacity:1}
+  88%  {transform:translate(106px,60px) scale(.5) rotate(-16deg); opacity:0}
+  100% {transform:translate(106px,60px) scale(.5) rotate(-16deg); opacity:0}
+}
+.fwd .an-fedge{animation:fedge var(--dur) linear infinite}
+@keyframes fedge{0%,12%{stroke-dashoffset:1} 34%,44%{stroke-dashoffset:0} 46%,100%{stroke-dashoffset:1}}
+.fwd .an-flit0{animation:flit0 var(--dur) linear infinite}
+.fwd .an-flit1{animation:flit1 var(--dur) linear infinite}
+.fwd .an-flit2{animation:flit2 var(--dur) linear infinite}
+@keyframes flit0{0%,28%{opacity:0} 33%,44%{opacity:1} 48%,100%{opacity:0}}
+@keyframes flit1{0%,31%{opacity:0} 36%,44%{opacity:1} 48%,100%{opacity:0}}
+@keyframes flit2{0%,34%{opacity:0} 39%,44%{opacity:1} 48%,100%{opacity:0}}
+.fwd .an-x{animation:xin var(--dur) ease-out infinite}
+@keyframes xin{0%,76%{transform:scale(0); opacity:0} 84%,94%{transform:scale(1); opacity:1} 99%,100%{transform:scale(1); opacity:0}}
+.fwd .an-capf{animation:capf var(--dur) linear infinite}
+.fwd .an-capd{animation:capd var(--dur) linear infinite}
+@keyframes capf{0%,2%{opacity:0} 8%,44%{opacity:1} 48%,100%{opacity:0}}
+@keyframes capd{0%,52%{opacity:0} 58%,94%{opacity:1} 99%,100%{opacity:0}}
+
+/* --------------------------------------------- 4. earn, and then spend */
+.econ{--dur:6.4s}
+.econ .an-rv0{animation:rv0 var(--dur) ease-out infinite}
+.econ .an-rv1{animation:rv1 var(--dur) ease-out infinite}
+@keyframes rv0{
+  0%{transform:translate(52px,54px) scale(.82) rotate(0deg); opacity:0}
+  5%{opacity:1}
+  9%{transform:translate(52px,54px) scale(1) rotate(0deg)}
+  16%{transform:translate(52px,54px) scale(1) rotate(0deg); opacity:1}
+  23%{transform:translate(20px,44px) scale(1) rotate(-18deg); opacity:0}
+  100%{transform:translate(20px,44px) scale(1) rotate(-18deg); opacity:0}
+}
+@keyframes rv1{
+  0%,25%{transform:translate(52px,54px) scale(.82) rotate(0deg); opacity:0}
+  30%{opacity:1}
+  34%{transform:translate(52px,54px) scale(1) rotate(0deg)}
+  41%{transform:translate(52px,54px) scale(1) rotate(0deg); opacity:1}
+  48%{transform:translate(20px,44px) scale(1) rotate(-18deg); opacity:0}
+  100%{transform:translate(20px,44px) scale(1) rotate(-18deg); opacity:0}
+}
+.econ .an-c0{animation:c0 var(--dur) ease-in-out infinite}
+.econ .an-c1{animation:c1 var(--dur) ease-in-out infinite}
+@keyframes c0{
+  0%,15%{transform:translate(52px,54px); opacity:0}
+  17%{transform:translate(60px,50px); opacity:1}
+  22%{transform:translate(102px,40px); opacity:1}
+  28%{transform:translate(136px,74px); opacity:1}
+  31%,100%{transform:translate(136px,74px); opacity:0}
+}
+@keyframes c1{
+  0%,40%{transform:translate(52px,54px); opacity:0}
+  42%{transform:translate(60px,50px); opacity:1}
+  47%{transform:translate(120px,40px); opacity:1}
+  53%{transform:translate(160px,74px); opacity:1}
+  56%,100%{transform:translate(160px,74px); opacity:0}
+}
+.econ .an-s0{animation:slot0 var(--dur) linear infinite}
+.econ .an-s1{animation:slot1 var(--dur) linear infinite}
+@keyframes slot0{0%,28%{opacity:0} 31%,64%{opacity:1} 70%,100%{opacity:0}}
+@keyframes slot1{0%,53%{opacity:0} 56%,64%{opacity:1} 70%,100%{opacity:0}}
+.econ .an-spend{animation:spend var(--dur) ease-in-out infinite}
+@keyframes spend{
+  0%,64%{transform:translate(148px,74px); opacity:0}
+  67%{transform:translate(160px,70px); opacity:1}
+  74%{transform:translate(206px,44px); opacity:1}
+  80%{transform:translate(244px,62px); opacity:1}
+  83%,100%{transform:translate(244px,62px); opacity:0}
+}
+.econ .an-pub{animation:pub var(--dur) ease-out infinite}
+@keyframes pub{
+  0%,80%{transform:translate(244px,74px); opacity:0}
+  86%{transform:translate(244px,62px); opacity:1}
+  95%{transform:translate(244px,30px); opacity:1}
+  100%{transform:translate(244px,14px); opacity:0}
+}
+
+/* ------------------------------------------ 5. a feed allowed to end */
+.queue{--dur:7.2s}
+.queue .an-q0{animation:q0 var(--dur) ease-in-out infinite}
+.queue .an-q1{animation:q1 var(--dur) ease-in-out infinite}
+.queue .an-q2{animation:q2 var(--dur) ease-in-out infinite}
+.queue .an-q3{animation:q3 var(--dur) ease-in-out infinite}
+@keyframes q0{
+  0%,8%{transform:translateX(0); opacity:1}
+  15%{transform:translateX(-130px); opacity:0}
+  78%{transform:translateX(160px); opacity:0}
+  88%,100%{transform:translateX(0); opacity:1}
+}
+@keyframes q1{
+  0%,8%{transform:translateX(0); opacity:1}
+  15%,22%{transform:translateX(-58px); opacity:1}
+  29%{transform:translateX(-195px); opacity:0}
+  84%{transform:translateX(160px); opacity:0}
+  94%,100%{transform:translateX(0); opacity:1}
+}
+@keyframes q2{
+  0%,8%{transform:translateX(0); opacity:1}
+  15%,22%{transform:translateX(-58px); opacity:1}
+  29%,36%{transform:translateX(-116px); opacity:1}
+  43%{transform:translateX(-260px); opacity:0}
+  90%{transform:translateX(0); opacity:0}
+  97%,100%{transform:translateX(0); opacity:1}
+}
+@keyframes q3{
+  0%,8%{transform:translateX(0); opacity:1}
+  15%,22%{transform:translateX(-58px); opacity:1}
+  29%,36%{transform:translateX(-116px); opacity:1}
+  43%,50%{transform:translateX(-174px); opacity:1}
+  57%{transform:translateX(-330px); opacity:0}
+  95%{transform:translateX(0); opacity:0}
+  100%{transform:translateX(0); opacity:1}
+}
+.queue .an-empty{animation:emptyq var(--dur) linear infinite}
+@keyframes emptyq{0%,57%{opacity:0} 63%,76%{opacity:1} 82%,100%{opacity:0}}
+.queue .an-breathe{animation:breathe 2.2s ease-in-out infinite}
+@keyframes breathe{0%,100%{opacity:.4} 50%{opacity:.9}}

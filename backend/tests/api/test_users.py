@@ -587,7 +587,7 @@ class TestUsernamePolicy:
         self, client: AsyncClient, create_user: Callable
     ):
         """Every test post is published under this name, and uniqueness is
-        exact-match - so `Poulse` has to be refused explicitly, on both writers."""
+        exact-match - so `Peerkola` has to be refused explicitly, on both writers."""
         user = await create_user()
         resp = await self._set_username(
             client, user, settings.TRUST_PROBE_AUTHOR_USERNAME.upper()

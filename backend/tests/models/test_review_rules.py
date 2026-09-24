@@ -1,5 +1,5 @@
 from app.core.config import settings
-from app.core.relay_rules import (
+from app.core.review_rules import (
     compute_avg_hops,
     compute_badges,
     is_review_gate_unlocked,
@@ -19,12 +19,12 @@ def _user(**overrides) -> User:
 
 
 def test_review_gate_locked_below_threshold():
-    user = _user(reviewed_count=settings.RELAY_REVIEW_GATE - 1)
+    user = _user(reviewed_count=settings.REVIEW_GATE - 1)
     assert is_review_gate_unlocked(user) is False
 
 
 def test_review_gate_unlocked_at_threshold():
-    user = _user(reviewed_count=settings.RELAY_REVIEW_GATE)
+    user = _user(reviewed_count=settings.REVIEW_GATE)
     assert is_review_gate_unlocked(user) is True
 
 

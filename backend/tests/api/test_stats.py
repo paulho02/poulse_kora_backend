@@ -22,7 +22,7 @@ class TestGetMyStats:
         assert data["dropped_count"] == 0
         assert data["created_post_count"] == 0
         assert data["unlocked"] is False
-        assert data["review_gate"] == settings.RELAY_REVIEW_GATE
+        assert data["review_gate"] == settings.REVIEW_GATE
         assert len(data["weekly_activity"]) == 7
         assert all(bucket["count"] == 0 for bucket in data["weekly_activity"])
 
@@ -32,7 +32,7 @@ class TestGetMyStats:
         user: User = await create_user()
         channel: Channel = await create_channel()
         await subscribe(db, user, channel)
-        for _ in range(settings.RELAY_REVIEW_GATE):
+        for _ in range(settings.REVIEW_GATE):
             post = await create_post(channel=channel)
             await review(db, user, post, "forward")
 
@@ -41,11 +41,11 @@ class TestGetMyStats:
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()
-        assert data["reviewed_count"] == settings.RELAY_REVIEW_GATE
-        assert data["forwarded_count"] == settings.RELAY_REVIEW_GATE
+        assert data["reviewed_count"] == settings.REVIEW_GATE
+        assert data["forwarded_count"] == settings.REVIEW_GATE
         assert data["unlocked"] is True
         assert sum(bucket["count"] for bucket in data["weekly_activity"]) == (
-            settings.RELAY_REVIEW_GATE
+            settings.REVIEW_GATE
         )
         badge_codes_earned = {
             b["code"] for b in data["badges"] if b["earned"]

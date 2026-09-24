@@ -1,0 +1,56 @@
+# Serves the prerendered site in dist/. Used by the Dockerfile.
+{
+	admin off
+	persist_config off
+	auto_https off
+	log {
+		format json
+	}
+}
+
+:{$PORT:8080} {
+	# One canonical host: www redirects to the apex, path and query kept.
+	@www host www.peerkola.com
+	redir @www https://peerkola.com{uri} permanent
+
+	root * /srv
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		Strict-Transport-Security "max-age=31536000"
+		X-Frame-Options DENY
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+	}
+
+	# Astro fingerprints everything under /_astro/, so it never changes in place.
+	@hashed path /_astro/*
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	# HTML and the unhashed files in public/: cached briefly, so a deploy shows up soon.
+	@unhashed not path /_astro/*
+	header @unhashed Cache-Control "public, max-age=600"
+
+	# A directory without its trailing slash is redirected to it (the canonical
+	# form), and a missing file is a real 404 with the site's 404 page - never
+	# index.html with a 200, which search engines treat as a soft 404.
+	file_server
+
+	# Each language answers in its own 404 page (only the root one is a
+	# 404.html; the others are built as /<locale>/404/index.html).
+	handle_errors 404 {
+		@de path /de /de/*
+		handle @de {
+			rewrite * /de/404/index.html
+			file_server {
+				status 404
+			}
+		}
+		handle {
+			rewrite * /404.html
+			file_server {
+				status 404
+			}
+		}
+	}
+}

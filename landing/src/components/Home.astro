@@ -1,0 +1,440 @@
+---
+/**
+ * The home page, in any locale. `src/pages/index.astro` and
+ * `src/pages/de/index.astro` render it; the copy is in `src/i18n/home.ts` and
+ * the drawings exist once, here.
+ */
+import { type Locale, LOCALES, localePath } from "../i18n";
+import { home } from "../i18n/home";
+import Base from "../layouts/Base.astro";
+import { APP_URL, SITE_NAME, SITE_URL, SUPPORT_EMAIL } from "../site";
+import "../styles/home.css";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const t = home[locale];
+const homeUrl = new URL(localePath(locale), SITE_URL).href;
+
+// What search engines may show about the product itself. `@id`s let the
+// nodes reference each other instead of repeating the organization.
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": `${SITE_URL}/#organization`,
+      name: SITE_NAME,
+      url: `${SITE_URL}/`,
+      logo: `${SITE_URL}/icon-512.png`,
+      email: SUPPORT_EMAIL,
+    },
+    {
+      "@type": "WebSite",
+      "@id": `${SITE_URL}/#website`,
+      name: SITE_NAME,
+      url: `${SITE_URL}/`,
+      inLanguage: [...LOCALES],
+      publisher: { "@id": `${SITE_URL}/#organization` },
+    },
+    {
+      "@type": "WebPage",
+      "@id": `${homeUrl}#webpage`,
+      url: homeUrl,
+      name: t.title,
+      description: t.description,
+      inLanguage: locale,
+      isPartOf: { "@id": `${SITE_URL}/#website` },
+    },
+    {
+      "@type": "WebApplication",
+      name: SITE_NAME,
+      url: APP_URL,
+      applicationCategory: "SocialNetworkingApplication",
+      operatingSystem: "Any (web browser)",
+      description: t.appDescription,
+      inLanguage: [...LOCALES],
+      offers: { "@type": "Offer", price: "0", priceCurrency: "EUR" },
+      publisher: { "@id": `${SITE_URL}/#organization` },
+    },
+  ],
+};
+
+const translations = Object.fromEntries(LOCALES.map((l) => [l, localePath(l)]));
+---
+<Base
+  title={t.title}
+  description={t.description}
+  ogDescription={t.ogDescription}
+  jsonLd={jsonLd}
+  translations={translations}
+>
+
+<!-- Shared drawing parts, defined once. The reader (disc + figure) and the post
+     card are the same shapes in every diagram on purpose: they stay
+     recognisable as "one reader" and "one post" as the story moves on. -->
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <defs>
+    <g id="fig">
+      <circle cx="0" cy="-8.4" r="6.6"/>
+      <path d="M -13.6 10.6 A 13.6 11.6 0 0 1 13.6 10.6 Z"/>
+    </g>
+    <g id="post">
+      <rect class="card-body" x="-12" y="-14.2" width="24" height="28.3" rx="5.3"/>
+      <g class="card-line">
+        <line x1="-6.2" y1="-6.5" x2="5.8" y2="-6.5"/>
+        <line x1="-6.2" y1="0" x2="5.8" y2="0"/>
+        <line x1="-6.2" y1="6.5" x2="1" y2="6.5"/>
+      </g>
+    </g>
+  </defs>
+</svg>
+
+<!-- ------------------------------------------------------------- hero -->
+<div class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="pill"><span class="dot"></span> {t.pill}</span>
+      <h1>{t.heading}</h1>
+      <p class="lede">{t.lede}</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href={APP_URL} target="_blank" rel="noopener">
+          {t.openPeerkola} <span class="arrow" aria-hidden="true">&rarr;</span>
+        </a>
+        <a class="btn btn-ghost" href="#how">{t.seeHow}</a>
+      </div>
+      <p class="cta-note">{t.ctaNote}</p>
+    </div>
+
+    <div class="art-frame reveal">
+      <div class="anim relay" data-anim>
+        <svg viewBox="0 0 400 172" role="img" aria-label={t.heroArt}>
+          <g class="edge">
+            <line x1="56" y1="130" x2="152" y2="105"/>
+            <line x1="152" y1="105" x2="248" y2="130"/>
+            <line x1="248" y1="130" x2="344" y2="105"/>
+          </g>
+          <g class="edge-lit" stroke-dasharray="1" pathLength="1">
+            <line pathLength="1" class="an-e0" x1="56" y1="130" x2="152" y2="105"/>
+            <line pathLength="1" class="an-e1" x1="152" y1="105" x2="248" y2="130"/>
+            <line pathLength="1" class="an-e2" x1="248" y1="130" x2="344" y2="105"/>
+          </g>
+          <g transform="translate(56,130)">
+            <circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/>
+            <circle class="ring an-ring0" r="22"/>
+            <g class="an-lit0"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+          </g>
+          <g transform="translate(152,105)">
+            <circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/>
+            <circle class="ring an-ring1" r="22"/>
+            <g class="an-lit1"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+          </g>
+          <g transform="translate(248,130)">
+            <circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/>
+            <circle class="ring an-ring2" r="22"/>
+            <g class="an-lit2"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+          </g>
+          <g transform="translate(344,105)">
+            <circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/>
+            <circle class="ring an-ring3" r="22"/>
+            <g class="an-lit3"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+          </g>
+          <g class="an-card ink-accent"><use href="#post"/></g>
+        </svg>
+      </div>
+      <span class="cap">{t.heroCaption}</span>
+    </div>
+  </div>
+</div>
+
+<!-- ------------------------------------------------------------ facts -->
+<div class="strip">
+  <div class="wrap" style="padding:0">
+    <div class="facts">
+      {t.facts.map(([title, text]) => <div class="fact"><b>{title}</b><span>{text}</span></div>)}
+    </div>
+  </div>
+</div>
+
+<!-- ------------------------------------------------------- how it works -->
+<section id="how">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="eyebrow">{t.howEyebrow}</span>
+      <h2>{t.howHeading}</h2>
+      <p>{t.howIntro}</p>
+    </div>
+
+    <div class="chapters">
+
+      <!-- 1 -->
+      <article class="chapter reveal">
+        <div>
+          <span class="num">1</span>
+          <h3>{t.ch1Title}</h3>
+          <p>{t.ch1Body}</p>
+        </div>
+        <div class="art-col">
+          <div class="art">
+            <div class="anim relay" data-anim>
+              <svg viewBox="0 0 400 172" role="img" aria-label={t.ch1Art}>
+                <g class="edge">
+                  <line x1="56" y1="130" x2="152" y2="105"/>
+                  <line x1="152" y1="105" x2="248" y2="130"/>
+                  <line x1="248" y1="130" x2="344" y2="105"/>
+                </g>
+                <g class="edge-lit" stroke-dasharray="1" pathLength="1">
+                  <line pathLength="1" class="an-e0" x1="56" y1="130" x2="152" y2="105"/>
+                  <line pathLength="1" class="an-e1" x1="152" y1="105" x2="248" y2="130"/>
+                  <line pathLength="1" class="an-e2" x1="248" y1="130" x2="344" y2="105"/>
+                </g>
+                <g transform="translate(56,130)">
+                  <circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/>
+                  <circle class="ring an-ring0" r="22"/>
+                  <g class="an-lit0"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+                </g>
+                <g transform="translate(152,105)">
+                  <circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/>
+                  <circle class="ring an-ring1" r="22"/>
+                  <g class="an-lit1"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+                </g>
+                <g transform="translate(248,130)">
+                  <circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/>
+                  <circle class="ring an-ring2" r="22"/>
+                  <g class="an-lit2"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+                </g>
+                <g transform="translate(344,105)">
+                  <circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/>
+                  <circle class="ring an-ring3" r="22"/>
+                  <g class="an-lit3"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+                </g>
+                <g class="an-card ink-accent"><use href="#post"/></g>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- 2 -->
+      <article class="chapter flip reveal">
+        <div>
+          <span class="num">2</span>
+          <h3>{t.ch2Title}</h3>
+          <p>{t.ch2Body}</p>
+        </div>
+        <div class="art-col">
+          <div class="art">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+              <div>
+                <div class="anim bcast" data-anim>
+                  <svg viewBox="0 0 200 140" role="img" aria-label={t.ch2ArtBroadcast}>
+                    <circle class="ring an-pulse" cx="100" cy="34" r="12"/>
+                    <circle class="ring an-pulse2" cx="100" cy="34" r="12"/>
+                    <g class="edge an-rays" stroke-dasharray="1" pathLength="1" stroke-width="2">
+                      <line pathLength="1" x1="100" y1="34" x2="24" y2="112"/>
+                      <line pathLength="1" x1="100" y1="34" x2="54" y2="106"/>
+                      <line pathLength="1" x1="100" y1="34" x2="84" y2="102"/>
+                      <line pathLength="1" x1="100" y1="34" x2="116" y2="102"/>
+                      <line pathLength="1" x1="100" y1="34" x2="146" y2="106"/>
+                      <line pathLength="1" x1="100" y1="34" x2="176" y2="112"/>
+                    </g>
+                    <g transform="translate(24,112) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-all"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(54,106) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-all"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(84,102) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-all"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(116,102) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-all"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(146,106) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-all"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(176,112) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-all"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(100,34) scale(.8)" class="ink-muted"><use href="#post"/></g>
+                  </svg>
+                </div>
+                <div class="legend"><span class="tag n"><i></i>{t.ch2LegendConventional}</span></div>
+              </div>
+              <div>
+                <div class="anim rly" data-anim>
+                  <svg viewBox="0 0 200 140" role="img" aria-label={t.ch2ArtRelay}>
+                    <path class="edge" d="M26 44 L24 112 Q39 50 54 106 Q69 46 84 102 Q100 44 116 102"/>
+                    <path class="edge-lit an-chain" stroke-dasharray="1" pathLength="1" stroke-width="2.4" d="M26 44 L24 112 Q39 50 54 106 Q69 46 84 102 Q100 44 116 102"/>
+                    <g transform="translate(24,112) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-r0"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(54,106) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-r1"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(84,102) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-r2"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(116,102) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-r3"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                    <g transform="translate(146,106) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/></g>
+                    <g transform="translate(176,112) scale(.56)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/></g>
+                    <g transform="translate(26,44) scale(.8)" class="ink-accent"><use href="#post"/></g>
+                  </svg>
+                </div>
+                <div class="legend"><span class="tag a"><i></i>Peerkola</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- 3 -->
+      <article class="chapter reveal">
+        <div>
+          <span class="num">3</span>
+          <h3>{t.ch3Title}</h3>
+          <p>{t.ch3Body}</p>
+        </div>
+        <div class="art-col">
+          <div class="art">
+            <div class="anim fwd" data-anim>
+              <svg viewBox="0 0 300 160" role="img" aria-label={t.ch3Art}>
+                <g class="edge" stroke-width="2">
+                  <line pathLength="1" x1="72" y1="88" x2="214" y2="36"/>
+                  <line pathLength="1" x1="72" y1="88" x2="250" y2="88"/>
+                  <line pathLength="1" x1="72" y1="88" x2="214" y2="140"/>
+                </g>
+                <g class="edge-lit an-fedge" stroke-dasharray="1" pathLength="1" stroke-width="2.4">
+                  <line pathLength="1" x1="72" y1="88" x2="214" y2="36"/>
+                  <line pathLength="1" x1="72" y1="88" x2="250" y2="88"/>
+                  <line pathLength="1" x1="72" y1="88" x2="214" y2="140"/>
+                </g>
+                <g transform="translate(214,36) scale(.62)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-flit0"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                <g transform="translate(250,88) scale(.62)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-flit1"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                <g transform="translate(214,140) scale(.62)"><circle class="disc-off" r="22"/><use class="fig-off" href="#fig"/><g class="an-flit2"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g></g>
+                <g transform="translate(72,88) scale(.95)"><circle class="disc-on" r="22"/><use class="fig-on" href="#fig"/></g>
+                <g class="an-fcard ink-accent"><use href="#post"/></g>
+                <g transform="translate(106,60)">
+                  <g class="an-x">
+                    <line class="xmark" x1="-9" y1="-9" x2="9" y2="9"/>
+                    <line class="xmark" x1="9" y1="-9" x2="-9" y2="9"/>
+                  </g>
+                </g>
+              </svg>
+              <div class="legend-stack">
+                <span class="tag a an-capf"><i></i>{t.ch3Forward}</span>
+                <span class="tag d an-capd"><i></i>{t.ch3Drop}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- 4 -->
+      <article class="chapter flip reveal">
+        <div>
+          <span class="num">4</span>
+          <h3>{t.ch4Title}</h3>
+          <p>{t.ch4Body}</p>
+        </div>
+        <div class="art-col">
+          <div class="art">
+            <div class="anim econ" data-anim>
+              <svg viewBox="0 0 300 140" role="img" aria-label={t.ch4Art}>
+                <text class="dlabel" x="52" y="120" text-anchor="middle">{t.ch4LabelReview}</text>
+                <text class="dlabel" x="148" y="120" text-anchor="middle">{t.ch4LabelBalance}</text>
+                <text class="dlabel" x="244" y="120" text-anchor="middle">{t.ch4LabelPublish}</text>
+
+                <rect class="slot" x="30" y="30" width="44" height="52" rx="9"/>
+                <g class="an-rv0 ink-accent"><use href="#post" transform="scale(1.65)"/></g>
+                <g class="an-rv1 ink-accent"><use href="#post" transform="scale(1.65)"/></g>
+
+                <rect x="120" y="58" width="56" height="32" rx="10" fill="var(--accent-soft)"/>
+                <circle class="slot" cx="136" cy="74" r="8"/>
+                <circle class="slot" cx="160" cy="74" r="8"/>
+                <g class="an-s0"><circle class="coin" cx="136" cy="74" r="8"/><circle class="coin-in" cx="136" cy="74" r="3.2"/></g>
+                <g class="an-s1"><circle class="coin" cx="160" cy="74" r="8"/><circle class="coin-in" cx="160" cy="74" r="3.2"/></g>
+
+                <g class="an-c0"><circle class="coin" r="8"/><circle class="coin-in" r="3.2"/></g>
+                <g class="an-c1"><circle class="coin" r="8"/><circle class="coin-in" r="3.2"/></g>
+                <g class="an-spend"><circle class="coin" r="8"/><circle class="coin-in" r="3.2"/></g>
+
+                <rect class="slot" x="222" y="36" width="44" height="52" rx="9"/>
+                <g class="an-pub ink-accent"><use href="#post" transform="scale(1.65)"/></g>
+              </svg>
+            </div>
+            <div class="legend">
+              <span class="tag n"><i></i>{t.ch4Earned}</span>
+              <span class="tag a"><i></i>{t.ch4Spent}</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- 5 -->
+      <article class="chapter reveal">
+        <div>
+          <span class="num">5</span>
+          <h3>{t.ch5Title}</h3>
+          <p>{t.ch5Body}</p>
+        </div>
+        <div class="art-col">
+          <div class="art">
+            <div class="anim queue" data-anim>
+              <svg viewBox="0 0 300 130" role="img" aria-label={t.ch5Art}>
+                <g class="an-empty">
+                  <rect class="slot an-breathe" x="46" y="36" width="48" height="58" rx="10"/>
+                  <text class="dlabel" x="112" y="70">{t.ch5Empty}</text>
+                </g>
+                <g class="an-q0 ink-accent"><use href="#post" transform="translate(70,65) scale(1.85)"/></g>
+                <g class="an-q1 ink-accent"><use href="#post" transform="translate(128,65) scale(1.85)"/></g>
+                <g class="an-q2 ink-accent"><use href="#post" transform="translate(186,65) scale(1.85)"/></g>
+                <g class="an-q3 ink-accent"><use href="#post" transform="translate(244,65) scale(1.85)"/></g>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<!-- -------------------------------------------------------------- beta -->
+<section id="beta" style="padding-top:0">
+  <div class="wrap">
+    <div class="beta reveal">
+      <div>
+        <span class="eyebrow">{t.betaEyebrow}</span>
+        <h2 style="margin-top:10px; font-size:1.55rem">{t.betaHeading}</h2>
+      </div>
+      <ul>
+        {t.betaPoints.map((point) => <li>{point}</li>)}
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ closing -->
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="closing reveal">
+      <span class="eyebrow">{t.closingEyebrow}</span>
+      <h2>{t.closingHeading}</h2>
+      <p>{t.closingBody}</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href={APP_URL} target="_blank" rel="noopener">
+          {t.openPeerkola} <span class="arrow" aria-hidden="true">&rarr;</span>
+        </a>
+        <a class="btn btn-ghost" href={`mailto:${SUPPORT_EMAIL}`}>{t.emailSupport}</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ contact -->
+<section id="contact" style="padding-top:0">
+  <div class="wrap contact">
+    <div class="card reveal">
+      <h3>{t.contactHeading}</h3>
+      <p>{t.contactBody}</p>
+      <a class="mail" href={`mailto:${SUPPORT_EMAIL}`}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><path d="m3 6 9 6.5L21 6"/>
+        </svg>
+        {SUPPORT_EMAIL}
+      </a>
+    </div>
+    <div class="card reveal">
+      <h3>{t.inAppHeading}</h3>
+      <p>{t.inAppBody}</p>
+    </div>
+  </div>
+</section>
+
+
+</Base>

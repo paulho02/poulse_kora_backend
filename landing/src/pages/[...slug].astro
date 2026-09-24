@@ -1,0 +1,51 @@
+---
+/**
+ * Every Markdown file in `src/content/pages/` becomes a page at its own path.
+ * A new info page is a new .md file - no route, no sitemap entry, no link
+ * wiring (legal pages also get their footer link from `legal: true`).
+ */
+import { getCollection, render } from "astro:content";
+
+import { contentLocale, LOCALE_META, ui } from "../i18n";
+import Base from "../layouts/Base.astro";
+import { SITE_NAME } from "../site";
+
+export async function getStaticPaths() {
+  const pages = await getCollection("pages", (p) => !p.data.draft);
+  return pages.map((page) => {
+    // The same page in the other languages, found by its shared key.
+    const key = page.data.translationKey;
+    const translations = key
+      ? Object.fromEntries(
+          pages
+            .filter((p) => p.data.translationKey === key)
+            .map((p) => [contentLocale(p.id), `/${p.id}/`]),
+        )
+      : {};
+    return { params: { slug: page.id }, props: { page, translations } };
+  });
+}
+
+const { page, translations } = Astro.props;
+const { Content } = await render(page);
+const locale = contentLocale(page.id);
+---
+<Base
+  title={`${page.data.title} — ${SITE_NAME}`}
+  description={page.data.description}
+  noindex={page.data.noindex}
+  translations={translations}
+>
+  <article class="prose">
+    <h1>{page.data.title}</h1>
+    {page.data.updated && (
+      <p class="updated">
+        {ui[locale].lastUpdated}:
+        <time datetime={page.data.updated.toISOString().slice(0, 10)}>
+          {page.data.updated.toLocaleDateString(LOCALE_META[locale].dateLocale, { dateStyle: "long" })}
+        </time>
+      </p>
+    )}
+    <Content />
+  </article>
+</Base>

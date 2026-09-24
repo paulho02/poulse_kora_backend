@@ -1,8 +1,8 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * Poulse Kora Backend
- * Poulse Kora Backend API
+ * Peerkola Backend
+ * Peerkola Backend API
  *
  * The version of the OpenAPI document: 0.1.0
  * 

@@ -31,7 +31,7 @@ from app.models.user import User
 from app.redis import redis_client
 from app.schemas.post import PostBlockIn, PostCreate
 
-BOT_EMAIL = "bulk.post.bot@kora.dev"
+BOT_EMAIL = "bulk.post.bot@peerkola.dev"
 BOT_USERNAME = "bulk_post_bot"
 BOT_PASSWORD = "devpassword123"  # dev-only seed account, not meant to be logged into
 

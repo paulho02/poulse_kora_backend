@@ -1,0 +1,8 @@
+import type { APIRoute } from "astro";
+
+// Built from the configured site so the sitemap URL can't go stale.
+export const GET: APIRoute = ({ site }) =>
+  new Response(
+    `User-agent: *\nAllow: /\n\nSitemap: ${new URL("sitemap-index.xml", site)}\n`,
+    { headers: { "Content-Type": "text/plain; charset=utf-8" } },
+  );
