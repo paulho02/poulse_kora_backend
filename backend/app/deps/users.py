@@ -24,6 +24,7 @@ from app.core.logger import bind_request_context, get_logger
 from app.core.password_policy import strength_violations
 from app.core.rate_limit import enforce
 from app.core.username import is_username_taken
+from app.core.username_policy import is_valid_username
 from app.deps.db import CurrentAsyncSession
 from app.deps.redis import get_redis
 from app.feed.service import earn_token
@@ -220,14 +221,27 @@ class UserManager(UUIDIDMixin, BaseUserManager[UserModel, uuid.UUID]):
         """
         if username is None:
             return
-        # The probe author's name is reserved outright, case-insensitively, and not
-        # only by the row that holds it (see alembic 0005 and app/core/probes.py):
-        # uniqueness is exact-match, so `Peerkola` would otherwise be free to take,
-        # and every test post the trust score rests on is published under this
-        # name. Refused with the same code as a taken name, because to the person
-        # typing it that is what it is.
-        reserved = settings.TRUST_PROBE_AUTHOR_USERNAME.casefold()
-        if username.strip().casefold() == reserved:
+        # Already normalized by the schema (`UserCreate`/`UserUpdate`), so this is
+        # only the refusal half of app/core/username_policy.py. Before the taken
+        # check: a name that can never be stored is not usefully "taken".
+        if not is_valid_username(
+            username,
+            min_length=settings.USERNAME_MIN_LENGTH,
+            max_length=settings.USERNAME_MAX_LENGTH,
+        ):
+            raise api_error(
+                400,
+                "username_invalid",
+                min_length=settings.USERNAME_MIN_LENGTH,
+                max_length=settings.USERNAME_MAX_LENGTH,
+            )
+        # The probe author's name is reserved outright, and not only by the row
+        # that holds it (see alembic 0005 and app/core/probes.py): every test post
+        # the trust score rests on is published under this name, so it must stay
+        # claimable by nobody even if the row were ever missing. Refused with the
+        # same code as a taken name, because to the person typing it that is what
+        # it is.
+        if username == settings.TRUST_PROBE_AUTHOR_USERNAME:
             log.info("user.username_taken", on="reserved")
             raise api_error(409, "username_taken")
         session = self.user_db.session

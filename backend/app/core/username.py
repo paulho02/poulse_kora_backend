@@ -4,15 +4,20 @@ Registration requires a username (`UserCreate.username`), but Google sign-in has
 such field - the client never asks, because there is nothing to ask *before* the
 Google account is known. So a Google signup gets one derived from its Google profile
 here, and confirms/edits it during onboarding (the app's username step).
+
+What a username may be at all is app/core/username_policy.py; everything produced
+here obeys it.
 """
 
 import re
 import secrets
+import unicodedata
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.user import User
 
 #: Long enough to stay recognizable, short enough to leave room for a suffix.
@@ -25,9 +30,18 @@ _SEQUENTIAL_ATTEMPTS = 20
 
 
 def slugify_username(seed: str) -> str:
-    """Reduce `seed` to lowercase alphanumerics, truncated to MAX_LENGTH."""
-    slug = re.sub(r"[^a-z0-9]", "", seed.lower())[:MAX_LENGTH]
-    return slug or FALLBACK
+    """Reduce `seed` to lowercase alphanumerics, truncated to MAX_LENGTH.
+
+    Accents are folded rather than dropped (NFKD, then the combining marks go), so
+    `José` seeds `jose`, not `jos`. Unlike a name the user types, this one is ours
+    to choose, and onboarding shows it for editing. Too short to be a valid name
+    (a two-letter display name) falls back like an empty one.
+    """
+    ascii_seed = (
+        unicodedata.normalize("NFKD", seed).encode("ascii", "ignore").decode("ascii")
+    )
+    slug = re.sub(r"[^a-z0-9]", "", ascii_seed.lower())[:MAX_LENGTH]
+    return slug if len(slug) >= settings.USERNAME_MIN_LENGTH else FALLBACK
 
 
 async def generate_unique_username(session: AsyncSession, *, seed: str) -> str:
@@ -57,8 +71,9 @@ async def is_username_taken(
 ) -> bool:
     """Whether another account already holds `username`.
 
-    Matched exactly, the way the unique constraint does - answering "taken" for a
-    name Postgres would in fact accept would be a lie the user cannot act on.
+    Matched exactly, the way the unique constraint does. Exact is enough: every
+    stored name is normalized (app/core/username_policy.py, enforced by a CHECK
+    constraint), so there is no second spelling of the same name to look for.
     `exclude_user_id` is for updates, so re-sending your own name is not a clash.
 
     Like `generate_unique_username`, this is a probe and not a reservation: the

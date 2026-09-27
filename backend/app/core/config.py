@@ -3,6 +3,8 @@ from functools import cached_property
 from typing import Any, Literal
 
 from pydantic import Field, HttpUrl, PostgresDsn, RedisDsn, field_validator
+
+from app.core.username_policy import USERNAME_PATTERN
 from pydantic.networks import AnyHttpUrl
 from pydantic_settings import BaseSettings
 
@@ -338,6 +340,20 @@ class Settings(BaseSettings):
     # serialize it.
     TRUST_PROBE_AUTHOR_USERNAME: str = "peerkola"
     TRUST_PROBE_AUTHOR_EMAIL: str = "probes@peerkola.example.com"
+
+    @field_validator("TRUST_PROBE_AUTHOR_USERNAME")
+    @classmethod
+    def validate_probe_author_username(cls, value: str) -> str:
+        """The probe author is inserted by migration and by `_ensure_probe_author`,
+        neither of which goes through `UserManager`, so a name outside the username
+        rule would only surface as the CHECK constraint refusing the insert - on the
+        first probe, in production. Refused at startup instead."""
+        if not USERNAME_PATTERN.fullmatch(value):
+            raise ValueError(
+                "TRUST_PROBE_AUTHOR_USERNAME must match [a-z0-9_]+ "
+                "(app/core/username_policy.py)"
+            )
+        return value
 
     # --- volume component ---
     # Reviews in the window below which volume contributes exactly neutral, and the
@@ -840,7 +856,11 @@ class Settings(BaseSettings):
     # Bounds on free text a user writes about themselves. `username` is serialized
     # into every recipient's feed for every non-anonymous post, so an unbounded
     # one is a bandwidth problem for everyone else; derived usernames are shorter
-    # still (app/core/username.py: MAX_LENGTH).
+    # still (app/core/username.py: MAX_LENGTH). The minimum matches the app's
+    # username fields; the character rule is app/core/username_policy.py.
+    # Changing either bound does not revisit existing names - alembic 0007 pinned
+    # its own copy when it rewrote them.
+    USERNAME_MIN_LENGTH: int = 3
     USERNAME_MAX_LENGTH: int = 30
     BIO_MAX_LENGTH: int = 500
 

@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from fastapi_users_db_sqlalchemy import SQLAlchemyBaseUserTableUUID
-from sqlalchemy import ARRAY, DateTime, String
+from sqlalchemy import ARRAY, CheckConstraint, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.functions import func
 
@@ -23,6 +23,15 @@ if TYPE_CHECKING:
 
 class User(SQLAlchemyBaseUserTableUUID, Base):
     __tablename__ = "users"
+    # The character half of app/core/username_policy.py, as a backstop for any
+    # writer that bypasses `UserManager` (scripts, the probe author). Length stays
+    # in settings, so it is not pinned here. Autogenerate does not compare CHECK
+    # constraints; alembic 0007 is where it lives on a real database.
+    __table_args__ = (
+        CheckConstraint(
+            "username ~ '^[a-z0-9_]+$'", name="ck_users_username_charset"
+        ),
+    )
 
     created: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

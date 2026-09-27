@@ -1,10 +1,18 @@
 import uuid
 
 from fastapi_users import schemas
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from app.core.config import settings
+from app.core.username_policy import normalize_username
+
+
+def _normalized(value: object) -> object:
+    """`mode="before"` validator body: fold case/width before `max_length` counts,
+    so the bound applies to the name that is stored. Refusing a name that breaks
+    the rule is `UserManager`'s job (`username_invalid`), not a 422 here."""
+    return normalize_username(value) if isinstance(value, str) else value
 
 
 class UserRead(schemas.BaseUser[uuid.UUID]):
@@ -58,6 +66,8 @@ class UserCreate(schemas.BaseUserCreate):
     is_superuser: SkipJsonSchema[bool | None] = Field(default=False, exclude=True)
     is_verified: SkipJsonSchema[bool | None] = Field(default=False, exclude=True)
 
+    _normalize_username = field_validator("username", mode="before")(_normalized)
+
 
 class UserUpdate(schemas.BaseUserUpdate):
     username: str | None = Field(
@@ -66,6 +76,8 @@ class UserUpdate(schemas.BaseUserUpdate):
     bio: str | None = Field(default=None, max_length=settings.BIO_MAX_LENGTH)
     dark_mode: bool | None = None
     onboarding_completed: bool | None = None
+
+    _normalize_username = field_validator("username", mode="before")(_normalized)
 
 
 class PasswordChange(BaseModel):

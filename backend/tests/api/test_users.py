@@ -630,6 +630,90 @@ class TestUsernamePolicy:
         )
         assert resp.status_code == 422
 
+    async def _register(self, client: AsyncClient, username: str):
+        email = f"{generate_random_string(20)}@{generate_random_string(10)}.com"
+        return await client.post(
+            settings.API_PATH + "/auth/register",
+            json={
+                "email": email,
+                "password": generate_random_string(24),
+                "username": username,
+            },
+        )
+
+    async def test_case_and_width_are_folded_not_refused(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        """`Paul` simply is `paul`; a fullwidth name from an East Asian keyboard is
+        the same name too, not a refusal the user cannot see the reason for."""
+        name = generate_random_string(12)
+        resp = await self._register(client, "  " + name.upper() + "  ")
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["username"] == name
+
+        user = await create_user()
+        fullwidth = "".join(chr(ord(c) + 0xFEE0) for c in generate_random_string(8))
+        resp = await self._set_username(client, user, fullwidth)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["username"] == "".join(
+            chr(ord(c) - 0xFEE0) for c in fullwidth
+        )
+
+    async def test_a_different_case_of_a_taken_name_is_taken(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        holder = await create_user()
+        name = generate_random_string(12)
+        assert (await self._set_username(client, holder, name)).status_code == 200
+
+        other = await create_user()
+        resp = await self._set_username(client, other, name.upper())
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error"] == "username_taken"
+
+    async def test_lookalikes_and_other_characters_are_refused(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        """A Greek omicron in place of an `o` is the impersonation this rule
+        exists for; spaces, dots, accents and other scripts go the same way."""
+        user = await create_user()
+        for bad in [
+            settings.TRUST_PROBE_AUTHOR_USERNAME.replace("o", "\u03bf") + "x",
+            "ab cd",
+            "ab.cd",
+            "jos\u00e9",
+            "\u674e\u96f7\u96f7",
+            "ab-cd",
+        ]:
+            resp = await self._set_username(client, user, bad)
+            assert resp.status_code == 400, (bad, resp.text)
+            detail = resp.json()["detail"]
+            assert detail["error"] == "username_invalid"
+            assert detail["min_length"] == settings.USERNAME_MIN_LENGTH
+            assert detail["max_length"] == settings.USERNAME_MAX_LENGTH
+
+        resp = await self._register(client, "ab cd")
+        assert resp.json()["detail"]["error"] == "username_invalid"
+
+    async def test_too_short_is_refused(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        user = await create_user()
+        resp = await self._set_username(
+            client, user, "x" * (settings.USERNAME_MIN_LENGTH - 1)
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"] == "username_invalid"
+
+    async def test_underscores_and_digits_are_allowed(
+        self, client: AsyncClient, create_user: Callable
+    ):
+        user = await create_user()
+        name = f"{generate_random_string(6)}_2{generate_random_string(3)}"
+        resp = await self._set_username(client, user, name)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["username"] == name
+
 
 class TestListPageCap:
     async def test_limit_is_clamped_to_the_page_cap(
