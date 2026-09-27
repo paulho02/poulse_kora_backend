@@ -46,7 +46,12 @@ services:
     build:
       context: landing
       target: deps
-    command: npx astro dev --host 0.0.0.0 --port 4321
+    # --ignore-lock: Astro's .astro/dev.json lock lands in the bind mount and
+    # outlives the container, and its liveness check is a bare PID - which a
+    # fresh container reuses (low, deterministic PIDs), so the stale lock reads
+    # as "another dev server is running" and startup fails. The container is
+    # already the single-instance guarantee.
+    command: npx astro dev --host 0.0.0.0 --port 4321 --ignore-lock
     environment:
       # File events don't cross a Docker Desktop bind mount from Windows/macOS
       # reliably, so Vite polls instead.
