@@ -745,6 +745,25 @@ class Settings(BaseSettings):
     # the credentials are scoped to it, so this stays off there.
     S3_AUTO_CREATE_BUCKET: bool = False
 
+    # --- storage retries ---
+    # How many times a single storage request may be attempted, and the base delay
+    # between attempts. Retried only on a transient answer: 503 (S3 spells
+    # throttling `SlowDown`), 500/502/504, 429, and a transport error. A 4xx is
+    # never retried - a 403 or 404 fails identically however often it is asked.
+    #
+    # This is the layer boto3 would have brought. SigV4 is hand-rolled here (see
+    # app/core/storage.py on why: presigned URLs have to be quantized, which boto3
+    # cannot do), so nothing underneath backs off on our behalf. Without it one
+    # throttled PUT aborts a whole post, because `_store_media` in app/api/posts.py
+    # is all-or-nothing - which is exactly how `SlowDown` became user-visible.
+    #
+    # Keep the budget small: the upload runs *before* the post is committed, with
+    # the author watching a spinner, so the worst case has to stay well inside the
+    # client's own patience. 3 attempts at 100 ms adds at most ~300 ms (100 + 200,
+    # each jittered down to as little as half).
+    STORAGE_MAX_ATTEMPTS: int = Field(default=3, ge=1)
+    STORAGE_RETRY_BASE_MS: int = Field(default=100, ge=1)
+
     # --- presigned media URLs ---
     # How long a handed-out media URL stays valid. This is the window in which a URL
     # that leaked (forwarded screenshot, shared link) still works, so it is a real

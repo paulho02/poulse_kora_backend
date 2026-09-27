@@ -16,7 +16,8 @@ Three rules govern account identity, and every guard here implements one of them
    `link_existing: true`.
 2. The upgrade is **irreversible** - it destroys the password (`_disable_password`).
    Password login and `POST /auth/change-password` refuse from then on (see
-   app/deps/users.py and app/api/change_password.py).
+   app/deps/users.py and app/api/change_password.py). Which is why the signed-in
+   path, `/auth/google/link`, asks for the current password first.
 3. Registering with an address already held by a Google account gets the ordinary
    `register_user_already_exists`, unchanged - nothing here is involved.
 
@@ -37,6 +38,7 @@ from app.core.google_oauth import GoogleIdentity, verify_google_id_token
 from app.core.logger import bind_request_context, get_logger
 from app.core.username import generate_unique_username
 from app.deps.db import CurrentAsyncSession
+from app.deps.rate_limit import limit_password_change
 from app.deps.users import (
     CurrentUser,
     UserManager,
@@ -177,7 +179,12 @@ async def google_auth(
     return await _issue_token(user)
 
 
-@router.post("/google/link", response_model=UserRead, status_code=status.HTTP_200_OK)
+@router.post(
+    "/google/link",
+    response_model=UserRead,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(limit_password_change)],
+)
 async def link_google(
     body: GoogleLinkRequest,
     user: CurrentUser,
@@ -204,12 +211,33 @@ async def link_google(
 
     No confirmation handshake, unlike the login-screen path: being signed in
     already establishes intent, and the client shows the warning before calling.
+
+    **The current password is required**, as for `POST /auth/change-password` and
+    `DELETE /users/me`: this destroys the password, so a stolen token alone would
+    otherwise let an attacker bind *their* Google account and leave the owner no
+    way back in. The login-screen upgrade needs no such check - there, the Google
+    account has to hold the account's own address, which is proof of its own.
+    Shares the change-password budget, since it tests the same secret.
     """
     _require_enabled()
-    identity = await verify_google_id_token(body.id_token)
 
     if user.oauth_accounts:
         raise api_error(400, "google_already_linked")
+
+    # Before the Google token is verified: a wrong password must not learn
+    # anything about the token, and a refused request costs no call to Google.
+    if not body.current_password:
+        raise api_error(400, "google_link_password_required")
+    verified, _ = user_manager.password_helper.verify_and_update(
+        body.current_password, user.hashed_password
+    )
+    if not verified:
+        # WARNING, like its change-password and delete-account siblings: this is
+        # the route a stolen token would be used on.
+        log.warning("auth.google_link_failed", reason="wrong_password")
+        raise api_error(400, "google_link_wrong_password")
+
+    identity = await verify_google_id_token(body.id_token)
 
     other = await user_manager.user_db.get_by_oauth_account(
         OAUTH_NAME, identity.subject

@@ -48,6 +48,12 @@ def stub_google(monkeypatch):
     return inner
 
 
+@pytest.fixture
+def link_body(default_password: str) -> dict:
+    """`POST /auth/google/link` body for an account made by `create_user`."""
+    return {"id_token": "tok", "current_password": default_password}
+
+
 def random_email() -> str:
     return f"{generate_random_string(20)}@{generate_random_string(10)}.com"
 
@@ -334,13 +340,18 @@ class TestNoWayBackToPasswordAuth:
 
 class TestLinkFromSettings:
     async def test_signed_in_user_can_link(
-        self, client: AsyncClient, create_user, stub_google, default_password: str
+        self,
+        client: AsyncClient,
+        create_user,
+        stub_google,
+        default_password: str,
+        link_body,
     ):
         user: User = await create_user()
         stub_google(user.email)
 
         resp = await client.post(
-            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(user)
+            LINK_URL, json=link_body, headers=get_jwt_header(user)
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["auth_provider"] == "google"
@@ -352,7 +363,12 @@ class TestLinkFromSettings:
         assert login.json()["detail"]["error"] == "login_use_google"
 
     async def test_linking_a_different_address_keeps_the_account_email(
-        self, client: AsyncClient, create_user, stub_google, default_password: str
+        self,
+        client: AsyncClient,
+        create_user,
+        stub_google,
+        default_password: str,
+        link_body,
     ):
         """The point of the settings path: sign in with a personal Google account
         while the account keeps the address it already receives mail on."""
@@ -361,7 +377,7 @@ class TestLinkFromSettings:
         stub_google(random_email())
 
         resp = await client.post(
-            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(user)
+            LINK_URL, json=link_body, headers=get_jwt_header(user)
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["auth_provider"] == "google"
@@ -380,7 +396,7 @@ class TestLinkFromSettings:
         assert login.json()["detail"]["error"] == "login_use_google"
 
     async def test_linking_a_different_address_does_not_verify_the_account(
-        self, client: AsyncClient, create_user, stub_google
+        self, client: AsyncClient, create_user, stub_google, link_body
     ):
         """Google vouched for *its* address. Marking a different, unproven address
         verified would be a free pass around email verification."""
@@ -388,25 +404,25 @@ class TestLinkFromSettings:
         stub_google(random_email())
 
         resp = await client.post(
-            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(user)
+            LINK_URL, json=link_body, headers=get_jwt_header(user)
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["is_verified"] is False
 
     async def test_linking_the_same_address_does_verify_the_account(
-        self, client: AsyncClient, create_user, stub_google
+        self, client: AsyncClient, create_user, stub_google, link_body
     ):
         user: User = await create_user(is_verified=False)
         stub_google(user.email)
 
         resp = await client.post(
-            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(user)
+            LINK_URL, json=link_body, headers=get_jwt_header(user)
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["is_verified"] is True
 
     async def test_a_linked_account_signs_in_by_subject_not_email(
-        self, client: AsyncClient, create_user, stub_google
+        self, client: AsyncClient, create_user, stub_google, link_body
     ):
         """The invariant the whole decoupling rests on: after linking a Google
         account with a different address, `POST /auth/google` still resolves to
@@ -416,7 +432,7 @@ class TestLinkFromSettings:
         subject = generate_random_string(21)
         stub_google(google_email, subject=subject)
         await client.post(
-            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(user)
+            LINK_URL, json=link_body, headers=get_jwt_header(user)
         )
 
         stub_google(google_email, subject=subject)
@@ -430,23 +446,23 @@ class TestLinkFromSettings:
         assert me.json()["email"] == user.email
 
     async def test_linking_twice_is_refused(
-        self, client: AsyncClient, create_user, stub_google
+        self, client: AsyncClient, create_user, stub_google, link_body
     ):
         user: User = await create_user()
         stub_google(user.email)
         await client.post(
-            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(user)
+            LINK_URL, json=link_body, headers=get_jwt_header(user)
         )
 
         stub_google(user.email)
         resp = await client.post(
-            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(user)
+            LINK_URL, json=link_body, headers=get_jwt_header(user)
         )
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"] == "google_already_linked"
 
     async def test_google_identity_already_used_elsewhere_is_refused(
-        self, client: AsyncClient, create_user, stub_google
+        self, client: AsyncClient, create_user, stub_google, link_body
     ):
         subject = generate_random_string(21)
         stub_google(random_email(), subject=subject)
@@ -456,10 +472,83 @@ class TestLinkFromSettings:
         other: User = await create_user()
         stub_google(other.email, subject=subject)
         resp = await client.post(
-            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(other)
+            LINK_URL, json=link_body, headers=get_jwt_header(other)
         )
         assert resp.status_code == 400
         assert resp.json()["detail"]["error"] == "google_account_in_use"
+
+    async def test_missing_password_is_refused(
+        self, client: AsyncClient, create_user, stub_google
+    ):
+        """The token-theft path: a bearer token alone must not be enough to
+        destroy the password and bind somebody else's Google account."""
+        user: User = await create_user()
+        stub_google(random_email())
+
+        resp = await client.post(
+            LINK_URL, json={"id_token": "tok"}, headers=get_jwt_header(user)
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"] == "google_link_password_required"
+
+    async def test_wrong_password_leaves_the_account_untouched(
+        self, client: AsyncClient, create_user, stub_google, default_password: str
+    ):
+        user: User = await create_user()
+        stub_google(random_email())
+
+        resp = await client.post(
+            LINK_URL,
+            json={"id_token": "tok", "current_password": "not-the-password"},
+            headers=get_jwt_header(user),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"] == "google_link_wrong_password"
+
+        me = await client.get(
+            settings.API_PATH + "/users/me", headers=get_jwt_header(user)
+        )
+        assert me.json()["auth_provider"] == "password"
+        login = await client.post(
+            settings.API_PATH + "/auth/jwt/login",
+            data={"username": user.email, "password": default_password},
+        )
+        assert login.status_code == 200, login.text
+
+    async def test_wrong_password_is_checked_before_the_google_token(
+        self, client: AsyncClient, create_user, monkeypatch
+    ):
+        async def must_not_verify(token: str) -> GoogleIdentity:
+            raise AssertionError("Google token verified before the password")
+
+        monkeypatch.setattr(google_auth, "verify_google_id_token", must_not_verify)
+        user: User = await create_user()
+
+        resp = await client.post(
+            LINK_URL,
+            json={"id_token": "tok", "current_password": "not-the-password"},
+            headers=get_jwt_header(user),
+        )
+        assert resp.json()["detail"]["error"] == "google_link_wrong_password"
+
+    async def test_shares_the_change_password_budget(
+        self, client: AsyncClient, create_user, stub_google, monkeypatch
+    ):
+        """Same secret as change-password and delete-account, so guesses must not
+        get a fresh allowance by switching to this route."""
+        monkeypatch.setattr(settings, "PASSWORD_CHANGE_RATE_LIMIT", 1)
+        user: User = await create_user()
+        stub_google(random_email())
+        wrong = {"id_token": "tok", "current_password": "not-the-password"}
+
+        first = await client.post(LINK_URL, json=wrong, headers=get_jwt_header(user))
+        assert first.json()["detail"]["error"] == "google_link_wrong_password"
+        second = await client.post(
+            settings.API_PATH + "/auth/change-password",
+            json={"current_password": "x", "new_password": "y"},
+            headers=get_jwt_header(user),
+        )
+        assert second.status_code == 429
 
     async def test_requires_authentication(self, client: AsyncClient):
         resp = await client.post(LINK_URL, json={"id_token": "tok"})

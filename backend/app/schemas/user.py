@@ -113,4 +113,16 @@ class GoogleAuthRequest(BaseModel):
 
 
 class GoogleLinkRequest(BaseModel):
+    """Body of `POST /auth/google/link`.
+
+    `current_password` is required for the same reason `AccountDelete` asks for
+    it: linking destroys the password, so without it a stolen bearer token is
+    enough to bind the attacker's Google account and lock the owner out for
+    good. Optional in the schema rather than required so a client that omits it
+    gets the structured `google_link_password_required` instead of a 422. Every
+    account that can reach the check is a password account - a Google one is
+    refused as `google_already_linked` first.
+    """
+
     id_token: str
+    current_password: str | None = None
