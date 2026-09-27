@@ -64,7 +64,13 @@ OpenAPI docs: `http://localhost:8000/docs/`. MinIO console: `http://localhost:90
   routers are where a username reaches the DB. Two layers on purpose: `is_username_taken`
   (`app/core/username.py`) is a probe, not a reservation, so `_conflict_as_api_error` maps the
   unique-index `IntegrityError` (matched by constraint name; anything else stays a 500) to the same
-  409 after rolling the session back.
+  409 after rolling the session back. A username is `[a-z0-9_]`, `USERNAME_MIN_LENGTH`–`_MAX_LENGTH`
+  (`app/core/username_policy.py`): the schemas *normalize* (NFKC, strip, lowercase — `Paul` is
+  `paul`, not an error), `UserManager` *refuses* the rest as `400 username_invalid`, and a CHECK
+  constraint (`ck_users_username_charset`, alembic `0007`) backstops writers that bypass the
+  manager. One case and one script is what makes exact-match uniqueness mean "nobody can register a
+  lookalike" — don't widen the charset without a confusables answer. `0007` rewrote pre-existing
+  names (clashes get a numeric suffix, oldest account keeps the plain name).
 - **DB** (`app/db.py`, `app/deps/db.py`): async SQLAlchemy 2.0 / asyncpg; models subclass `Base`;
   one session per request via `CurrentAsyncSession`.
 - **Config** (`app/core/config.py`): pydantic-settings from `.env`. **The comments in that file are
@@ -178,7 +184,10 @@ than failing. fastapi-users' `on_after_register`/`on_after_update` hooks get onl
     `authenticate` answer `login_use_google` and change-password `google_account_no_password`.
   - Email is a contact address, not a credential. Identity is the Google `sub`, one account per
     `sub` (`google_account_in_use`). `POST /auth/google/link` accepts a Google account whose address
-    differs and leaves `User.email` alone; `is_verified` is set only when the addresses match. The
+    differs and leaves `User.email` alone; `is_verified` is set only when the addresses match. It
+    requires `current_password` (`google_link_password_required`/`google_link_wrong_password`,
+    change-password budget), checked before the Google token: it destroys the password, so a
+    stolen token alone would otherwise lock the owner out for good. The
     same rule runs the other way: changing `email` via `PATCH /users/me` revokes `is_verified` and
     mails a fresh code (`UserManager._update`).
   - A password account with a matching address gets `409 google_link_required`; the client
@@ -255,6 +264,18 @@ than failing. fastapi-users' `on_after_register`/`on_after_update` hooks get onl
   - Presigning is quantized to `MEDIA_URL_REFRESH_SECONDS`, so one object yields a byte-identical
     URL within a window; the Flutter client caches by URL. This is why SigV4 is implemented here
     rather than via boto3, which stamps wall-clock time with no way to pin it.
+  - Hand-rolling SigV4 means hand-rolling the **retry** boto3 would have brought, because nothing
+    underneath backs off on our behalf. `_request` re-attempts a transient answer —
+    503 (S3 spells throttling `SlowDown`), 500/502/504, 429, and a transport error —
+    `STORAGE_MAX_ATTEMPTS` times with jittered backoff, and never retries a 4xx, which is
+    deterministic. **The signature is recomputed inside the loop**: SigV4 covers `x-amz-date`, so
+    replaying the first attempt's headers turns a retryable 503 into a permanent
+    `SignatureDoesNotMatch` — the error only changes its face. Keep the budget small; the upload
+    runs *before* the post is committed, so it is latency the author waits through. This is not
+    theoretical: Tigris answered `SlowDown` on a single image PUT in production, and because
+    `_store_media` is all-or-nothing that lost the whole post (no token spent — Postgres had not
+    been touched). `tests/core/test_storage.py::TestTransientRetry` pins which answers are
+    replayed and which are not.
   - The host is a signed header, so a URL signed for `minio:9000` cannot be rewritten to
     `localhost:9000` — hence `S3_PUBLIC_ENDPOINT_URL` beside `AWS_ENDPOINT_URL`, the published port
     in `docker-compose.override.yml`, and bucket CORS (`MINIO_API_CORS_ALLOW_ORIGIN`) for Flutter
@@ -397,8 +418,9 @@ than failing. fastapi-users' `on_after_register`/`on_after_update` hooks get onl
     `ix_post_reviews_user_created`, plus `probe_responses`), invalidated on a probe answer.
   - The probe author is minted by migration `0005_probe_author` so its email/username can't be
     squatted before first use. `_ensure_probe_author` still creates on demand (the test schema is
-    `create_all`) but only adopts an `is_active = false` row; `_check_username_free` is
-    case-insensitive. `0006_rename_probe_author` moved that identity to the Peerkola one on
+    `create_all`) but only adopts an `is_active = false` row; its name is reserved in
+    `_check_username_free`, and `TRUST_PROBE_AUTHOR_USERNAME` is validated against the username
+    rule at startup (the CHECK constraint would otherwise refuse the insert on the first probe). `0006_rename_probe_author` moved that identity to the Peerkola one on
     databases already past 0005 — renaming those two settings again needs the same treatment,
     or the old row is orphaned and a second author is minted.
   - **No cleanup job for probe rows**: the score reads `ProbeResponse.created` (answered), a probe

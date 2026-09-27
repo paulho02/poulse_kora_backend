@@ -52,6 +52,8 @@ re-download of every image and poster. The cost is that a URL is only guaranteed
 is why the two settings are set with a wide gap between them.
 """
 
+import asyncio
+import random
 import time
 import uuid
 from datetime import datetime, timezone
@@ -303,62 +305,124 @@ class ObjectStorage:
     ) -> httpx.Response:
         self._require_configured()
         url, host, canonical_uri = self._address(str(settings.AWS_ENDPOINT_URL), key)
-        request_headers = sigv4.signed_headers(
-            method=method,
-            host=host,
-            canonical_uri=canonical_uri,
-            access_key_id=settings.AWS_ACCESS_KEY_ID,
-            secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region=settings.AWS_DEFAULT_REGION,
-            signed_at=datetime.now(timezone.utc),
-            payload=payload,
-            headers=headers,
-        )
-        started = time.perf_counter()
-        try:
-            response = await self._http().request(
-                method, url, content=payload, headers=request_headers
+        attempts = settings.STORAGE_MAX_ATTEMPTS
+        for attempt in range(1, attempts + 1):
+            # Signed inside the loop, deliberately not hoisted out of it: SigV4
+            # covers `x-amz-date`, so replaying the first attempt's headers would
+            # turn a retryable 503 into a permanent SignatureDoesNotMatch. The
+            # error would not go away, it would only change its face.
+            request_headers = sigv4.signed_headers(
+                method=method,
+                host=host,
+                canonical_uri=canonical_uri,
+                access_key_id=settings.AWS_ACCESS_KEY_ID,
+                secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                region=settings.AWS_DEFAULT_REGION,
+                signed_at=datetime.now(timezone.utc),
+                payload=payload,
+                headers=headers,
             )
-        except httpx.HTTPError as exc:
-            # The bucket being unreachable is invisible from the outside - the
-            # route turns it into a generic 503 - so this line is the only place
-            # the actual transport error is ever recorded.
-            if warn_on_error:
-                log.warning(
-                    "storage.request_failed",
-                    http_method=method,
-                    object_key=key,
-                    error=str(exc),
+            started = time.perf_counter()
+            try:
+                response = await self._http().request(
+                    method, url, content=payload, headers=request_headers
                 )
-            raise StorageError(f"{method} {key or '<bucket>'} failed: {exc}") from exc
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-        if response.status_code >= 400:
-            if warn_on_error:
-                log.warning(
-                    "storage.request_failed",
-                    http_method=method,
-                    object_key=key,
-                    status=response.status_code,
-                    duration_ms=elapsed_ms,
+            except httpx.HTTPError as exc:
+                if await self._backoff(attempt, attempts, method, key, error=str(exc)):
+                    continue
+                # The bucket being unreachable is invisible from the outside - the
+                # route turns it into a generic 503 - so this line is the only place
+                # the actual transport error is ever recorded.
+                if warn_on_error:
+                    log.warning(
+                        "storage.request_failed",
+                        http_method=method,
+                        object_key=key,
+                        error=str(exc),
+                        attempts=attempt,
+                    )
+                raise StorageError(
+                    f"{method} {key or '<bucket>'} failed: {exc}"
+                ) from exc
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            if response.status_code >= 400:
+                if response.status_code in _RETRYABLE_STATUS and await self._backoff(
+                    attempt, attempts, method, key, status=response.status_code
+                ):
+                    continue
+                if warn_on_error:
+                    log.warning(
+                        "storage.request_failed",
+                        http_method=method,
+                        object_key=key,
+                        status=response.status_code,
+                        duration_ms=elapsed_ms,
+                        attempts=attempt,
+                    )
+                raise StorageError(
+                    f"{method} {key or '<bucket>'} -> {response.status_code}: "
+                    f"{response.text[:500]}"
                 )
-            raise StorageError(
-                f"{method} {key or '<bucket>'} -> {response.status_code}: "
-                f"{response.text[:500]}"
+            # DEBUG: one per attachment on every upload. Kept because upload latency
+            # is the bucket's, not ours, and this is what tells the two apart.
+            log.debug(
+                "storage.request",
+                http_method=method,
+                object_key=key,
+                status=response.status_code,
+                duration_ms=elapsed_ms,
+                bytes=len(payload) if payload else 0,
+                attempts=attempt,
             )
-        # DEBUG: one per attachment on every upload. Kept because upload latency
-        # is the bucket's, not ours, and this is what tells the two apart.
+            return response
+        # Unreachable: `_backoff` answers False on the last attempt, so that pass
+        # either returns or raises. Here so the loop has no implicit `None` exit.
+        raise AssertionError("storage retry loop fell through")
+
+    async def _backoff(
+        self,
+        attempt: int,
+        attempts: int,
+        method: str,
+        key: str | None,
+        **context: object,
+    ) -> bool:
+        """Wait before attempt `attempt + 1`, or answer False if there is none.
+
+        Equal jitter - half the nominal delay plus up to half again - rather than
+        the usual full jitter. The budget here is three attempts inside a request
+        an author is watching, so a delay that rounded to nearly nothing would
+        spend an attempt without giving the bucket the pause it asked for.
+        """
+        if attempt >= attempts:
+            return False
+        nominal = settings.STORAGE_RETRY_BASE_MS * 2 ** (attempt - 1) / 1000
+        delay = nominal * (0.5 + random.random() / 2)
+        # DEBUG, not WARNING: a retry that works is not an incident, and this fires
+        # per attempt, which is the rule in CLAUDE.md for anything that scales with
+        # retries. The WARNING is the one above, on the attempt that gives up.
         log.debug(
-            "storage.request",
+            "storage.request_retry",
             http_method=method,
             object_key=key,
-            status=response.status_code,
-            duration_ms=elapsed_ms,
-            bytes=len(payload) if payload else 0,
+            attempt=attempt,
+            of=attempts,
+            delay_ms=round(delay * 1000, 1),
+            **context,
         )
-        return response
+        await asyncio.sleep(delay)
+        return True
 
 
 _TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+
+#: Answers worth asking again. S3 spells "you are going too fast" as 503
+#: `SlowDown` and a momentary fault as 500 `InternalError`; 429 is the same
+#: message in plain HTTP, and 502/504 are the edge in front of the bucket rather
+#: than the bucket. Everything else a 4xx carries is deterministic: a 403 (bad
+#: signature, revoked key) or 404 (no such bucket) answers identically however
+#: often it is asked, so retrying only delays the error.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
 def _quantized_now() -> datetime:
