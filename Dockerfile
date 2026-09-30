@@ -2,7 +2,7 @@
 # Uses FastAPI to serve static assets
 # Uses gunicorn as a process manager to run the FastAPI app
 
-FROM node:22 as frontend-build
+FROM node:26 as frontend-build
 
 WORKDIR /app
 
@@ -15,7 +15,7 @@ COPY frontend /app/
 RUN yarn build
 
 
-FROM python:3.13
+FROM python:3.14
 
 ENV PYTHONUNBUFFERED=1
 
