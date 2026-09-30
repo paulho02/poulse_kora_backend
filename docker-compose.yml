@@ -11,7 +11,7 @@ services:
       retries: 3
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     restart: always
     # AOF persistence, mirroring postgres's durability-by-default.
     # REDIS_PASSWORD comes from .env, which compose auto-loads for ${...} substitution.
