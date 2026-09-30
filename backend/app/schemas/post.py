@@ -116,6 +116,11 @@ class PostRead(BaseModel):
     # The numbers are returned once, by POST /posts/{id}/review - see
     # PostReviewResult in app/schemas/post_review.py.
     subscription_kind: str | None
+    # How many forwards gifted this post's author their token. The one count that
+    # is shown on a read route, and only to the author (None for everyone else):
+    # it is their income, told to them in their own post history, never a signal a
+    # reader could vote along with.
+    gifted_count: int | None = None
     created: datetime
 
     model_config = ConfigDict(from_attributes=True)

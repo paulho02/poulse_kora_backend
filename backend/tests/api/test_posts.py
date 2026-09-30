@@ -1846,6 +1846,137 @@ class TestReviewPost:
         assert post.dropped_count == 1
         assert await service.operation_queue_len(redis) == 0  # no re-injection
 
+    async def test_gifts_are_counted_on_the_post_and_shown_to_its_author_alone(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        author: User = await create_user()
+        giver: User = await create_user()
+        plain: User = await create_user()
+        superuser: User = await create_user()
+        superuser.is_superuser = True
+        await db.commit()
+        post: Post = await create_post(channel=await create_channel(), author=author)
+        for reader, gift in ((giver, True), (plain, False)):
+            await service.place_post(redis, str(reader.id), post.id)
+            resp = await client.post(
+                settings.API_PATH + f"/posts/{post.id}/review",
+                headers=get_jwt_header(reader),
+                json={"kind": "forward", "gift_token": gift},
+            )
+            assert resp.status_code == 200, resp.text
+
+        await db.refresh(post)
+        assert post.gifted_count == 1  # one of the two forwards gifted
+        assert post.forwarded_count == 2
+
+        mine = await client.get(
+            settings.API_PATH + "/posts/mine", headers=get_jwt_header(author)
+        )
+        assert mine.json()[0]["gifted_count"] == 1
+        own = await client.get(
+            settings.API_PATH + f"/posts/{post.id}", headers=get_jwt_header(author)
+        )
+        assert own.json()["gifted_count"] == 1
+
+        # Anyone else - the giver, a plain forwarder, even a superuser - sees null.
+        for viewer in (giver, plain, superuser):
+            resp = await client.get(
+                settings.API_PATH + f"/posts/{post.id}",
+                headers=get_jwt_header(viewer),
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["gifted_count"] is None
+        history = await client.get(
+            settings.API_PATH + "/posts/reviewed", headers=get_jwt_header(giver)
+        )
+        assert history.json()[0]["post"]["gifted_count"] is None
+
+    async def test_gifted_forward_hands_the_earned_token_to_the_author(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        user: User = await create_user()
+        author: User = await create_user()
+        channel: Channel = await create_channel()
+        post: Post = await create_post(channel=channel, author=author, is_anonymous=True)
+        await service.place_post(redis, str(user.id), post.id)
+        author_before = await service.token_balance(redis, str(author.id))
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "forward", "gift_token": True},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["gifted"] is True
+        # A transfer, not a mint: the reviewer keeps nothing, the author gains one.
+        assert data["token_balance"] == 0
+        assert await service.token_balance(redis, str(author.id)) == author_before + 1
+        # Otherwise an ordinary forward: counted, and re-injected.
+        assert data["post_forwarded_count"] == 1
+        assert await service.operation_queue_len(redis) == 1
+        row = (
+            await db.execute(select(PostReview).where(PostReview.post_id == post.id))
+        ).scalar_one()
+        assert row.gifted is True and row.kind == "forward"
+
+        history = await client.get(
+            settings.API_PATH + "/posts/reviewed", headers=get_jwt_header(user)
+        )
+        assert history.json()[0]["gifted"] is True
+
+    async def test_gift_with_a_drop_is_refused(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        post: Post = await create_post(channel=await create_channel())
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "drop", "gift_token": True},
+        )
+        assert resp.status_code == 422, resp.text
+        assert await service.render_queue_ids(redis, str(user.id), 10) == [post.id]
+
+    async def test_gift_to_own_post_is_refused_and_leaves_it_reviewable(
+        self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
+    ):
+        user: User = await create_user()
+        post: Post = await create_post(channel=await create_channel(), author=user)
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "forward", "gift_token": True},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "gift_not_allowed"
+        # Checked before the queue is touched: the post is still there to review.
+        assert await service.render_queue_ids(redis, str(user.id), 10) == [post.id]
+
+    async def test_gift_to_a_deleted_author_is_refused(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel, create_post,
+    ):
+        user: User = await create_user()
+        post: Post = await create_post(channel=await create_channel())
+        post.author_id = None  # what "keep posts" account deletion leaves behind
+        await db.commit()
+        await service.place_post(redis, str(user.id), post.id)
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "forward", "gift_token": True},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "gift_not_allowed"
+
     async def test_review_not_in_queue_is_conflict(
         self, client: AsyncClient, redis: Redis, create_user, create_channel, create_post
     ):

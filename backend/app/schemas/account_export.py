@@ -122,6 +122,10 @@ class ExportPost(_ExportModel):
     channel_name: str
     language: str
     is_anonymous: bool
+    # Tokens other readers gifted this account for this post. Unlike the forward
+    # and drop counts (`post_vote_counts`), the app shows the author this number,
+    # and it is tokens they received - so it is theirs to take with them.
+    gifted_tokens: int
     created: UtcDatetime
     blocks: list[ExportBlock]
 
@@ -135,6 +139,8 @@ class ExportReview(_ExportModel):
 
     post_id: int
     verdict: str
+    # Present (true) only on a forward whose earned token went to the author.
+    gifted_token: bool | None = None
     created: UtcDatetime
 
 

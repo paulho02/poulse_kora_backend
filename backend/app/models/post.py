@@ -91,6 +91,9 @@ class Post(Base):
 
     forwarded_count: Mapped[int] = mapped_column(default=0, server_default="0")
     dropped_count: Mapped[int] = mapped_column(default=0, server_default="0")
+    # Forwards that handed their earned token to the author (PostReview.gifted).
+    # Shown to the author alone - see `gifted_count` on PostRead.
+    gifted_count: Mapped[int] = mapped_column(default=0, server_default="0")
 
     # Snapshot of the author's subscription at creation time (e.g. "supporter"),
     # or None for free/no perk. Set once, never updated — a supporter's posts keep

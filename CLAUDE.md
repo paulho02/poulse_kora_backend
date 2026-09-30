@@ -380,6 +380,19 @@ than failing. fastapi-users' `on_after_register`/`on_after_update` hooks get onl
   `skip`/`limit`. Deliberately **no pull-based top-up**: undelivered supply exists, but reach is
   what an author paid for (`FEED_FANOUT` per op), so serving it on demand would be an economy
   change. A feed that runs dry is the economy working.
+- **A forward can gift its token** (`PostReviewCreate.gift_token`, forward only — 422 on a drop):
+  the token the review earns goes to the post's author instead of the reviewer. A transfer, not a
+  mint, so supply is unchanged and it can't be farmed; it buys the author voice (their next post's
+  admission price). Recorded as `PostReview.gifted` (alembic `0008`) because `rebuild_redis`
+  re-derives balances from Postgres and must move each gift from giver to author. Refused
+  `409 gift_not_allowed` — before the queue is touched, so the post stays reviewable — for a probe,
+  one's own post, or an author who deleted their account. Anonymity holds: the reviewer learns
+  nothing about who received it. `PostReviewResult.gifted`, `ReviewedPostRead.gifted` and the
+  export's `gifted_token` report it back. The receiving side is `Post.gifted_count` (alembic `0009`,
+  backfilled from `post_reviews.gifted`), incremented SQL-side like `forwarded_count` and the one
+  per-post count on a read route: `PostRead.gifted_count` is set **for the author only** (null for
+  every other viewer, superusers included) — it is their income, not a verdict to vote along with.
+  Exported as `gifted_tokens` on the author's posts for the same reason.
 - **A post's score is disclosed once, after the verdict**: `POST /posts/{id}/review` returns
   `post_forwarded_count`/`post_reviewed_count` (including this review). `Post.forwarded_count`/
   `dropped_count` are deliberately absent from `PostRead` — a reader who can see the crowd's vote

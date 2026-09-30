@@ -21,7 +21,7 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.api.posts import create_post
 from app.db import async_session_maker
@@ -63,7 +63,12 @@ async def _resolve_channel(session, channel_ref: str) -> Channel:
 
 
 async def _ensure_bot_author(session, user_manager) -> User:
-    existing = await session.scalar(select(User).filter(User.email == BOT_EMAIL))
+    # Matched on either column: the email changed with the Peerkola rename
+    # (was bulk.post.bot@kora.dev), so an older dev DB holds the bot under the
+    # old address, and the unique username would refuse a second one.
+    existing = await session.scalar(
+        select(User).filter(or_(User.email == BOT_EMAIL, User.username == BOT_USERNAME))
+    )
     if existing:
         return existing
     bot = User(

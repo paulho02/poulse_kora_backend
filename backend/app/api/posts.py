@@ -116,6 +116,9 @@ def _serialize_post(post: Post, viewer: User) -> PostRead:
         # Withheld with the author: at launch the supporter set is small enough that
         # "anonymous, but a supporter" narrows the author to a handful of accounts.
         subscription_kind=post.subscription_kind if reveal_author else None,
+        # The author's alone - not even a superuser's, who sees the author but has
+        # no business with the crowd's verdict. See PostRead.gifted_count.
+        gifted_count=post.gifted_count if post.author_id == viewer.id else None,
         created=post.created,
     )
 
@@ -706,6 +709,7 @@ async def get_my_reviewed_posts(
         ReviewedPostRead(
             post=_serialize_post(r.post, user),
             kind=r.kind,
+            gifted=r.gifted,
             reviewed_at=r.created,
         )
         for r in reviews
@@ -764,10 +768,25 @@ async def review_post(
     worth: `trust_service.forward_fanout` resolves their Reviewer Trust band into a
     recipient count that travels with the operation. Only a forward - an original post
     reaches exactly what its author paid the admission price for.
+
+    A forward may also **gift** (`gift_token`): the token this review earns goes to the
+    post's author instead of the reviewer. A transfer, not a mint - the economy's supply
+    is unchanged, so gifting can't be farmed, and the reviewer pays with the very token
+    the review earned, so it is always affordable. What it buys is voice: the author's
+    next post is closer to its admission price. Refused as `gift_not_allowed` for a
+    test post (its author is the system), the reviewer's own post (a no-op that would
+    pad the gift record) and an author who has deleted their account (nobody to give
+    to). Checked before the queue is touched, so a refusal leaves the post reviewable.
     """
     post = await session.get(Post, post_id)
     if not post:
         raise api_error(404, "post_not_found")
+
+    if review_in.gift_token and (
+        post.is_probe or post.author_id is None or post.author_id == user.id
+    ):
+        log.info("post.review_rejected", post_id=post_id, reason="gift_not_allowed")
+        raise api_error(409, "gift_not_allowed")
 
     removed = await service.claim_from_queue(redis, str(user.id), post_id)
     if removed == 0:
@@ -805,7 +824,14 @@ async def review_post(
             probe_correct=correct,
         )
 
-    session.add(PostReview(user_id=user.id, post_id=post_id, kind=review_in.kind))
+    session.add(
+        PostReview(
+            user_id=user.id,
+            post_id=post_id,
+            kind=review_in.kind,
+            gifted=review_in.gift_token,
+        )
+    )
     user.reviewed_count += 1
     # The post's counters are incremented SQL-side, unlike the user's: a post is
     # fanned out to FEED_FANOUT readers at once, so its row is the one here that
@@ -815,6 +841,8 @@ async def review_post(
     if review_in.kind == "forward":
         post.forwarded_count = Post.forwarded_count + 1
         user.forwarded_count += 1
+        if review_in.gift_token:
+            post.gifted_count = Post.gifted_count + 1
     else:
         post.dropped_count = Post.dropped_count + 1
         user.dropped_count += 1
@@ -835,7 +863,13 @@ async def review_post(
     # explicitly (one indexed row, two ints) so the result can report them.
     await session.refresh(post, ["forwarded_count", "dropped_count"])
 
-    token_balance = await service.earn_token(redis, str(user.id))
+    if review_in.gift_token:
+        # After the commit, like the reviewer's own earn: the unique constraint above
+        # is what makes a token per review true, and a re-delivery must not pay twice.
+        await service.earn_token(redis, str(post.author_id))
+        token_balance = await service.token_balance(redis, str(user.id))
+    else:
+        token_balance = await service.earn_token(redis, str(user.id))
 
     if review_in.kind == "forward":
         # How far this particular forward travels, resolved once here rather than at
@@ -877,6 +911,7 @@ async def review_post(
         channel_id=post.channel_id,
         kind=review_in.kind,
         token_balance=token_balance,
+        gifted=review_in.gift_token,
     )
 
     return PostReviewResult(
@@ -888,4 +923,5 @@ async def review_post(
         token_balance=token_balance,
         post_forwarded_count=post.forwarded_count,
         post_reviewed_count=post.forwarded_count + post.dropped_count,
+        gifted=review_in.gift_token,
     )

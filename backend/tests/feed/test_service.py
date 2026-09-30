@@ -3,10 +3,12 @@ import time
 import uuid
 
 from redis.asyncio import Redis
+from sqlalchemy import select
 
 from app.core.config import settings
 from app.feed import keys, service
-from tests.utils import subscribe
+from app.models.post_review import PostReview
+from tests.utils import review, subscribe
 
 
 class TestFreeQueueInvariant:
@@ -355,4 +357,28 @@ class TestPostgresBridge:
         await service.rebuild_from_pg(redis, db)
         assert await service.token_balance(redis, str(user.id)) == (
             settings.FEED_STARTING_TOKENS + 3
+        )
+
+    async def test_rebuild_moves_gifted_tokens_from_reviewer_to_author(
+        self, redis: Redis, db, create_user, create_channel, create_post
+    ):
+        """A gift is a transfer; a rebuild must not hand it back to the giver."""
+        reviewer = await create_user()
+        author = await create_user()
+        post = await create_post(channel=await create_channel(), author=author)
+        await review(db, reviewer, post, "forward")
+        row = (
+            await db.execute(
+                select(PostReview).where(PostReview.user_id == reviewer.id)
+            )
+        ).scalar_one()
+        row.gifted = True
+        await db.commit()
+
+        await service.rebuild_from_pg(redis, db)
+        assert await service.token_balance(redis, str(reviewer.id)) == (
+            settings.FEED_STARTING_TOKENS + 1 - 1
+        )
+        assert await service.token_balance(redis, str(author.id)) == (
+            settings.FEED_STARTING_TOKENS + 1
         )

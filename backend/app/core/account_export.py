@@ -475,10 +475,21 @@ async def collect(
     posts = await _collect_posts(session, user_id, media)
 
     reviews = [
-        ExportReview(post_id=post_id, verdict=kind, created=created)
-        for post_id, kind, created in (
+        ExportReview(
+            post_id=post_id,
+            verdict=kind,
+            # None rather than False so `exclude_none` leaves ordinary reviews as they were.
+            gifted_token=True if gifted else None,
+            created=created,
+        )
+        for post_id, kind, gifted, created in (
             await session.execute(
-                select(PostReview.post_id, PostReview.kind, PostReview.created)
+                select(
+                    PostReview.post_id,
+                    PostReview.kind,
+                    PostReview.gifted,
+                    PostReview.created,
+                )
                 .where(PostReview.user_id == user_id)
                 .order_by(PostReview.created)
             )
@@ -660,6 +671,7 @@ async def _collect_posts(
             channel_name=channel_name,
             language=post.language,
             is_anonymous=post.is_anonymous,
+            gifted_tokens=post.gifted_count,
             created=post.created,
             blocks=blocks_by_post.get(post.id, []),
         )

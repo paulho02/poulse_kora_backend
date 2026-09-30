@@ -124,6 +124,8 @@ class TestExportContents:
         channel = await create_channel()
         await subscribe(db, author, channel)
         post = await create_post(channel=channel, author=author, text="mine")
+        post.gifted_count = 2
+        await db.commit()
 
         other = await create_post(channel=channel, text="someone else's")
         await review(db, author, other, "forward")
@@ -134,6 +136,9 @@ class TestExportContents:
         exported = data["posts"][0]
         assert exported["channel_name"] == channel.name
         assert exported["blocks"][0]["text"] == "mine"
+        # Tokens received are the author's; forward/drop counts stay out.
+        assert exported["gifted_tokens"] == 2
+        assert "forwarded_count" not in exported
 
         assert [r["post_id"] for r in data["reviews"]] == [other.id]
         assert data["reviews"][0]["verdict"] == "forward"

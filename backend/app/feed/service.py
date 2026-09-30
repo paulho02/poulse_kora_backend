@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import languages as languages_module
@@ -1195,7 +1195,10 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
       tokens, but the starting grant *is* durable policy, not something to lose in
       a rebuild). Tokens earned by answering test posts are not in that proxy either,
       since a probe deliberately moves no counter; next to the spends this already
-      discards, that is a rounding error and not worth a second query.
+      discards, that is a rounding error and not worth a second query. Gifted reviews
+      are the exception: they move a token from the reviewer to the post's author, so
+      the proxy subtracts gifts given and adds gifts received - one grouped query each,
+      and without it every rebuild would hand the gift back to the giver.
     - `seen:*` from `post_reviews`, so the re-delivery guard survives a rebuild.
     - Each subscriber's queue is backfilled with recent posts from their subscribed
       channels, so users who subscribed *before* Redis (empty queues) get content
@@ -1217,6 +1220,26 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
     # Before the backfill: it places posts, and placement consults these sets.
     seen_seeded = await seed_seen_from_reviews(redis, session)
 
+    gifts_given = dict(
+        (
+            await session.execute(
+                select(PostReview.user_id, func.count())
+                .where(PostReview.gifted)
+                .group_by(PostReview.user_id)
+            )
+        ).all()
+    )
+    gifts_received = dict(
+        (
+            await session.execute(
+                select(Post.author_id, func.count())
+                .join(PostReview, PostReview.post_id == Post.id)
+                .where(PostReview.gifted, Post.author_id.is_not(None))
+                .group_by(Post.author_id)
+            )
+        ).all()
+    )
+
     scripts = get_scripts(redis)
     for user in users:
         await scripts.ensure_free(
@@ -1225,7 +1248,10 @@ async def rebuild_from_pg(redis: Redis, session: AsyncSession) -> dict[str, int]
         )
         await redis.set(
             keys.tokens(str(user.id)),
-            settings.FEED_STARTING_TOKENS + user.reviewed_count,
+            settings.FEED_STARTING_TOKENS
+            + user.reviewed_count
+            - gifts_given.get(user.id, 0)
+            + gifts_received.get(user.id, 0),
         )
 
     backfilled = 0

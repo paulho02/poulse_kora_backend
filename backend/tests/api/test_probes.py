@@ -282,6 +282,25 @@ class TestAnsweringIsRecorded:
         assert data["token_balance"] == 1
         assert await service.token_balance(redis, str(user.id)) == 1
 
+    async def test_a_gift_is_refused_and_the_probe_stays_answerable(
+        self, client: AsyncClient, db: AsyncSession, redis: Redis,
+        create_user, create_channel,
+    ):
+        """A probe's author is the system; there is nobody to reward."""
+        user: User = await create_user()
+        channel: Channel = await create_channel()
+        post = await mint_for(db, redis, user, channel)
+
+        resp = await client.post(
+            settings.API_PATH + f"/posts/{post.id}/review",
+            headers=get_jwt_header(user),
+            json={"kind": "forward", "gift_token": True},
+        )
+
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "gift_not_allowed"
+        assert (await answer(client, user, post, "forward")).status_code == 200
+
     async def test_a_correct_answer_is_recorded_and_reported(
         self, client: AsyncClient, db: AsyncSession, redis: Redis,
         create_user, create_channel,
