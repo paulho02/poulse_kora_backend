@@ -8,6 +8,7 @@ from app.api import (
     feedback,
     google_auth,
     items,
+    password_reset,
     posts,
     stats,
     subscriptions,
@@ -22,6 +23,7 @@ api_router.include_router(banner.router, tags=["banner"])
 api_router.include_router(users.router, tags=["users"])
 api_router.include_router(email_verification.router)
 api_router.include_router(change_password.router)
+api_router.include_router(password_reset.router)
 api_router.include_router(google_auth.router)
 api_router.include_router(items.router, tags=["items"])
 api_router.include_router(feedback.router, tags=["feedback"])

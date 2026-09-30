@@ -546,6 +546,39 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_MAX_ATTEMPTS: int = 5
     EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS: int = 60
 
+    # --- password reset ---
+    # Same short-code shape as email verification (app.core.password_reset), not
+    # fastapi-users' own forgot_password/reset_password, which mint a link-style
+    # JWT the client has nowhere to open. `POST /auth/forgot-password` always
+    # answers the same way regardless of whether the address has an account -
+    # see that route for why - so there is no separate resend cooldown here: the
+    # rate limits below, keyed on the *submitted* address whether or not it
+    # resolves to anyone, are what stands between this and a mail cannon or an
+    # account-enumeration oracle.
+    PASSWORD_RESET_CODE_LENGTH: int = 6
+    PASSWORD_RESET_CODE_TTL_SECONDS: int = 15 * 60
+    # A submitted-but-wrong code counts even against one that has already since
+    # expired, so this also bounds brute-forcing an old code's Redis key.
+    PASSWORD_RESET_MAX_ATTEMPTS: int = 5
+    # `POST /auth/forgot-password` spends two budgets per request, same shape as
+    # `limit_login`: one keyed on the caller's address (bounds how many accounts
+    # one host can probe), one keyed on a hash of the *submitted* email (bounds
+    # how many reset emails any single address can be mail-bombed with, from
+    # anywhere). The account budget is what actually stands in for a resend
+    # cooldown - requesting again inside it just re-sends against the same
+    # window rather than being refused outright. Matched to the code's own TTL
+    # so a legitimate user whose code expired can always get a fresh one by the
+    # time this budget rolls over. Set either to 0 to disable that half.
+    PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP: int = 8
+    PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT: int = 3
+    PASSWORD_RESET_REQUEST_RATE_WINDOW_SECONDS: float = 15 * 60.0
+    # `POST /auth/reset-password/confirm` has no account to key on without
+    # already leaking whether one exists (see the route), so this is address-only
+    # defense in depth - the real brute-force bound is PASSWORD_RESET_MAX_ATTEMPTS
+    # against the one issued code, refreshed only inside the budget above.
+    PASSWORD_RESET_CONFIRM_RATE_LIMIT_PER_IP: int = 20
+    PASSWORD_RESET_CONFIRM_RATE_WINDOW_SECONDS: float = 10 * 60.0
+
     # --- Google sign-in ---
     # Off: POST /auth/google and /auth/google/link answer 400 "google_oauth_disabled"
     # and GET /config reports the feature off, so the client hides the button - the

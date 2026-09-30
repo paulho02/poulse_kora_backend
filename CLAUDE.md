@@ -195,6 +195,36 @@ than failing. fastapi-users' `on_after_register`/`on_after_update` hooks get onl
     live about an hour.
   - `User.oauth_accounts` is `lazy="selectin"`, not the `joined` the docs show: a joined
     collection would force `.unique()` on every `select(User)` in the codebase.
+- **Password reset** (`app/api/password_reset.py`, `app/core/password_reset.py`): `POST
+  /auth/forgot-password` + `POST /auth/reset-password/confirm`, a short numeric code emailed to
+  the address — not fastapi-users' own `forgot_password`/`reset_password`, which mint a link-style
+  JWT the mobile app has nowhere to open (the same reasoning as email verification). Both routes
+  are signed out by construction, so both are rate-limited rather than gated on a user.
+  - `forgot_password` always answers `200 {"msg": "ok"}`, whether or not `email` belongs to an
+    account — a differential response (404 for unknown, cooldown-429 only for real accounts) is
+    the textbook account-enumeration oracle a "forgot password" form is targeted for. There is
+    deliberately no separate resend cooldown either: the account-keyed rate-limit budget
+    (`limit_forgot_password`, keyed on a hash of the *submitted* email, existing or not) is what
+    stands in for one, since a cooldown that only ever activates for real accounts would itself be
+    the leak.
+  - A Google-linked account (`user.oauth_accounts`) gets a notice email instead of a code —
+    linking overwrote `hashed_password` with a random value nobody holds (see Google sign-in
+    above), so there is nothing to reset. Still counts as the generic 200; the notice costs
+    nothing an attacker could use, since only the inbox's owner ever reads it.
+  - `reset_password_confirm` collapses "no such account", "that account is Google-linked", "wrong
+    code" and "expired code" into one `password_reset_invalid_or_expired_code` — anything more
+    specific re-opens the same oracle. Every path calls `check_code` against *some* Redis identity
+    (the real user id when a code could have been issued, an opaque hash of the submitted email
+    otherwise — `opaque_identity`), so the Redis round trip, and the response, look the same
+    regardless of which case it was.
+  - A code that checks out but is followed by a rejected weak new password must not be burned:
+    `check_code`/`consume_code` are separate calls, and the route only consumes the code after the
+    new password is actually written — otherwise a password-policy mistake would force a whole new
+    `forgot_password` round trip instead of an immediate retry with the same code.
+  - `PASSWORD_RESET_MAX_ATTEMPTS` locks a code out after too many wrong guesses; requesting a new
+    one resets that counter, but doing so costs a slot in the same account-keyed rate limit, so the
+    real guessing budget across a code's lifetime is bounded by both together, not by the attempt
+    cap alone.
 - **Profile pictures** (`app/api/users.py`): `PUT`/`DELETE /users/me/profile-picture`, keyed by
   `User.profile_picture_key`. Bytes go through `media_validation.process_profile_picture` (decode,
   EXIF strip, downscale, re-encode — content type derived, not believed). No GET route:

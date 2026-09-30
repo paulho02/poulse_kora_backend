@@ -51,6 +51,13 @@ LOGIN_SCOPE = "login"
 # Registrations, per caller address.
 REGISTER_SCOPE = "register"
 
+# Password-reset requests and confirmations. Two scopes, not one: the request
+# step spends a budget keyed on the *submitted* email (see `limit_forgot_password`)
+# and must never share a bucket with the confirm step, which only ever has a
+# caller address to key on.
+PASSWORD_RESET_REQUEST_SCOPE = "password_reset_request"
+PASSWORD_RESET_CONFIRM_SCOPE = "password_reset_confirm"
+
 # Where this process runs cannot change while it runs (same resolution the
 # request logger makes once per middleware instance).
 _BEHIND_PROXY = running_on_railway()
@@ -195,6 +202,70 @@ async def limit_register(request: Request, redis: CurrentRedis) -> None:
         client_identity(request),
         settings.REGISTER_RATE_LIMIT,
         settings.REGISTER_RATE_WINDOW_SECONDS,
+    )
+
+
+async def limit_forgot_password(request: Request, redis: CurrentRedis) -> None:
+    """Spend one budget on the caller's address *and* one on the submitted
+    email, or raise 429.
+
+    The email budget is keyed on whatever address was submitted, whether or
+    not it belongs to an account - `POST /auth/forgot-password` answers
+    identically either way (see that route), and checking existence first
+    here would reopen exactly the enumeration gap it exists to close: an
+    attacker could tell a real account from a fake one by whether this budget
+    was ever spent, if it were only ever spent for real ones. It doubles as
+    the flow's resend cooldown - see `app.core.password_reset` for why there
+    is no separate one.
+
+    Read the same way `limit_login` reads `username` off the form: the body is
+    JSON here rather than form-encoded, but Starlette caches it either way, so
+    parsing it again as the route's own `ForgotPasswordRequest` costs nothing
+    extra. A body that isn't valid JSON, or carries no string `email`, just
+    skips the second budget - the route's own validation reports that error.
+    """
+    await enforce(
+        redis,
+        PASSWORD_RESET_REQUEST_SCOPE,
+        client_identity(request),
+        settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP,
+        settings.PASSWORD_RESET_REQUEST_RATE_WINDOW_SECONDS,
+    )
+    if settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT <= 0:
+        return
+    try:
+        body = await request.json()
+    except ValueError:
+        return
+    email = body.get("email") if isinstance(body, dict) else None
+    if not isinstance(email, str) or not email:
+        return
+    await enforce(
+        redis,
+        PASSWORD_RESET_REQUEST_SCOPE,
+        opaque_identity("account", email),
+        settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT,
+        settings.PASSWORD_RESET_REQUEST_RATE_WINDOW_SECONDS,
+    )
+
+
+async def limit_reset_password_confirm(request: Request, redis: CurrentRedis) -> None:
+    """Spend one confirm attempt on the caller's address, or raise 429.
+
+    Address-only, unlike `limit_forgot_password`: keying a second budget on the
+    submitted email would mean spending (or not) a distinguishable budget
+    depending on whether that email exists - exactly the oracle this flow is
+    built to avoid. The actual brute-force bound on a guessed code is
+    `PASSWORD_RESET_MAX_ATTEMPTS` (app.core.password_reset), which locks out
+    per-code regardless of caller address; this only bounds how fast one host
+    can spray the endpoint with codes for addresses it doesn't hold.
+    """
+    await enforce(
+        redis,
+        PASSWORD_RESET_CONFIRM_SCOPE,
+        client_identity(request),
+        settings.PASSWORD_RESET_CONFIRM_RATE_LIMIT_PER_IP,
+        settings.PASSWORD_RESET_CONFIRM_RATE_WINDOW_SECONDS,
     )
 
 

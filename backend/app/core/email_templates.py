@@ -77,6 +77,26 @@ _STRINGS: dict[str, dict[str, str]] = {
             "email — nothing will happen."
         ),
         "footer_automated": "This is an automated message, so please don't reply.",
+        "reset_subject": "Reset your Peerkola password",
+        "reset_heading": "Reset your password",
+        "reset_lead": "Enter this code in the app to choose a new password.",
+        "reset_expiry_one": "This code expires in 1 minute.",
+        "reset_expiry_other": "This code expires in {minutes} minutes.",
+        "reset_ignore": (
+            "If you didn't request this, you can ignore this email — your "
+            "password won't change."
+        ),
+        "reset_google_subject": "Your Peerkola account signs in with Google",
+        "reset_google_heading": "You sign in with Google",
+        "reset_google_lead": (
+            "This account uses “Continue with Google”, so there's no "
+            "password to reset. Open the app and sign in with that Google "
+            "account instead."
+        ),
+        "reset_google_ignore": (
+            "If you didn't request this, you can ignore this email — nothing "
+            "will change."
+        ),
     },
     "de": {
         "verify_subject": "Dein Peerkola Bestätigungscode",
@@ -92,6 +112,28 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
         "footer_automated": (
             "Das ist eine automatische Nachricht, bitte antworte nicht darauf."
+        ),
+        "reset_subject": "Setze dein Peerkola Passwort zurück",
+        "reset_heading": "Setze dein Passwort zurück",
+        "reset_lead": (
+            "Gib diesen Code in der App ein, um ein neues Passwort zu wählen."
+        ),
+        "reset_expiry_one": "Dieser Code läuft in 1 Minute ab.",
+        "reset_expiry_other": "Dieser Code läuft in {minutes} Minuten ab.",
+        "reset_ignore": (
+            "Falls du das nicht angefordert hast, kannst du diese E-Mail "
+            "ignorieren — dein Passwort ändert sich nicht."
+        ),
+        "reset_google_subject": "Dein Peerkola Konto meldet sich über Google an",
+        "reset_google_heading": "Du meldest dich über Google an",
+        "reset_google_lead": (
+            "Dieses Konto nutzt „Über Google anmelden“, es gibt also "
+            "kein Passwort zum Zurücksetzen. Öffne die App und melde dich "
+            "stattdessen mit diesem Google-Konto an."
+        ),
+        "reset_google_ignore": (
+            "Falls du das nicht angefordert hast, kannst du diese E-Mail "
+            "ignorieren — es ändert sich nichts."
         ),
     },
 }
@@ -115,7 +157,7 @@ def _layout(
     locale: str,
     heading: str,
     lead: str,
-    code: str,
+    code: str | None,
     note: str,
     footer_lines: list[str],
 ) -> str:
@@ -125,10 +167,33 @@ def _layout(
     clients ignoring `margin: auto`, a 600px card (the width that fits the
     average desktop preview pane without horizontal scroll on a phone), and the
     content itself.
+
+    `code` is None for a notice with nothing to type in (see
+    `password_reset_google_notice_email`) - the accent code box is the one
+    element that only makes sense beside an actual code, so it's the one piece
+    of this shell that's conditional rather than every caller passing an empty
+    string through the same markup.
     """
     footer_html = "\n".join(
         f'            <p style="margin:0 0 8px 0;">{escape(line)}</p>'
         for line in footer_lines
+    )
+    code_block = (
+        ""
+        if code is None
+        else f"""            <table role="presentation" width="100%" cellpadding="0"
+                   cellspacing="0" border="0">
+              <tr>
+                <td align="center" style="background-color:{_CODE_BG};
+                           border:1px solid {_ACCENT};border-radius:10px;
+                           padding:20px 12px;font-family:{_MONO_FONT};
+                           font-size:32px;font-weight:700;letter-spacing:8px;
+                           color:{_ACCENT};">
+                  {escape(code)}
+                </td>
+              </tr>
+            </table>
+"""
     )
     return f"""\
 <!doctype html>
@@ -169,19 +234,7 @@ def _layout(
                       line-height:1.6;color:{_BODY_TEXT};">
               {escape(lead)}
             </p>
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
-                   border="0">
-              <tr>
-                <td align="center" style="background-color:{_CODE_BG};
-                           border:1px solid {_ACCENT};border-radius:10px;
-                           padding:20px 12px;font-family:{_MONO_FONT};
-                           font-size:32px;font-weight:700;letter-spacing:8px;
-                           color:{_ACCENT};">
-                  {escape(code)}
-                </td>
-              </tr>
-            </table>
-            <p style="margin:20px 0 0 0;font-family:{_FONT};font-size:14px;
+{code_block}            <p style="margin:20px 0 0 0;font-family:{_FONT};font-size:14px;
                       line-height:1.6;color:{_MUTED};">
               {escape(note)}
             </p>
@@ -224,5 +277,56 @@ def verification_email(code: str, locale: str) -> tuple[str, str, str]:
         code=code,
         note=expiry,
         footer_lines=[ignore, footer],
+    )
+    return subject, text, html
+
+
+def password_reset_email(code: str, locale: str) -> tuple[str, str, str]:
+    """`(subject, text, html)` for the password-reset code - see
+    app/core/password_reset.py for why this is a code rather than a link."""
+    minutes = settings.PASSWORD_RESET_CODE_TTL_SECONDS // 60
+    key = "reset_expiry_one" if minutes == 1 else "reset_expiry_other"
+    expiry = _t(locale, key, minutes=minutes)
+
+    subject = _t(locale, "reset_subject")
+    heading = _t(locale, "reset_heading")
+    lead = _t(locale, "reset_lead")
+    ignore = _t(locale, "reset_ignore")
+    footer = _t(locale, "footer_automated")
+
+    text = f"{heading}\n\n{lead}\n\n{code}\n\n{expiry}\n\n{ignore}\n\n{footer}\n"
+    html = _layout(
+        locale=locale,
+        heading=heading,
+        lead=lead,
+        code=code,
+        note=expiry,
+        footer_lines=[ignore, footer],
+    )
+    return subject, text, html
+
+
+def password_reset_google_notice_email(locale: str) -> tuple[str, str, str]:
+    """`(subject, text, html)` for a "forgot password" request against a
+    Google-linked account - see app/api/password_reset.py. No code: linking
+    overwrote `hashed_password` with a random value nobody holds (see
+    app/api/google_auth.py), so there is nothing to reset - the point of this
+    mail is only to tell the account's owner what to do instead, the way
+    `login_use_google` does for a login attempt.
+    """
+    subject = _t(locale, "reset_google_subject")
+    heading = _t(locale, "reset_google_heading")
+    lead = _t(locale, "reset_google_lead")
+    ignore = _t(locale, "reset_google_ignore")
+    footer = _t(locale, "footer_automated")
+
+    text = f"{heading}\n\n{lead}\n\n{ignore}\n\n{footer}\n"
+    html = _layout(
+        locale=locale,
+        heading=heading,
+        lead=lead,
+        code=None,
+        note=ignore,
+        footer_lines=[footer],
     )
     return subject, text, html

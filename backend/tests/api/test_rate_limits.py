@@ -134,6 +134,41 @@ class TestRegisterRateLimit:
         ).status_code == 201
 
 
+class TestForgotPasswordRateLimit:
+    """The account-keyed half and its enumeration-safety property have their own
+    tests next to the route (tests/api/test_password_reset.py); this only pins
+    the per-IP half and the "0 disables it" convention every budget shares."""
+
+    async def test_per_ip_budget_bounds_requests_across_addresses(
+        self, client: AsyncClient, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP", 2)
+        for _ in range(2):
+            resp = await client.post(
+                settings.API_PATH + "/auth/forgot-password",
+                json={"email": _random_email()},
+            )
+            assert resp.status_code == 200
+        resp = await client.post(
+            settings.API_PATH + "/auth/forgot-password",
+            json={"email": _random_email()},
+        )
+        assert resp.status_code == 429
+        assert resp.json()["detail"]["error"] == "rate_limited"
+
+    async def test_zero_disables_each_half(self, client: AsyncClient, monkeypatch):
+        monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP", 0)
+        monkeypatch.setattr(
+            settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT", 0
+        )
+        email = _random_email()
+        for _ in range(5):
+            resp = await client.post(
+                settings.API_PATH + "/auth/forgot-password", json={"email": email}
+            )
+            assert resp.status_code == 200
+
+
 class TestEmailChangeRateLimit:
     async def _patch(self, client: AsyncClient, user, **body):
         return await client.patch(
