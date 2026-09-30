@@ -1,0 +1,111 @@
+/* The documentation: overview grid, and the three-column doc page (sidebar,
+   text, table of contents) that folds to one column on narrow screens. */
+
+/* -------------------------------------------------------------- overview */
+.docs-index{padding-top:clamp(40px,6vw,80px); padding-bottom:clamp(40px,6vw,80px)}
+.docs-index-head{max-width:52ch}
+.docs-index-head h1{margin-top:10px}
+.docs-index-head p{margin-top:16px; color:var(--muted); font-size:clamp(1.02rem,.95rem + .35vw,1.15rem)}
+.docs-sections{
+  display:grid; gap:18px; margin-top:clamp(28px,4vw,48px);
+  grid-template-columns:repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+}
+.docs-section-card{
+  padding:clamp(20px,3vw,28px);
+  background:var(--surface); border:1px solid var(--line);
+  border-radius:var(--radius-lg); box-shadow:var(--shadow);
+}
+.docs-section-card .num{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:28px; height:28px; border-radius:8px;
+  background:var(--accent-soft); color:var(--accent-ink);
+  font-size:.85rem; font-weight:700;
+}
+.docs-section-card h2{font-size:1.2rem; margin:12px 0 10px}
+.docs-section-card ul{list-style:none; margin:0; padding:0}
+.docs-section-card li{padding:10px 0; border-top:1px solid var(--line)}
+.docs-section-card li:first-child{border-top:0; padding-top:4px}
+.docs-section-card a{font-weight:600; text-decoration:none}
+.docs-section-card a:hover{text-decoration:underline}
+.docs-section-card li span{display:block; color:var(--muted); font-size:.9rem; margin-top:2px}
+
+/* -------------------------------------------------------------- doc page */
+.docs{
+  --docs-side:232px; --docs-toc:200px;
+  max-width:1240px;
+  display:grid; grid-template-columns:minmax(0,1fr); gap:0 clamp(28px,3.5vw,52px);
+  padding-top:clamp(24px,4vw,48px); padding-bottom:clamp(40px,6vw,80px);
+}
+@media (min-width:960px){ .docs{grid-template-columns:var(--docs-side) minmax(0,1fr)} }
+@media (min-width:1220px){ .docs{grid-template-columns:var(--docs-side) minmax(0,1fr) var(--docs-toc)} }
+
+.docs-main{max-width:70ch; min-width:0}
+.docs-main h1{font-size:clamp(1.9rem, 1.3rem + 2vw, 2.6rem); margin:8px 0 .45em}
+.docs-crumb{display:flex; gap:.5em; flex-wrap:wrap; font-size:.86rem; color:var(--muted)}
+.docs-crumb a{color:var(--muted)}
+.docs-lede{font-size:clamp(1.04rem,.98rem + .3vw,1.15rem); color:var(--muted); margin-bottom:1.8em}
+
+/* Sidebar and table of contents: sticky beside the text on wide screens. */
+.docs-side, .docs-toc{display:none}
+@media (min-width:960px){
+  .docs-side{display:block}
+  .docs-menu{display:none}
+}
+@media (min-width:1220px){ .docs-toc{display:block} }
+.docs-side nav, .docs-toc{
+  position:sticky; top:88px;
+  max-height:calc(100vh - 110px); overflow-y:auto;
+  padding-bottom:12px;
+}
+/* A scroll container clips horizontally too, and the current-page highlight
+   reaches .7em left of the text (see `.docs-group a`). Widening the box by
+   that much on the left keeps the highlight whole without moving the text. */
+.docs-side nav{padding-left:.7em; margin-left:-.7em}
+.docs-home{display:block; font-weight:700; color:var(--ink); text-decoration:none; margin-bottom:18px}
+.docs-group{margin-bottom:20px}
+.docs-group-label{
+  display:block; margin-bottom:6px;
+  font-size:.72rem; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted);
+}
+.docs-group ul, .docs-toc ul{list-style:none; margin:0; padding:0}
+.docs-group a{
+  display:block; padding:.34em .7em; margin-left:-.7em; border-radius:8px;
+  color:var(--muted); text-decoration:none; font-size:.94rem;
+}
+.docs-group a:hover{color:var(--ink); background:var(--surface-2)}
+.docs-group a[aria-current="page"]{color:var(--accent-ink); background:var(--accent-soft); font-weight:600}
+.docs-toc a{display:block; padding:.28em 0; color:var(--muted); text-decoration:none; font-size:.88rem; line-height:1.4}
+.docs-toc a:hover{color:var(--ink)}
+
+/* Narrow screens: the same list, folded into a disclosure above the text. */
+.docs-menu{
+  margin-bottom:22px;
+  border:1px solid var(--line); border-radius:var(--radius);
+  background:var(--surface);
+}
+.docs-menu summary{padding:.75em 1em; cursor:pointer; font-weight:600; list-style-position:inside}
+.docs-menu nav{padding:4px 1em 6px 1.7em; border-top:1px solid var(--line)}
+.docs-menu .docs-group:first-child{margin-top:14px}
+
+/* ------------------------------------------------------ previous / next */
+.docs-pager{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:clamp(36px,5vw,56px)}
+@media (max-width:560px){ .docs-pager{grid-template-columns:1fr} }
+.pager-card{
+  display:flex; flex-direction:column; gap:4px;
+  padding:16px 18px; border:1px solid var(--line); border-radius:var(--radius);
+  background:var(--surface); text-decoration:none;
+  transition:border-color .14s ease;
+}
+.pager-card:hover{border-color:var(--accent)}
+.pager-card.next{text-align:right; grid-column:2}
+@media (max-width:560px){ .pager-card.next{grid-column:1} }
+.pager-dir{font-size:.8rem; color:var(--muted)}
+.pager-title{font-weight:600; color:var(--ink)}
+
+.docs-ask{
+  margin-top:28px; padding:18px 20px;
+  border:1px dashed var(--faint); border-radius:var(--radius);
+  font-size:.94rem;
+}
+.docs-ask p{color:var(--muted); margin-top:4px}
+.docs-index .docs-ask{margin-top:clamp(28px,4vw,44px); max-width:70ch}

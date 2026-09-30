@@ -1,0 +1,9 @@
+---
+import Docs from "../../components/Docs.astro";
+import { docStaticPaths } from "../../lib/docs";
+
+export const getStaticPaths = () => docStaticPaths("en");
+
+const { entry } = Astro.props;
+---
+<Docs locale="en" entry={entry} />

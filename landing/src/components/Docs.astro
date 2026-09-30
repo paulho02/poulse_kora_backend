@@ -1,0 +1,151 @@
+---
+/**
+ * The documentation, in any locale: the overview when no `entry` is passed,
+ * otherwise one doc page with sidebar, table of contents and previous/next.
+ * The routes in `src/pages/docs/` and `src/pages/de/docs/` render it; the
+ * pages themselves are Markdown in `src/content/docs/<locale>/`.
+ *
+ * No script: on narrow screens the sidebar collapses into a <details>, and the
+ * wide-screen copy of the same list is a separate element, so each layout gets
+ * a plain, always-working list rather than one element restyled by media query.
+ */
+import { render } from "astro:content";
+
+import { type Locale, ui } from "../i18n";
+import { docSectionLabels } from "../i18n/docs";
+import Base from "../layouts/Base.astro";
+import { type DocEntry, docPath, docSlug, docTranslations, getDocs, groupDocs } from "../lib/docs";
+import { SITE_NAME, SUPPORT_EMAIL } from "../site";
+import "../styles/docs.css";
+
+interface Props {
+  locale: Locale;
+  entry?: DocEntry;
+}
+
+const { locale, entry } = Astro.props;
+const t = ui[locale];
+const labels = docSectionLabels[locale];
+
+const docs = await getDocs(locale);
+const groups = groupDocs(docs);
+const slug = entry ? docSlug(entry) : undefined;
+const translations = await docTranslations(slug);
+
+const rendered = entry ? await render(entry) : undefined;
+const toc = rendered?.headings.filter((h) => h.depth === 2) ?? [];
+
+const index = entry ? docs.findIndex((d) => d.id === entry.id) : -1;
+const prev = index > 0 ? docs[index - 1] : undefined;
+const next = index >= 0 && index < docs.length - 1 ? docs[index + 1] : undefined;
+
+const title = entry ? `${entry.data.title} — ${t.docsTitle} — ${SITE_NAME}` : `${t.docsTitle} — ${SITE_NAME}`;
+const description = entry ? entry.data.description : t.docsDescription;
+---
+<Base title={title} description={description} translations={translations}>
+  {entry && rendered ? (
+    <div class="wrap docs">
+      <details class="docs-menu">
+        <summary>{t.docsMenu}</summary>
+        <nav aria-label={t.docsNavLabel}>
+          {groups.map((g) => (
+            <div class="docs-group">
+              <span class="docs-group-label">{labels[g.section]}</span>
+              <ul>
+                {g.docs.map((d) => (
+                  <li><a href={docPath(locale, docSlug(d))} aria-current={d.id === entry.id ? "page" : undefined}>{d.data.title}</a></li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </nav>
+      </details>
+
+      <aside class="docs-side">
+        <nav aria-label={t.docsNavLabel}>
+          <a class="docs-home" href={docPath(locale)}>{t.docsTitle}</a>
+          {groups.map((g) => (
+            <div class="docs-group">
+              <span class="docs-group-label">{labels[g.section]}</span>
+              <ul>
+                {g.docs.map((d) => (
+                  <li><a href={docPath(locale, docSlug(d))} aria-current={d.id === entry.id ? "page" : undefined}>{d.data.title}</a></li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </nav>
+      </aside>
+
+      <article class="docs-main">
+        <p class="docs-crumb">
+          <a href={docPath(locale)}>{t.docsTitle}</a>
+          <span aria-hidden="true">/</span>
+          <span>{labels[entry.data.section]}</span>
+        </p>
+        <h1>{entry.data.title}</h1>
+        <p class="docs-lede">{entry.data.description}</p>
+        <div class="prose">
+          <rendered.Content />
+        </div>
+
+        <nav class="docs-pager" aria-label={`${t.docsPrev} / ${t.docsNext}`}>
+          {prev ? (
+            <a class="pager-card" href={docPath(locale, docSlug(prev))} rel="prev">
+              <span class="pager-dir">&larr; {t.docsPrev}</span>
+              <span class="pager-title">{prev.data.title}</span>
+            </a>
+          ) : <span></span>}
+          {next && (
+            <a class="pager-card next" href={docPath(locale, docSlug(next))} rel="next">
+              <span class="pager-dir">{t.docsNext} &rarr;</span>
+              <span class="pager-title">{next.data.title}</span>
+            </a>
+          )}
+        </nav>
+
+        <div class="docs-ask">
+          <b>{t.docsQuestion}</b>
+          <p>{t.docsQuestionBody} <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a></p>
+        </div>
+      </article>
+
+      {toc.length > 1 && (
+        <aside class="docs-toc">
+          <span class="docs-group-label">{t.docsOnThisPage}</span>
+          <ul>
+            {toc.map((h) => <li><a href={`#${h.slug}`}>{h.text}</a></li>)}
+          </ul>
+        </aside>
+      )}
+    </div>
+  ) : (
+    <div class="wrap docs-index">
+      <div class="docs-index-head">
+        <span class="eyebrow">{SITE_NAME}</span>
+        <h1>{t.docsTitle}</h1>
+        <p>{t.docsIntro}</p>
+      </div>
+      <div class="docs-sections">
+        {groups.map((g, i) => (
+          <section class="docs-section-card">
+            <span class="num">{i + 1}</span>
+            <h2>{labels[g.section]}</h2>
+            <ul>
+              {g.docs.map((d) => (
+                <li>
+                  <a href={docPath(locale, docSlug(d))}>{d.data.title}</a>
+                  <span>{d.data.description}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
+      <div class="docs-ask">
+        <b>{t.docsQuestion}</b>
+        <p>{t.docsQuestionBody} <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a></p>
+      </div>
+    </div>
+  )}
+</Base>

@@ -77,6 +77,23 @@ section{padding:clamp(54px,7vw,96px) 0}
 .tag.d{background:rgba(186,26,26,.14); color:var(--danger)}
 .tag i{width:7px; height:7px; border-radius:50%; background:currentColor; display:block; flex:none}
 
+/* --------------------------------------------------------- read on */
+.more{display:grid; gap:20px; grid-template-columns:1fr; margin-top:14px}
+@media (min-width:780px){ .more{grid-template-columns:1fr 1fr} }
+.more-card{
+  display:flex; flex-direction:column;
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-lg);
+  padding:clamp(20px,3vw,30px); box-shadow:var(--shadow);
+  color:var(--ink); text-decoration:none;
+  transition:border-color .14s ease;
+}
+.more-card:hover{border-color:var(--accent)}
+.more-card h3{margin-bottom:8px}
+.more-card p{color:var(--muted); font-size:.95rem; flex:1}
+.more-cta{margin-top:16px; font-weight:600; color:var(--accent-ink)}
+.more-cta .arrow{display:inline-block; transition:transform .16s ease}
+.more-card:hover .more-cta .arrow{transform:translateX(3px)}
+
 /* ------------------------------------------------------------------ beta */
 .beta{
   display:grid; gap:20px; grid-template-columns:1fr;

@@ -384,6 +384,25 @@ const translations = Object.fromEntries(LOCALES.map((l) => [l, localePath(l)]));
   </div>
 </section>
 
+<!-- ---------------------------------------------------- vision + docs -->
+<section id="more" style="padding-top:0">
+  <div class="wrap">
+    <span class="eyebrow reveal">{t.moreEyebrow}</span>
+    <div class="more">
+      <a class="more-card reveal" href={localePath(locale, "/vision/")}>
+        <h3>{t.visionHeading}</h3>
+        <p>{t.visionBody}</p>
+        <span class="more-cta">{t.visionCta} <span class="arrow" aria-hidden="true">&rarr;</span></span>
+      </a>
+      <a class="more-card reveal" href={localePath(locale, "/docs/")}>
+        <h3>{t.docsHeading}</h3>
+        <p>{t.docsBody}</p>
+        <span class="more-cta">{t.docsCta} <span class="arrow" aria-hidden="true">&rarr;</span></span>
+      </a>
+    </div>
+  </div>
+</section>
+
 <!-- -------------------------------------------------------------- beta -->
 <section id="beta" style="padding-top:0">
   <div class="wrap">

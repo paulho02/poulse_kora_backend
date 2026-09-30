@@ -83,6 +83,9 @@ const legalPages = (
 ).sort((a, b) => a.data.title.localeCompare(b.data.title, locale));
 
 const year = new Date().getFullYear();
+
+// The header link for the section this page belongs to is marked current.
+const isSection = (path: string) => Astro.url.pathname.startsWith(localePath(locale, path));
 ---
 <!doctype html>
 <html lang={locale}>
@@ -153,7 +156,8 @@ const year = new Date().getFullYear();
     <div class="spacer"></div>
     <nav class="nav-links" aria-label={t.navLabel}>
       <a href={localePath(locale, "/#how")}>{t.navHow}</a>
-      <a href={localePath(locale, "/#beta")}>{t.navBeta}</a>
+      <a href={localePath(locale, "/vision/")} aria-current={isSection("/vision/") ? "page" : undefined}>{t.navVision}</a>
+      <a href={localePath(locale, "/docs/")} aria-current={isSection("/docs/") ? "page" : undefined}>{t.navDocs}</a>
       <a href={localePath(locale, "/#contact")}>{t.navContact}</a>
     </nav>
     {switchTo.map((s) => (
@@ -184,6 +188,10 @@ const year = new Date().getFullYear();
       <span>{SITE_NAME}</span>
     </a>
     <span class="spacer"></span>
+    <a href={localePath(locale, "/vision/")}>{t.navVision}</a>
+    <span class="sep">&middot;</span>
+    <a href={localePath(locale, "/docs/")}>{t.navDocs}</a>
+    <span class="sep">&middot;</span>
     <span>&copy; {year} {SITE_NAME}</span>
     <span class="sep">&middot;</span>
     <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>

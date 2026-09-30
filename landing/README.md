@@ -21,6 +21,12 @@ docker compose -f docker-compose.yml up -d --build landing   # the production im
 After changing `package.json`, run `docker compose up -d --build landing` so the image's
 `node_modules` is reinstalled; the source is bind-mounted, `node_modules` is not.
 
+After adding a new collection to `src/content.config.ts`, run `docker compose restart landing`:
+the dev server hot-reloads files in collections it already knows, but only discovers new
+collections at startup (until then it warns that the collection "does not exist or is empty").
+Avoid running `npm run build` on the host while the container is up: both write the same
+bind-mounted `.astro/` folder and the dev server can fail with `EIO`.
+
 ## Layout
 
 | Path | What it is |
@@ -29,10 +35,13 @@ After changing `package.json`, run `docker compose up -d --build landing` so the
 | `src/layouts/Base.astro` | Everything in `<head>` (canonical, Open Graph, icons, JSON-LD, hreflang), header, footer, the page script. |
 | `src/pages/index.astro` | The home page and its JSON-LD. |
 | `src/pages/[...slug].astro` | Renders every Markdown file in `src/content/pages/`. |
-| `src/content/pages/*.md` | Text pages. The file path is the URL (`imprint.md` → `/imprint/`). |
+| `src/content/pages/*.md` | Text pages, including the vision page. The file path is the URL (`imprint.md` → `/imprint/`). |
+| `src/content/docs/<locale>/*.md` | The user documentation, one file per page (see "Documentation" below). |
+| `src/components/Docs.astro` | The docs overview and doc-page layout (sidebar, contents, previous/next). |
+| `src/lib/docs.ts` | Docs ordering, URLs and language pairing. |
 | `src/pages/robots.txt.ts` | `robots.txt`, pointing at the sitemap. |
 | `src/pages/404.astro` | The not-found page (`noindex`, served with status 404). |
-| `src/styles/` | `global.css` (tokens, header, footer, prose) and `home.css` (hero + diagrams). |
+| `src/styles/` | `global.css` (tokens, header, footer, prose), `home.css` (hero + diagrams), `docs.css`. |
 | `public/` | Copied verbatim: icons, `og.png`. |
 | `Dockerfile`, `Caddyfile` | The production image. |
 
@@ -44,15 +53,29 @@ Drafts and the 404 page are left out.
 - **A text page** (FAQ, about, press): add `src/content/pages/<name>.md` with `title` and
   `description` in the frontmatter. It's built, gets a canonical URL and appears in the sitemap.
   `noindex: true` keeps it out of search results. `draft: true` doesn't build it at all.
-  `legal: true` also lists it in the footer.
+  `legal: true` also lists it in the footer. `eyebrow` and `lede` add a small label above the
+  title and a larger intro paragraph below it (the vision page uses both).
 - **A page with its own design**: add `src/pages/<name>.astro` and wrap it in `<Base title=…
   description=…>`.
 - **Translations**: see "Languages" below.
-- **Docs / tutorials**: add [Starlight](https://starlight.astro.build)
-  (`npx astro add starlight`), and give it a route prefix such as `/docs/`. It brings sidebar,
-  search and versioned Markdown content, and shares this build, sitemap and domain.
+- **A doc page**: see "Documentation" below.
 
 Every page must have a unique `title` and `description`: they are what a search result shows.
+
+## Documentation
+
+`/docs/` (English) and `/de/docs/` (German) are built from `src/content/docs/en/*.md` and
+`src/content/docs/de/*.md`. The file name is the slug, and a page and its translation share it:
+`en/trust.md` is `/docs/trust/`, `de/trust.md` is `/de/docs/trust/`, and that shared slug is what
+pairs them for hreflang and the language switch.
+
+Frontmatter: `title`, `description` (shown under the title and in the overview), `section` (the
+sidebar group) and `order` (position within the group). The groups and their labels are
+`src/i18n/docs.ts`. Every `##` heading becomes an entry in the page's "On this page" list.
+
+Content is written against what the app and backend actually do (limits, prices, trust bands).
+When one of those changes in `backend/app/core/config.py` or the app's `.arb` wording, the doc
+page that states it should change with it; the numbers are spelled out rather than generated.
 
 ## Languages
 

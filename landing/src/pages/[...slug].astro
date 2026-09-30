@@ -36,8 +36,10 @@ const locale = contentLocale(page.id);
   noindex={page.data.noindex}
   translations={translations}
 >
-  <article class="prose">
+  <article class="page">
+    {page.data.eyebrow && <span class="eyebrow">{page.data.eyebrow}</span>}
     <h1>{page.data.title}</h1>
+    {page.data.lede && <p class="page-lede">{page.data.lede}</p>}
     {page.data.updated && (
       <p class="updated">
         {ui[locale].lastUpdated}:
@@ -46,6 +48,8 @@ const locale = contentLocale(page.id);
         </time>
       </p>
     )}
-    <Content />
+    <div class="prose">
+      <Content />
+    </div>
   </article>
 </Base>
