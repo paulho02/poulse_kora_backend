@@ -9631,10 +9631,10 @@ quick-lru@^5.1.1:
   resolved "https://registry.yarnpkg.com/quick-lru/-/quick-lru-5.1.1.tgz#366493e6b3e42a3a6885e2e99d18f80fb7a8c932"
   integrity sha512-WuyALRjWPDGtt/wzJiadO5AXY+8hZ80hVpe6MyivgraREW751X3SbhRvG3eLKOYN+8VEvqLcf3wdnt44Z4S4SA==
 
-ra-core@^4.13.1, ra-core@^4.13.4:
-  version "4.13.4"
-  resolved "https://registry.yarnpkg.com/ra-core/-/ra-core-4.13.4.tgz#af4088a40d84a06ed51014b28d50aec2ae68e65b"
-  integrity sha512-WEQLGAavmHsDo8MFNReJLo3oOb+XTAXjeIj1J2agvNhIs+NThj/vj6jB70PWAD2FU4mr2sM4UG5p9ao/whoIrg==
+ra-core@^4.13.1, ra-core@^4.16.20:
+  version "4.16.20"
+  resolved "https://registry.yarnpkg.com/ra-core/-/ra-core-4.16.20.tgz#ad11785c706f8256ec0e9d371be2e13c8ca40e80"
+  integrity sha512-+xJSVBD3zTG9Zxy042SpAWsozuIKCNvN/cZeUr5lINHY3/zOcZ2bbJ+Ce7IMcKnlvxS4g3tvqq4HuTQpItFEcg==
   dependencies:
     clsx "^1.1.1"
     date-fns "^2.19.0"
@@ -9662,25 +9662,25 @@ ra-data-simple-rest@^4.13.1:
   dependencies:
     query-string "^7.1.1"
 
-ra-i18n-polyglot@^4.13.4:
-  version "4.13.4"
-  resolved "https://registry.yarnpkg.com/ra-i18n-polyglot/-/ra-i18n-polyglot-4.13.4.tgz#9bf80b243c072003e8e22e83fe4de0cdeea11691"
-  integrity sha512-G8UGZGBRHyjtGMkeQeOCILTVOVjgB6hfFnLuXYKj/wrmR0MXUHlGPVUfPU1U2yjCKYDGwIBnIDM7OOhkzKVEdA==
+ra-i18n-polyglot@^4.16.20:
+  version "4.16.20"
+  resolved "https://registry.yarnpkg.com/ra-i18n-polyglot/-/ra-i18n-polyglot-4.16.20.tgz#9d0e3211b7163c83d6a9acc281cb29642d6b64ec"
+  integrity sha512-O8++vWMMUnPDSChcHDjv6teIF14Gnr0rV9Phq0168X4RhjIbxyv3T0QpGKyOzXykCsCj+2pGrK/8Gj8fGJCSug==
   dependencies:
     node-polyglot "^2.2.2"
-    ra-core "^4.13.4"
+    ra-core "^4.16.20"
 
-ra-language-english@^4.13.4:
-  version "4.13.4"
-  resolved "https://registry.yarnpkg.com/ra-language-english/-/ra-language-english-4.13.4.tgz#bf79cdfe15c47e96efcf656bc0b9882862a7d779"
-  integrity sha512-pYbC33RR1UAn8fSnk0hJMq3Z8KHAI7tKF6AAfKxi3doGsakrv5rG/zs+Ci2oXpLqGDnJkgXM+bejlpy8fHPDQg==
+ra-language-english@^4.16.20:
+  version "4.16.20"
+  resolved "https://registry.yarnpkg.com/ra-language-english/-/ra-language-english-4.16.20.tgz#0dc8f646fb4fc4daaddf4c1be1bb74a3d63c3f91"
+  integrity sha512-Zr4uq3u86uz3i3R2ztFt9eF0+f8MYCkACJbvgTJlcXdnkQoJc/05SrwN9loFI8XAzC+Z1klcQM6jjKzq0T4Umg==
   dependencies:
-    ra-core "^4.13.4"
+    ra-core "^4.16.20"
 
-ra-ui-materialui@^4.13.4:
-  version "4.13.4"
-  resolved "https://registry.yarnpkg.com/ra-ui-materialui/-/ra-ui-materialui-4.13.4.tgz#cec1036b01f4a32db00377228eb3bdcbbf5c5b26"
-  integrity sha512-aO9h3A+CyMOGiRZBS4AUk7kobvxrB+/r/ZDvdeMdzgHqgZVhe5UC67nkePw9zvoKLxod4aAXhjfHColyzqCSYg==
+ra-ui-materialui@^4.16.20:
+  version "4.16.20"
+  resolved "https://registry.yarnpkg.com/ra-ui-materialui/-/ra-ui-materialui-4.16.20.tgz#d783f135a26a42eac1018f080886697faa518b09"
+  integrity sha512-i2DQ2219YTbjhXfBjkMIKmWiqZRQDyW+yMAgehfSjVbVD17QhoWG3fib4ILA58ADe4trLhFNg4WPkO3y8q37dw==
   dependencies:
     autosuggest-highlight "^3.1.1"
     clsx "^1.1.1"
@@ -9726,20 +9726,20 @@ raw-body@2.4.3:
     iconv-lite "0.4.24"
     unpipe "1.0.0"
 
-react-admin@^4.13.4:
-  version "4.13.4"
-  resolved "https://registry.yarnpkg.com/react-admin/-/react-admin-4.13.4.tgz#0f26085dc5ad33e2c7eeb6c5b41d5671d8fb5514"
-  integrity sha512-+hGtrAqw3AQVOuKfQC90NrSy51+k01SH5TOnvpVTHYOIypWs1pQUSRuhffe3WcrvFFIC6VmJQ7DosZXJ54bSeA==
+react-admin@^4.16.20:
+  version "4.16.20"
+  resolved "https://registry.yarnpkg.com/react-admin/-/react-admin-4.16.20.tgz#50cfc98ac1c135d4bfb546ba0ad350f99c566c24"
+  integrity sha512-9QLc5uTI669dGceC+VT08LG2vytMMSpvwg2lJJS4wqJJykQKlZXJelpOLAGWlggEuAXtyC2nMG8S6sgl7+hBDQ==
   dependencies:
     "@emotion/react" "^11.4.1"
     "@emotion/styled" "^11.3.0"
     "@mui/icons-material" "^5.0.1"
     "@mui/material" "^5.0.2"
     history "^5.1.0"
-    ra-core "^4.13.4"
-    ra-i18n-polyglot "^4.13.4"
-    ra-language-english "^4.13.4"
-    ra-ui-materialui "^4.13.4"
+    ra-core "^4.16.20"
+    ra-i18n-polyglot "^4.16.20"
+    ra-language-english "^4.16.20"
+    ra-ui-materialui "^4.16.20"
     react-hook-form "^7.43.9"
     react-router "^6.1.0"
     react-router-dom "^6.1.0"
