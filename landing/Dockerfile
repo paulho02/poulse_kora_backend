@@ -2,7 +2,7 @@
 
 # Dependencies only - also the image docker-compose.override.yml runs the dev
 # server in, with the source bind-mounted over /app.
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
