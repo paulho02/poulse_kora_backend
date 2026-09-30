@@ -1,31 +1,167 @@
+# Dependabot version updates.
+#
+# One rule for every entry: once a week, against main, at most ONE open PR per
+# entry, with every update for that entry grouped into it. While that PR sits
+# unmerged, next week's run refreshes it in place (or closes it as superseded)
+# instead of opening a second one - PRs never stack.
+#
+# Every entry is its own directory on purpose: open-pull-requests-limit counts
+# per entry, so a `directories:` list sharing a limit of 1 could starve one of
+# its directories behind the other's unmerged PR.
+#
+# Security updates are separate: they ignore open-pull-requests-limit and
+# schedule and are raised as soon as an advisory lands (enable them under
+# Settings -> Code security). Each entry groups them too, so an advisory batch
+# is one PR, not one per package.
+#
+# cooldown holds a freshly published release back a few days before proposing
+# it - most hijacked-package releases are yanked within that window. It never
+# delays a security update.
+
 version: 2
+
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions:
+        patterns: ["*"]
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  # Poetry: pyproject.toml + poetry.lock are handled by the pip ecosystem.
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 5
+    commit-message:
+      prefix: "deps(backend)"
+    groups:
+      backend:
+        patterns: ["*"]
+      backend-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: "npm"
-    directory: "/frontend/"
+    directory: "/landing"
+    target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 5
+    commit-message:
+      prefix: "deps(landing)"
+    groups:
+      landing:
+        patterns: ["*"]
+      landing-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
-  - package-ecosystem: "docker"
-    directory: "/frontend/"
+  # /frontend (the template's React Admin app) is deliberately NOT watched: it
+  # is disabled, not deleted (CLAUDE.md), and its PRs would be pure noise. If it
+  # is ever revived, add an npm and a docker entry for /frontend here.
+
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps(pre-commit)"
+    groups:
+      pre-commit:
+        patterns: ["*"]
 
-  - package-ecosystem: "docker"
-    directory: "/backend/"
-    schedule:
-      interval: "daily"
-
+  # Base images, one entry per Dockerfile directory.
   - package-ecosystem: "docker"
     directory: "/"
+    target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps(docker)"
+    groups:
+      docker-root:
+        patterns: ["*"]
 
-  - package-ecosystem: "pip"
-    directory: "/backend/"
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    target-branch: "main"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps(docker)"
+    groups:
+      docker-backend:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker"
+    directory: "/landing"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps(docker)"
+    groups:
+      docker-landing:
+        patterns: ["*"]
+
+  # docker-compose.yml / .override.yml / .ci.yml service images.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps(compose)"
+    groups:
+      compose:
+        patterns: ["*"]
+    ignore:
+      # A Postgres major can't open the previous major's data directory - it
+      # needs a dump/restore (or pg_upgrade), so it is never a drive-by bump.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
