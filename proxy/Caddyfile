@@ -1,0 +1,60 @@
+# Password gate in front of a non-public environment: one public domain that
+# serves the Flutter web app and, under /api and /docs, the backend - both
+# reached over Railway's private network. See proxy/README.md.
+#
+# GATE_USER, GATE_PASSWORD_HASH and GATE_COOKIE are exported by entrypoint.sh;
+# BACKEND_UPSTREAM and APP_UPSTREAM are Railway variables.
+{
+	admin off
+	persist_config off
+	auto_https off
+	log {
+		format json
+	}
+}
+
+:{$PORT:8080} {
+	# Railway's healthcheck. Says nothing about what is behind the gate.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	# The gate is a cookie, not the Basic credentials themselves: the app's own
+	# Authorization header carries its JWT, so the two cannot share that header.
+	@locked not header_regexp Cookie "(?:^|;\s*)peerkola_gate={$GATE_COOKIE}(?:;|$)"
+
+	# A background API call without the cookie gets a plain 401 in the backend's
+	# error shape. A Basic challenge here would pop a browser dialog for an XHR.
+	@locked_api {
+		not header_regexp Cookie "(?:^|;\s*)peerkola_gate={$GATE_COOKIE}(?:;|$)"
+		path /api/*
+	}
+
+	# Browsers replay cached Basic credentials on same-origin requests that set
+	# no Authorization of their own (login, register); the backend must only
+	# ever see the app's bearer token.
+	@basic_credentials header_regexp Authorization "^(?i)basic\s"
+
+	@backend path /api/* /docs /docs/*
+
+	route {
+		respond @locked_api `{"detail":{"error":"gate_locked"}}` 401
+
+		basic_auth @locked {
+			{$GATE_USER} {$GATE_PASSWORD_HASH}
+		}
+		header @locked Set-Cookie "peerkola_gate={$GATE_COOKIE}; Path=/; Max-Age=2592000; Secure; HttpOnly; SameSite=Lax"
+
+		request_header @basic_credentials -Authorization
+
+		reverse_proxy @backend {$BACKEND_UPSTREAM} {
+			# The backend takes the caller's address from the *rightmost*
+			# X-Forwarded-For entry (request_logging.caller_address), which
+			# Railway's edge appends. Left to itself Caddy would replace the
+			# header with its own peer - the edge - and every caller would
+			# share one rate-limit budget.
+			header_up X-Forwarded-For {header.X-Forwarded-For}
+		}
+		reverse_proxy {$APP_UPSTREAM}
+	}
+}

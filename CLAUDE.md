@@ -10,7 +10,8 @@ is deliberately kept; everything inside them says Peerkola.
 
 FastAPI backend (`backend/`), generated from the `fastapi-starter` template. Its client is the
 Flutter app in the sibling repo `poulse_kora_app` (see that repo's CLAUDE.md). Also here:
-`landing/` (Astro static site for peerkola.com — see its README), `docs/` (analysis notes and GDPR/hosting research — prose, not
+`landing/` (Astro static site for peerkola.com — see its README), `proxy/` (Caddy password gate
+that fronts a whole non-public Railway environment — see its README), `docs/` (analysis notes and GDPR/hosting research — prose, not
 code), `RAILWAY.md` (deployment), `env-template`.
 
 The template's React Admin frontend (`frontend/`) is **not used** and is disabled rather than
